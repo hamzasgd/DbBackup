@@ -50,6 +50,8 @@ api.interceptors.response.use(
         return api(original)
       } catch {
         useAuthStore.getState().logout()
+        // Dynamically import to avoid circular dependency
+        import('../App').then(({ queryClient }) => queryClient.clear())
         window.location.href = '/login'
       }
     }

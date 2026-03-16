@@ -13,7 +13,7 @@ import SchedulesPage from './pages/schedules/SchedulesPage'
 import SettingsPage from './pages/settings/SettingsPage'
 import MigrationsPage from './pages/migrations/MigrationsPage'
 
-const queryClient = new QueryClient({
+export const queryClient = new QueryClient({
   defaultOptions: {
     queries: { staleTime: 30_000, retry: 1 },
   },

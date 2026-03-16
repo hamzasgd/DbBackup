@@ -8,6 +8,7 @@ import { useAuthStore } from '../../store/auth.store'
 import { authApi } from '../../services/auth.service'
 import { toast } from '../../store/toast.store'
 import { cn } from '../../lib/utils'
+import { queryClient } from '../../App'
 
 const navItems = [
   { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
@@ -40,6 +41,7 @@ export function Sidebar() {
     try {
       await authApi.logout()
     } catch { /* ignore */ }
+    queryClient.clear()
     logout()
     navigate('/login')
     toast.success('Logged out successfully')

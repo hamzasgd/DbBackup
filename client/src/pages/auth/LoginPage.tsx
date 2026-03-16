@@ -8,6 +8,7 @@ import { useAuthStore } from '../../store/auth.store'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
+import { queryClient } from '../../App'
 
 const schema = z.object({
   email: z.string().email('Enter a valid email'),
@@ -26,6 +27,7 @@ export default function LoginPage() {
     try {
       const res = await authApi.login(data)
       const { user, accessToken, refreshToken } = res.data.data
+      queryClient.clear()
       setAuth(user, accessToken, refreshToken)
       toast.success(`Welcome back, ${user.name}!`)
       navigate('/dashboard')
