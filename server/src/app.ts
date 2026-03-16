@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
+import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 
 import { errorHandler } from './middleware/errorHandler';
@@ -72,6 +73,15 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/migrations', migrationRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/storage', storageRoutes);
+
+// Serve React frontend in production
+if (process.env.NODE_ENV === 'production') {
+  const clientPath = path.join(__dirname, '../../client/dist');
+  app.use(express.static(clientPath));
+  app.get(/^(?!\/api\/).*/, (_req, res) => {
+    res.sendFile(path.join(clientPath, 'index.html'));
+  });
+}
 
 // Error handling
 app.use(notFound);
