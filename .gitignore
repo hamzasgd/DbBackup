@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Build output
+dist/
+build/
+
+# Logs
+server/logs/*.log
+
+# Backups (user data)
+server/backups/*.sql*
+server/backups/*.dump
+server/backups/*.tar
+server/backups/**/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Prisma
+server/prisma/*.db
+
+# OS
+Thumbs.db

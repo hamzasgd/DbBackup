@@ -1,0 +1,243 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum DatabaseType {
+  MYSQL
+  MARIADB
+  POSTGRESQL
+}
+
+enum BackupStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum BackupFormat {
+  COMPRESSED_SQL   // .sql.gz  — MySQL, MariaDB, PostgreSQL
+  PLAIN_SQL        // .sql     — MySQL, MariaDB, PostgreSQL
+  CUSTOM           // .dump    — PostgreSQL only (pg_dump -Fc)
+  DIRECTORY        // folder   — PostgreSQL only (pg_dump -Fd, parallel)
+  TAR              // .tar     — PostgreSQL only (pg_dump -Ft)
+}
+
+enum MigrationStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum StorageProvider {
+  LOCAL
+  S3
+}
+
+enum NotificationEvent {
+  BACKUP_COMPLETED
+  BACKUP_FAILED
+  MIGRATION_COMPLETED
+  MIGRATION_FAILED
+  VERIFICATION_FAILED
+  RETENTION_CLEANUP
+}
+
+enum ScheduleFrequency {
+  HOURLY
+  DAILY
+  WEEKLY
+  MONTHLY
+  CUSTOM
+}
+
+model User {
+  id                   String                @id @default(uuid())
+  email                String                @unique
+  name                 String
+  passwordHash         String
+  isActive             Boolean               @default(true)
+  connections          Connection[]
+  auditLogs            AuditLog[]
+  refreshTokens        RefreshToken[]
+  notificationSettings NotificationSettings?
+  storageSettings      StorageSettings?
+  createdAt            DateTime              @default(now())
+  updatedAt            DateTime              @updatedAt
+
+  @@map("users")
+}
+
+model RefreshToken {
+  id        String   @id @default(uuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@map("refresh_tokens")
+}
+
+model Connection {
+  id            String       @id @default(uuid())
+  name          String
+  type          DatabaseType
+  host          String
+  port          Int
+  username      String
+  password      String
+  database      String
+  sslEnabled    Boolean      @default(false)
+  sslCa         String?
+  sslCert       String?
+  sslKey        String?
+
+  // SSH Tunnel
+  sshEnabled    Boolean      @default(false)
+  sshHost       String?
+  sshPort       Int?         @default(22)
+  sshUsername   String?
+  sshPrivateKey String?
+  sshPassphrase String?
+
+  userId        String
+  user          User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backups       Backup[]
+  schedules     Schedule[]
+  migrationsAsSource Migration[] @relation("MigrationSource")
+  migrationsAsTarget Migration[] @relation("MigrationTarget")
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+
+  @@map("connections")
+}
+
+model Backup {
+  id            String       @id @default(uuid())
+  connectionId  String
+  connection    Connection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  fileName      String
+  filePath      String
+  fileSize      BigInt       @default(0)
+  dbType        DatabaseType
+  dbName        String
+  status        BackupStatus @default(PENDING)
+  format        BackupFormat @default(COMPRESSED_SQL)
+  isCompressed  Boolean      @default(true)
+  snapshotName  String?
+  notes         String?
+  error         String?
+  progress      Int          @default(0)
+  checksum      String?
+  verified      Boolean      @default(false)
+  verifiedAt    DateTime?
+  storageType   StorageProvider @default(LOCAL)
+  storageKey    String?
+  startedAt     DateTime?
+  completedAt   DateTime?
+  createdAt     DateTime     @default(now())
+
+  @@map("backups")
+}
+
+model Schedule {
+  id             String            @id @default(uuid())
+  connectionId   String
+  connection     Connection        @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  name           String
+  frequency      ScheduleFrequency
+  cronExpression String
+  isActive       Boolean           @default(true)
+  retentionDays  Int               @default(30)
+  retentionCount Int?
+  lastRunAt      DateTime?
+  nextRunAt      DateTime?
+  createdAt      DateTime          @default(now())
+  updatedAt      DateTime          @updatedAt
+
+  @@map("schedules")
+}
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action    String
+  resource  String
+  details   Json?
+  ipAddress String?
+  createdAt DateTime @default(now())
+
+  @@map("audit_logs")
+}
+
+model Migration {
+  id                   String          @id @default(uuid())
+  sourceConnectionId   String
+  sourceConnection     Connection      @relation("MigrationSource", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  targetConnectionId   String
+  targetConnection     Connection      @relation("MigrationTarget", fields: [targetConnectionId], references: [id], onDelete: Cascade)
+  status               MigrationStatus @default(PENDING)
+  tableCount           Int             @default(0)
+  tablesCompleted      Int             @default(0)
+  rowsMigrated         BigInt          @default(0)
+  currentTable         String?
+  progress             Int             @default(0)
+  notes                String?
+  error                String?
+  startedAt            DateTime?
+  completedAt          DateTime?
+  createdAt            DateTime        @default(now())
+
+  @@map("migrations")
+}
+
+model NotificationSettings {
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailEnabled      Boolean  @default(false)
+  emailAddress      String?
+  smtpHost          String?
+  smtpPort          Int?     @default(587)
+  smtpUser          String?
+  smtpPass          String?
+  smtpSecure        Boolean  @default(false)
+  slackEnabled      Boolean  @default(false)
+  slackWebhookUrl   String?
+  notifyOnSuccess   Boolean  @default(false)
+  notifyOnFailure   Boolean  @default(true)
+  notifyOnRetention Boolean  @default(false)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  @@map("notification_settings")
+}
+
+model StorageSettings {
+  id              String          @id @default(uuid())
+  userId          String          @unique
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        StorageProvider @default(LOCAL)
+  bucket          String?
+  region          String?
+  accessKeyId     String?
+  secretAccessKey String?
+  endpoint        String?
+  prefix          String?
+  deleteLocal     Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("storage_settings")
+}
