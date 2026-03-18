@@ -157,23 +157,34 @@ export class MySQLEngine extends BaseEngine {
   }
 
   async listDatabases(): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn('mysql', [
-        ...this.getArgs(),
-        '-e', 'SHOW DATABASES;',
-        '--batch', '--skip-column-names',
-      ]);
+    let tunnel: SSHTunnel | null = null;
+    let conn: mysql2.Connection | null = null;
+    try {
+      if (this.config.sshEnabled) {
+        tunnel = new SSHTunnel(this.config);
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
+      }
+      
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
 
-      let output = '';
-      proc.stdout.on('data', (d) => output += d.toString());
-      proc.on('close', (code) => {
-        if (code === 0) {
-          resolve(output.trim().split('\n').filter(Boolean));
-        } else {
-          reject(new Error('Failed to list databases'));
-        }
+      conn = await mysql2.createConnection({
+        host: host,
+        port: port,
+        user: this.config.username,
+        password: this.config.password,
+        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
       });
-    });
+
+      const [rows] = await conn.query<mysql2.RowDataPacket[]>('SHOW DATABASES;');
+      return rows.map((r: mysql2.RowDataPacket) => r.Database);
+    } catch (e: any) {
+      throw new Error(`Failed to list databases: ${e.message}`);
+    } finally {
+      if (conn) await conn.end();
+      tunnel?.close();
+    }
   }
 
   async getDbInfo(): Promise<DbInfo> {

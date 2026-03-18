@@ -1,6 +1,8 @@
 import mysql2 from 'mysql2/promise';
 import { Pool, PoolClient } from 'pg';
 import { ConnectionConfig } from './engines/base.engine';
+import { spawn } from 'child_process';
+import { SSHTunnel } from './ssh.service';
 
 export interface MigrationOptions {
   tables?: string[];   // if omitted, migrate all tables
@@ -183,150 +185,217 @@ function escapeValue(val: unknown): string {
   return `'${String(val).replace(/'/g, "''")}'`;
 }
 
+// ─── Stream helpers ──────────────────────────────────────────────────────────
+
+async function getEngineHostPort(config: ConnectionConfig): Promise<{ host: string; port: number, tunnel: SSHTunnel | null }> {
+  let tunnel: SSHTunnel | null = null;
+  let host = config.host;
+  let port = config.port;
+
+  if (config.sshEnabled) {
+    tunnel = new SSHTunnel(config);
+    port = await tunnel.connect();
+    host = '127.0.0.1';
+  }
+  return { host, port, tunnel };
+}
+
 // ─── Main migration functions ─────────────────────────────────────────────────
 
 export async function migrateMySQL2MySQL(
   src: ConnectionConfig, dst: ConnectionConfig, opts: MigrationOptions
 ): Promise<{ rowsMigrated: number }> {
-  const srcConn = await mysql2.createConnection({ host: src.host, port: src.port, user: src.username, password: src.password, database: src.database, ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined });
-  const dstConn = await mysql2.createConnection({ host: dst.host, port: dst.port, user: dst.username, password: dst.password, database: dst.database, ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined });
+  
+  const srcRef = await getEngineHostPort(src);
+  const dstRef = await getEngineHostPort(dst);
 
-  let rowsMigrated = 0;
-  const batchSize = opts.batchSize ?? 500;
   try {
-    let tables = opts.tables;
-    if (!tables) {
-      const [rows] = await srcConn.query<mysql2.RowDataPacket[]>(`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'`, [src.database]);
-      tables = rows.map((r) => r.TABLE_NAME as string);
-    }
+    return await new Promise((resolve, reject) => {
+      const srcArgs = [
+        `-h${srcRef.host}`,
+        `-P${srcRef.port}`,
+        `-u${src.username}`,
+        src.password ? `-p${src.password}` : '',
+        '--single-transaction',
+        '--routines',
+        '--triggers',
+        '--add-drop-table',
+        src.database,
+      ].filter(Boolean);
 
-    const metas = await getMySQLTableMeta(srcConn, src.database, tables);
-    for (let i = 0; i < metas.length; i++) {
-      const meta = metas[i];
-      const ddl = buildMySQLCreateTable(meta, 'MYSQL');
-      await dstConn.query(ddl);
+      const dstArgs = [
+        `-h${dstRef.host}`,
+        `-P${dstRef.port}`,
+        `-u${dst.username}`,
+        dst.password ? `-p${dst.password}` : '',
+        dst.database,
+      ].filter(Boolean);
 
-      let offset = 0;
-      while (true) {
-        const [rows] = await srcConn.query<mysql2.RowDataPacket[]>(`SELECT * FROM \`${meta.name}\` LIMIT ${batchSize} OFFSET ${offset}`);
-        if (rows.length === 0) break;
-        const cols = meta.columns.map((c) => `\`${c.name}\``).join(', ');
-        const values = rows.map((r) => `(${Object.values(r).map(escapeValue).join(', ')})`).join(',\n');
-        await dstConn.query(`INSERT IGNORE INTO \`${meta.name}\` (${cols}) VALUES ${values}`);
-        rowsMigrated += rows.length;
-        offset += batchSize;
-        opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + offset / 1e6) / metas.length) * 100) });
-        if (rows.length < batchSize) break;
-      }
-      opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i + 1, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + 1) / metas.length) * 100) });
-    }
+      opts.onProgress?.({ currentTable: 'Starting dump pipe...', tablesCompleted: 0, tableCount: 1, rowsMigrated: 0, progress: 10 });
+      
+      const dumpCmd = src.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
+      const dump = spawn(dumpCmd, srcArgs);
+      
+      const restoreCmd = dst.type === 'MARIADB' ? 'mariadb' : 'mysql';
+      const restore = spawn(restoreCmd, dstArgs);
+
+      let dumpError = '';
+      let restoreError = '';
+
+      dump.stderr.on('data', (d) => {
+        const msg = d.toString();
+        if (!msg.includes('Warning')) dumpError += msg;
+      });
+
+      restore.stderr.on('data', (d) => {
+        const msg = d.toString();
+        if (!msg.includes('Warning')) restoreError += msg;
+      });
+
+      dump.stdout.pipe(restore.stdin);
+
+      restore.on('close', (code) => {
+        if (code === 0) {
+          opts.onProgress?.({ currentTable: 'Finished', tablesCompleted: 1, tableCount: 1, rowsMigrated: -1, progress: 100 });
+          resolve({ rowsMigrated: -1 }); // -1 indicates stream method
+        } else {
+          reject(new Error(`MySQL restore failed: ${restoreError || dumpError}`));
+        }
+      });
+
+      dump.on('error', reject);
+      restore.on('error', reject);
+    });
   } finally {
-    await srcConn.end(); await dstConn.end();
+    if (srcRef.tunnel) srcRef.tunnel.close();
+    if (dstRef.tunnel) dstRef.tunnel.close();
   }
-  return { rowsMigrated };
 }
 
 export async function migrateMySQL2PG(
   src: ConnectionConfig, dst: ConnectionConfig, opts: MigrationOptions
 ): Promise<{ rowsMigrated: number }> {
-  const srcConn = await mysql2.createConnection({ host: src.host, port: src.port, user: src.username, password: src.password, database: src.database, ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined });
-  const dstPool = new Pool({ host: dst.host, port: dst.port, user: dst.username, password: dst.password, database: dst.database, ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined, max: 2 });
+  const srcRef = await getEngineHostPort(src);
+  const dstRef = await getEngineHostPort(dst);
 
-  let rowsMigrated = 0;
-  const batchSize = opts.batchSize ?? 500;
   try {
-    let tables = opts.tables;
-    if (!tables) {
-      const [rows] = await srcConn.query<mysql2.RowDataPacket[]>(`SELECT TABLE_NAME FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = 'BASE TABLE'`, [src.database]);
-      tables = rows.map((r) => r.TABLE_NAME as string);
-    }
+    return await new Promise((resolve, reject) => {
+      opts.onProgress?.({ currentTable: 'Starting pgloader...', tablesCompleted: 0, tableCount: 1, rowsMigrated: 0, progress: 10 });
 
-    const metas = await getMySQLTableMeta(srcConn, src.database, tables);
-    for (let i = 0; i < metas.length; i++) {
-      const meta = metas[i];
-      const ddl = buildPGCreateTable(meta, 'MYSQL');
-      await dstPool.query(ddl);
+      // Build connection URIs
+      const srcPass = src.password ? `:${encodeURIComponent(src.password)}` : '';
+      const dstPass = dst.password ? `:${encodeURIComponent(dst.password)}` : '';
+      
+      const srcUri = `mysql://${encodeURIComponent(src.username)}${srcPass}@${srcRef.host}:${srcRef.port}/${src.database}`;
+      const dstUri = `postgresql://${encodeURIComponent(dst.username)}${dstPass}@${dstRef.host}:${dstRef.port}/${dst.database}`;
 
-      let offset = 0;
-      while (true) {
-        const [rows] = await srcConn.query<mysql2.RowDataPacket[]>(`SELECT * FROM \`${meta.name}\` LIMIT ${batchSize} OFFSET ${offset}`);
-        if (rows.length === 0) break;
-        const cols = meta.columns.map((c) => `"${c.name}"`).join(', ');
-        const client: PoolClient = await dstPool.connect();
-        try {
-          await client.query('BEGIN');
-          for (const row of rows) {
-            const vals = Object.values(row).map(escapeValue).join(', ');
-            await client.query(`INSERT INTO "${meta.name}" (${cols}) VALUES (${vals}) ON CONFLICT DO NOTHING`);
-          }
-          await client.query('COMMIT');
-        } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-        rowsMigrated += rows.length;
-        offset += batchSize;
-        opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + offset / 1e6) / metas.length) * 100) });
-        if (rows.length < batchSize) break;
-      }
-      opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i + 1, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + 1) / metas.length) * 100) });
-    }
+      // pgloader handles schema creation and data migration
+      const loaderArgs = [
+        '--cast', 'type tinyint to smallint drop typemod', // Fix boolean mismatches
+        '--no-ssl-cert-verification', // Allow self-signed if SSL enabled
+        srcUri,
+        dstUri
+      ];
+
+      const loader = spawn('pgloader', loaderArgs);
+
+      let loaderError = '';
+
+      loader.stderr.on('data', (d) => {
+        const msg = d.toString();
+        loaderError += msg;
+      });
+
+      loader.stdout.on('data', (d) => {
+        // Optional: Parse pgloader stdout for real-time progress if needed
+        // For now, simply keep the process alive and log
+      });
+
+      loader.on('close', (code) => {
+        if (code === 0) {
+          opts.onProgress?.({ currentTable: 'Finished', tablesCompleted: 1, tableCount: 1, rowsMigrated: -1, progress: 100 });
+          resolve({ rowsMigrated: -1 });
+        } else {
+          reject(new Error(`pgloader migration failed: ${loaderError}`));
+        }
+      });
+
+      loader.on('error', reject);
+    });
   } finally {
-    await srcConn.end(); await dstPool.end();
+    if (srcRef.tunnel) srcRef.tunnel.close();
+    if (dstRef.tunnel) dstRef.tunnel.close();
   }
-  return { rowsMigrated };
 }
 
 export async function migratePG2PG(
   src: ConnectionConfig, dst: ConnectionConfig, opts: MigrationOptions
 ): Promise<{ rowsMigrated: number }> {
-  const srcPool = new Pool({ host: src.host, port: src.port, user: src.username, password: src.password, database: src.database, ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined, max: 2 });
-  const dstPool = new Pool({ host: dst.host, port: dst.port, user: dst.username, password: dst.password, database: dst.database, ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined, max: 2 });
+  
+  const srcRef = await getEngineHostPort(src);
+  const dstRef = await getEngineHostPort(dst);
 
-  let rowsMigrated = 0;
-  const batchSize = opts.batchSize ?? 500;
+  const getEnv = (config: ConnectionConfig) => ({ ...process.env, PGPASSWORD: config.password });
+
+  const srcArgs = [
+    '-h', srcRef.host,
+    '-p', String(srcRef.port),
+    '-U', src.username,
+    '-d', src.database,
+    '--clean',
+    '--if-exists',
+    '--no-owner',
+    '--no-privileges'
+  ];
+
+  const dstArgs = [
+    '-h', dstRef.host,
+    '-p', String(dstRef.port),
+    '-U', dst.username,
+    '-d', dst.database,
+  ];
+
   try {
-    let tables = opts.tables;
-    if (!tables) {
-      const { rows } = await srcPool.query(`SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`);
-      tables = rows.map((r) => r.table_name as string);
-    }
+    return await new Promise((resolve, reject) => {
+      opts.onProgress?.({ currentTable: 'Starting dump pipe...', tablesCompleted: 0, tableCount: 1, rowsMigrated: 0, progress: 10 });
+      
+      const dump = spawn('pg_dump', srcArgs, { env: getEnv(src) });
+      const restore = spawn('psql', dstArgs, { env: getEnv(dst) });
 
-    const metas = await getPGTableMeta(srcPool, tables);
-    for (let i = 0; i < metas.length; i++) {
-      const meta = metas[i];
-      const ddl = buildPGCreateTable(meta, 'POSTGRESQL');
-      await dstPool.query(ddl);
+      let dumpError = '';
+      let restoreError = '';
 
-      let offset = 0;
-      while (true) {
-        const { rows } = await srcPool.query(`SELECT * FROM "${meta.name}" LIMIT ${batchSize} OFFSET ${offset}`);
-        if (rows.length === 0) break;
-        const cols = meta.columns.map((c) => `"${c.name}"`).join(', ');
-        const client: PoolClient = await dstPool.connect();
-        try {
-          await client.query('BEGIN');
-          for (const row of rows) {
-            const vals = Object.values(row).map(escapeValue).join(', ');
-            await client.query(`INSERT INTO "${meta.name}" (${cols}) VALUES (${vals}) ON CONFLICT DO NOTHING`);
-          }
-          await client.query('COMMIT');
-        } catch (e) { await client.query('ROLLBACK'); throw e; } finally { client.release(); }
-        rowsMigrated += rows.length;
-        offset += batchSize;
-        opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + offset / 1e6) / metas.length) * 100) });
-        if (rows.length < batchSize) break;
-      }
-      opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i + 1, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + 1) / metas.length) * 100) });
-    }
+      dump.stderr.on('data', (d) => dumpError += d.toString());
+      restore.stderr.on('data', (d) => restoreError += d.toString());
+
+      dump.stdout.pipe(restore.stdin);
+
+      restore.on('close', (code) => {
+        if (code === 0) {
+          opts.onProgress?.({ currentTable: 'Finished', tablesCompleted: 1, tableCount: 1, rowsMigrated: -1, progress: 100 });
+          resolve({ rowsMigrated: -1 }); // -1 indicates stream method
+        } else {
+          reject(new Error(`PG restore failed: ${restoreError || dumpError}`));
+        }
+      });
+
+      dump.on('error', reject);
+      restore.on('error', reject);
+    });
   } finally {
-    await srcPool.end(); await dstPool.end();
+    if (srcRef.tunnel) srcRef.tunnel.close();
+    if (dstRef.tunnel) dstRef.tunnel.close();
   }
-  return { rowsMigrated };
 }
 
 export async function migratePG2MySQL(
   src: ConnectionConfig, dst: ConnectionConfig, opts: MigrationOptions
 ): Promise<{ rowsMigrated: number }> {
-  const srcPool = new Pool({ host: src.host, port: src.port, user: src.username, password: src.password, database: src.database, ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined, max: 2 });
-  const dstConn = await mysql2.createConnection({ host: dst.host, port: dst.port, user: dst.username, password: dst.password, database: dst.database, ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined });
+  const srcRef = await getEngineHostPort(src);
+  const dstRef = await getEngineHostPort(dst);
+
+  const srcPool = new Pool({ host: srcRef.host, port: srcRef.port, user: src.username, password: src.password, database: src.database, ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined, max: 2 });
+  const dstConn = await mysql2.createConnection({ host: dstRef.host, port: dstRef.port, user: dst.username, password: dst.password, database: dst.database, ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined });
 
   let rowsMigrated = 0;
   const batchSize = opts.batchSize ?? 500;
@@ -358,7 +427,10 @@ export async function migratePG2MySQL(
       opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i + 1, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + 1) / metas.length) * 100) });
     }
   } finally {
-    await srcPool.end(); await dstConn.end();
+    await srcPool.end(); 
+    await dstConn.end();
+    if (srcRef.tunnel) srcRef.tunnel.close();
+    if (dstRef.tunnel) dstRef.tunnel.close();
   }
   return { rowsMigrated };
 }

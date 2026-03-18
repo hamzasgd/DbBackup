@@ -136,6 +136,7 @@ DbBackup/
 - **Database CLI tools** installed on the host:
   - MySQL / MariaDB: `mysqldump`, `mysql`, `mariadb-dump`, `mariadb`
   - PostgreSQL: `pg_dump`, `pg_restore`, `psql`
+  - Cross-Engine Migrations: `pgloader` (required for MySQL to PostgreSQL migrations)
 
 ---
 
