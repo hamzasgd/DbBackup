@@ -11,6 +11,8 @@ import { toast } from '../../store/toast.store'
 import api from '../../lib/api'
 
 type ExportFormat = 'json' | 'csv' | 'sql'
+type SortOption = 'name-asc' | 'rows-desc' | 'physical-desc' | 'logical-desc' | 'idx-pct-desc' | 'extra-pct-desc'
+type FilterOption = 'all' | 'high-idx' | 'high-extra'
 
 function pct(part: number, base: number): string {
   if (base <= 0) return '0.0'
@@ -170,6 +172,8 @@ export default function ConnectionInfoPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
   const [search, setSearch] = useState('')
+  const [sortBy, setSortBy] = useState<SortOption>('idx-pct-desc')
+  const [filterBy, setFilterBy] = useState<FilterOption>('all')
 
   const { data, isLoading, isError, error, refetch, isFetching } = useQuery({
     queryKey: ['db-info', id],
@@ -180,9 +184,31 @@ export default function ConnectionInfoPage() {
   })
 
   const info = data?.data.data
-  const filteredTables = info?.tables.filter(t =>
-    t.name.toLowerCase().includes(search.toLowerCase())
-  ) ?? []
+
+  const tables = info?.tables ?? []
+  const searchTerm = search.trim().toLowerCase()
+  const processedTables = tables
+    .filter((t) => t.name.toLowerCase().includes(searchTerm))
+    .filter((t) => {
+      if (filterBy === 'high-idx') return t.logicalSizeBytes > 0 && (t.indexSizeBytes / t.logicalSizeBytes) * 100 >= 20
+      if (filterBy === 'high-extra') return t.logicalSizeBytes > 0 && (t.extraStorageBytes / t.logicalSizeBytes) * 100 >= 10
+      return true
+    })
+    .sort((a, b) => {
+      if (sortBy === 'name-asc') return a.name.localeCompare(b.name)
+      if (sortBy === 'rows-desc') return b.rowCount - a.rowCount
+      if (sortBy === 'physical-desc') return b.sizeBytes - a.sizeBytes
+      if (sortBy === 'logical-desc') return b.logicalSizeBytes - a.logicalSizeBytes
+      if (sortBy === 'idx-pct-desc') {
+        const aPct = a.logicalSizeBytes > 0 ? (a.indexSizeBytes / a.logicalSizeBytes) * 100 : 0
+        const bPct = b.logicalSizeBytes > 0 ? (b.indexSizeBytes / b.logicalSizeBytes) * 100 : 0
+        return bPct - aPct
+      }
+
+      const aPct = a.logicalSizeBytes > 0 ? (a.extraStorageBytes / a.logicalSizeBytes) * 100 : 0
+      const bPct = b.logicalSizeBytes > 0 ? (b.extraStorageBytes / b.logicalSizeBytes) * 100 : 0
+      return bPct - aPct
+    })
 
   return (
     <div className="space-y-6">
@@ -219,7 +245,7 @@ export default function ConnectionInfoPage() {
 
       {/* Stats bar */}
       {info && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-4">
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Database</p>
             <p className="text-sm font-semibold text-gray-800 font-mono">{info.database}</p>
@@ -285,25 +311,48 @@ export default function ConnectionInfoPage() {
       {info && (
         <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
           {/* Search bar */}
-          <div className="px-6 py-4 border-b border-gray-100">
+          <div className="px-6 py-4 border-b border-gray-100 flex flex-col lg:flex-row gap-3">
             <input
               type="text"
-              placeholder="Filter tables…"
+              placeholder="Filter tables by name…"
               value={search}
               onChange={e => setSearch(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full lg:flex-1 px-3 py-2 text-sm border border-gray-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
+            <select
+              value={filterBy}
+              onChange={(e) => setFilterBy(e.target.value as FilterOption)}
+              className="w-full lg:w-52 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="Filter diagnostic categories"
+            >
+              <option value="all">All tables</option>
+              <option value="high-idx">High IDX percent (&gt;= 20%)</option>
+              <option value="high-extra">High Extra percent (&gt;= 10%)</option>
+            </select>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as SortOption)}
+              className="w-full lg:w-64 px-3 py-2 text-sm border border-gray-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              title="Sort tables"
+            >
+              <option value="idx-pct-desc">Sort: IDX percent (high to low)</option>
+              <option value="extra-pct-desc">Sort: Extra percent (high to low)</option>
+              <option value="physical-desc">Sort: Physical size (high to low)</option>
+              <option value="logical-desc">Sort: Logical size (high to low)</option>
+              <option value="rows-desc">Sort: Rows (high to low)</option>
+              <option value="name-asc">Sort: Name (A-Z)</option>
+            </select>
           </div>
 
           {/* Table list */}
           <div className="p-4">
-            {filteredTables.length === 0 ? (
+            {processedTables.length === 0 ? (
               <p className="text-center text-sm text-gray-400 py-8">
-                {search ? `No tables matching "${search}"` : 'No tables found'}
+                {search || filterBy !== 'all' ? 'No tables matched current filters' : 'No tables found'}
               </p>
             ) : (
               <div className="space-y-2">
-                {filteredTables.map(table => (
+                {processedTables.map(table => (
                   <TableRow key={table.name} table={table} connectionId={id!} />
                 ))}
               </div>
