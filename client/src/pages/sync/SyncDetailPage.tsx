@@ -52,8 +52,8 @@ export default function SyncDetailPage() {
     enabled: !!id,
     refetchInterval: (query) => {
       // Poll every 3 seconds if running
-      const status = query.state.data?.data.data.status
-      return status === 'RUNNING' ? 3000 : false
+      const status = query.state.data?.data?.data?.status
+      return status === 'RUNNING' || status === 'PENDING' ? 3000 : false
     }
   })
   const state = stateResponse?.data.data
