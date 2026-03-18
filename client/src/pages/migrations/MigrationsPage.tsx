@@ -137,12 +137,16 @@ export default function MigrationsPage() {
   const migrations = data?.data.data.migrations ?? []
 
   const createMutation = useMutation({
-    mutationFn: () => migrationsApi.create({
-      sourceConnectionId: sourceId,
-      targetConnectionId: targetId,
-      batchSize: batchSize || 500,
-      notes: notes || undefined,
-    }),
+    mutationFn: () => {
+      const payload = {
+        sourceConnectionId: sourceId,
+        targetConnectionId: targetId,
+        notes: notes || undefined,
+        ...(usesRowBatching ? { batchSize: batchSize || 500 } : {}),
+      }
+
+      return migrationsApi.create(payload)
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['migrations'] })
       toast.success('Migration started')
