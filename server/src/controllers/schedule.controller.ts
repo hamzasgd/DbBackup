@@ -42,7 +42,10 @@ export async function getSchedules(req: AuthRequest, res: Response, next: NextFu
         const history = await prisma.backup.findMany({
           where: {
             connectionId: schedule.connectionId,
-            snapshotName: { startsWith: `scheduled-${schedule.name}` },
+            OR: [
+              { snapshotName: { startsWith: `scheduled-${schedule.id}-` } },
+              { snapshotName: { startsWith: `scheduled-${schedule.name}` } },
+            ],
           },
           orderBy: { createdAt: 'desc' },
           take: 5,
