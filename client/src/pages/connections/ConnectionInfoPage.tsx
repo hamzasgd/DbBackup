@@ -3,7 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Database, Table2, ChevronDown, ChevronRight,
-  Key, Hash, HardDrive, Rows3, RefreshCw, AlertCircle, ArrowLeft, Download,
+  Key, Hash, HardDrive, Rows3, RefreshCw, AlertCircle, ArrowLeft, Download, Link2,
 } from 'lucide-react'
 import { connectionsApi, type TableInfo } from '../../services/connections.service'
 import { formatBytes, cn } from '../../lib/utils'
@@ -78,6 +78,10 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
             </span>
             <span>+{table.overheadPercent.toFixed(1)}% total</span>
             <span className="text-gray-400">{table.columns.length} cols</span>
+            <span className="text-gray-400">PK {table.primaryKeyColumns.length}</span>
+            <span className="text-gray-400">UQ {table.uniqueConstraints.length}</span>
+            <span className="text-gray-400">IDX {table.indexes.length}</span>
+            <span className="text-gray-400">FK {table.foreignKeys.length}</span>
           </div>
           {/* Export buttons */}
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
@@ -105,6 +109,22 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
 
       {open && (
         <div className="overflow-x-auto">
+          <div className="px-4 py-3 bg-white border-t border-gray-100">
+            <div className="flex flex-wrap gap-2 text-xs">
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-amber-100 text-amber-800">
+                <Key className="h-3 w-3" /> PK: {table.primaryKeyColumns.length > 0 ? table.primaryKeyColumns.join(', ') : 'none'}
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-blue-100 text-blue-800">
+                <Hash className="h-3 w-3" /> Unique: {table.uniqueConstraints.length}
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-purple-100 text-purple-800">
+                <Hash className="h-3 w-3" /> Indexes: {table.indexes.length}
+              </span>
+              <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-100 text-emerald-800">
+                <Link2 className="h-3 w-3" /> Foreign Keys: {table.foreignKeys.length}
+              </span>
+            </div>
+          </div>
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-white border-t border-gray-100 text-gray-400 uppercase tracking-wide">
@@ -149,6 +169,21 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
                       {col.isPrimaryKey && (
                         <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-medium">
                           <Key className="h-2.5 w-2.5" /> PK
+                        </span>
+                      )}
+                      {col.isUnique && !col.isPrimaryKey && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-blue-100 text-blue-700 text-xs font-medium">
+                          <Hash className="h-2.5 w-2.5" /> UQ
+                        </span>
+                      )}
+                      {col.isIndexed && !col.isPrimaryKey && !col.isUnique && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium">
+                          <Hash className="h-2.5 w-2.5" /> IDX
+                        </span>
+                      )}
+                      {col.isForeignKey && col.references && (
+                        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700 text-xs font-medium">
+                          <Link2 className="h-2.5 w-2.5" /> FK -&gt; {col.references.table}.{col.references.column}
                         </span>
                       )}
                       {col.extra && col.extra !== '' && (

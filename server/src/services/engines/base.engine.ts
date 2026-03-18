@@ -43,7 +43,34 @@ export interface ColumnInfo {
   nullable: boolean;
   defaultValue: string | null;
   isPrimaryKey: boolean;
+  isUnique?: boolean;
+  isIndexed?: boolean;
+  isForeignKey?: boolean;
+  references?: {
+    table: string;
+    column: string;
+    constraintName?: string;
+  };
   extra?: string; // e.g. AUTO_INCREMENT, unique, etc.
+}
+
+export interface TableIndexInfo {
+  name: string;
+  columns: string[];
+  unique: boolean;
+  primary: boolean;
+}
+
+export interface TableUniqueConstraintInfo {
+  name: string;
+  columns: string[];
+}
+
+export interface TableForeignKeyInfo {
+  constraintName: string;
+  column: string;
+  referencedTable: string;
+  referencedColumn: string;
 }
 
 export interface TableInfo {
@@ -55,6 +82,10 @@ export interface TableInfo {
   extraStorageBytes: number;
   overheadBytes: number;
   overheadPercent: number;
+  primaryKeyColumns: string[];
+  uniqueConstraints: TableUniqueConstraintInfo[];
+  indexes: TableIndexInfo[];
+  foreignKeys: TableForeignKeyInfo[];
   columns: ColumnInfo[];
 }
 

@@ -262,12 +262,80 @@ export class MySQLEngine extends BaseEngine {
             ORDER BY ORDINAL_POSITION
           `, [this.config.database, tableName]);
 
+          const [idxRows] = await conn!.query<mysql2.RowDataPacket[]>(`
+            SELECT
+              INDEX_NAME AS index_name,
+              NON_UNIQUE AS non_unique,
+              COLUMN_NAME AS column_name,
+              SEQ_IN_INDEX AS seq_in_index
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = ?
+              AND TABLE_NAME = ?
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+          `, [this.config.database, tableName]);
+
+          const [fkRows] = await conn!.query<mysql2.RowDataPacket[]>(`
+            SELECT
+              CONSTRAINT_NAME AS constraint_name,
+              COLUMN_NAME AS column_name,
+              REFERENCED_TABLE_NAME AS referenced_table,
+              REFERENCED_COLUMN_NAME AS referenced_column
+            FROM information_schema.KEY_COLUMN_USAGE
+            WHERE TABLE_SCHEMA = ?
+              AND TABLE_NAME = ?
+              AND REFERENCED_TABLE_NAME IS NOT NULL
+            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
+          `, [this.config.database, tableName]);
+
+          const indexMap = new Map<string, { name: string; unique: boolean; primary: boolean; columns: string[] }>();
+          (idxRows as mysql2.RowDataPacket[]).forEach((r) => {
+            const indexName = String(r['index_name']);
+            if (!indexMap.has(indexName)) {
+              indexMap.set(indexName, {
+                name: indexName,
+                unique: Number(r['non_unique']) === 0,
+                primary: indexName === 'PRIMARY',
+                columns: [],
+              });
+            }
+
+            const rec = indexMap.get(indexName)!;
+            rec.columns.push(String(r['column_name']));
+          });
+
+          const indexes = [...indexMap.values()];
+          const primaryKeyColumns = indexes.find((i) => i.primary)?.columns ?? [];
+          const uniqueConstraints = indexes
+            .filter((i) => i.unique && !i.primary)
+            .map((i) => ({ name: i.name, columns: i.columns }));
+
+          const indexedColumns = new Set(indexes.flatMap((i) => i.columns));
+          const uniqueColumns = new Set(indexes.filter((i) => i.unique).flatMap((i) => i.columns));
+
+          const foreignKeys = (fkRows as mysql2.RowDataPacket[]).map((r) => ({
+            constraintName: String(r['constraint_name']),
+            column: String(r['column_name']),
+            referencedTable: String(r['referenced_table']),
+            referencedColumn: String(r['referenced_column']),
+          }));
+          const foreignKeyByColumn = new Map(foreignKeys.map((fk) => [fk.column, fk]));
+
           const columns: ColumnInfo[] = (colRows as mysql2.RowDataPacket[]).map((c) => ({
             name: c['col_name'] as string,
             type: c['col_type'] as string,
             nullable: c['nullable'] === 'YES',
             defaultValue: c['default_val'] as string | null,
             isPrimaryKey: c['col_key'] === 'PRI',
+            isUnique: uniqueColumns.has(c['col_name'] as string),
+            isIndexed: indexedColumns.has(c['col_name'] as string),
+            isForeignKey: foreignKeyByColumn.has(c['col_name'] as string),
+            references: foreignKeyByColumn.has(c['col_name'] as string)
+              ? {
+                  table: foreignKeyByColumn.get(c['col_name'] as string)!.referencedTable,
+                  column: foreignKeyByColumn.get(c['col_name'] as string)!.referencedColumn,
+                  constraintName: foreignKeyByColumn.get(c['col_name'] as string)!.constraintName,
+                }
+              : undefined,
             extra: c['extra'] as string || undefined,
           }));
 
@@ -285,6 +353,10 @@ export class MySQLEngine extends BaseEngine {
             overheadPercent: (Number(t['data_bytes']) || 0) > 0
               ? ((Number(t['index_bytes']) || 0) / Number(t['data_bytes'])) * 100
               : 0,
+            primaryKeyColumns,
+            uniqueConstraints,
+            indexes,
+            foreignKeys,
             columns,
           };
         })

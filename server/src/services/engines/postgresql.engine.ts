@@ -343,6 +343,73 @@ export class PostgreSQLEngine extends BaseEngine {
             ORDER BY ordinal_position
           `, [tableName]);
 
+          const { rows: indexRows } = await pool!.query(`
+            SELECT
+              i.relname AS index_name,
+              ix.indisunique AS is_unique,
+              ix.indisprimary AS is_primary,
+              a.attname AS column_name,
+              arr.n AS position
+            FROM pg_class t
+            JOIN pg_namespace ns ON ns.oid = t.relnamespace
+            JOIN pg_index ix ON ix.indrelid = t.oid
+            JOIN pg_class i ON i.oid = ix.indexrelid
+            JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS arr(attnum, n) ON true
+            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = arr.attnum
+            WHERE ns.nspname = 'public'
+              AND t.relname = $1
+            ORDER BY i.relname, arr.n
+          `, [tableName]);
+
+          const indexMap = new Map<string, { name: string; unique: boolean; primary: boolean; columns: string[] }>();
+          indexRows.forEach((r) => {
+            const indexName = r.index_name as string;
+            if (!indexMap.has(indexName)) {
+              indexMap.set(indexName, {
+                name: indexName,
+                unique: Boolean(r.is_unique),
+                primary: Boolean(r.is_primary),
+                columns: [],
+              });
+            }
+
+            indexMap.get(indexName)!.columns.push(r.column_name as string);
+          });
+
+          const indexes = [...indexMap.values()];
+          const primaryKeyColumns = indexes.find((i) => i.primary)?.columns ?? [];
+          const uniqueConstraints = indexes
+            .filter((i) => i.unique && !i.primary)
+            .map((i) => ({ name: i.name, columns: i.columns }));
+          const indexedColumns = new Set(indexes.flatMap((i) => i.columns));
+          const uniqueColumns = new Set(indexes.filter((i) => i.unique).flatMap((i) => i.columns));
+
+          const { rows: fkRows } = await pool!.query(`
+            SELECT
+              tc.constraint_name,
+              kcu.column_name,
+              ccu.table_name AS referenced_table,
+              ccu.column_name AS referenced_column
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+              AND tc.table_schema = kcu.table_schema
+            JOIN information_schema.constraint_column_usage ccu
+              ON ccu.constraint_name = tc.constraint_name
+              AND ccu.table_schema = tc.table_schema
+            WHERE tc.table_schema = 'public'
+              AND tc.table_name = $1
+              AND tc.constraint_type = 'FOREIGN KEY'
+          `, [tableName]);
+
+          const foreignKeys = fkRows.map((r) => ({
+            constraintName: r.constraint_name as string,
+            column: r.column_name as string,
+            referencedTable: r.referenced_table as string,
+            referencedColumn: r.referenced_column as string,
+          }));
+          const foreignKeyByColumn = new Map(foreignKeys.map((fk) => [fk.column, fk]));
+
           const columns: ColumnInfo[] = colRows.map((c) => {
             // Build a readable type string
             let typeName = c.type as string;
@@ -360,6 +427,16 @@ export class PostgreSQLEngine extends BaseEngine {
               nullable: c.nullable === 'YES',
               defaultValue: c.default_val as string | null,
               isPrimaryKey: pkSet.has(`${t.name}.${c.name}`),
+              isUnique: uniqueColumns.has(c.name as string),
+              isIndexed: indexedColumns.has(c.name as string),
+              isForeignKey: foreignKeyByColumn.has(c.name as string),
+              references: foreignKeyByColumn.has(c.name as string)
+                ? {
+                    table: foreignKeyByColumn.get(c.name as string)!.referencedTable,
+                    column: foreignKeyByColumn.get(c.name as string)!.referencedColumn,
+                    constraintName: foreignKeyByColumn.get(c.name as string)!.constraintName,
+                  }
+                : undefined,
             };
           });
 
@@ -377,6 +454,10 @@ export class PostgreSQLEngine extends BaseEngine {
             overheadPercent: Number(t.logical_size_bytes) > 0
               ? (Math.max(Number(t.size_bytes) - Number(t.logical_size_bytes), 0) / Number(t.logical_size_bytes)) * 100
               : 0,
+            primaryKeyColumns,
+            uniqueConstraints,
+            indexes,
+            foreignKeys,
             columns,
           };
         })
