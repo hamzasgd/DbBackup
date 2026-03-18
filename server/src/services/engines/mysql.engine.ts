@@ -28,7 +28,7 @@ export class MySQLEngine extends BaseEngine {
       return await new Promise((resolve, reject) => {
         const proc = spawn('mysql', [
           ...this.getArgs(),
-          '--connect-timeout=5',
+          '--connect-timeout=30',
           '-e', 'SELECT VERSION() as version;',
           '--batch', '--skip-column-names',
         ]);
@@ -186,7 +186,7 @@ export class MySQLEngine extends BaseEngine {
         password: this.config.password,
         database: this.config.database,
         ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
-        connectTimeout: 10000,
+        connectTimeout: 30000,
       });
 
       // Version
