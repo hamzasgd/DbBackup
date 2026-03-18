@@ -8,9 +8,11 @@ import mysql2 from 'mysql2/promise';
 
 export class MySQLEngine extends BaseEngine {
   private getArgs(includePassword = true): string[] {
+    const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+    const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
     const args = [
-      `-h${this.config.host}`,
-      `-P${this.config.port}`,
+      `-h${host}`,
+      `-P${port}`,
       `-u${this.config.username}`,
     ];
     if (includePassword) args.push(`-p${this.config.password}`);
@@ -22,13 +24,15 @@ export class MySQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       return await new Promise((resolve, reject) => {
+        const timeout = this.config.connectionTimeout ? Math.floor(this.config.connectionTimeout / 1000) : 30;
         const proc = spawn('mysql', [
           ...this.getArgs(),
-          '--connect-timeout=30',
+          `--connect-timeout=${timeout}`,
           '-e', 'SELECT VERSION() as version;',
           '--batch', '--skip-column-names',
         ]);
@@ -61,7 +65,8 @@ export class MySQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -116,7 +121,8 @@ export class MySQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       const dbName = targetDatabase || this.config.database;
@@ -176,17 +182,21 @@ export class MySQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+
       conn = await mysql2.createConnection({
-        host: this.config.host,
-        port: this.config.port,
+        host: host,
+        port: port,
         user: this.config.username,
         password: this.config.password,
         database: this.config.database,
         ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
-        connectTimeout: 30000,
+        connectTimeout: this.config.connectionTimeout || 30000,
       });
 
       // Version

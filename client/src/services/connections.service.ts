@@ -24,15 +24,15 @@ export interface CreateConnectionPayload {
   host: string
   port: number
   username: string
-  password: string
+  password?: string
   database: string
   sslEnabled?: boolean
   sshEnabled?: boolean
-  sshHost?: string
-  sshPort?: number
-  sshUsername?: string
-  sshPrivateKey?: string
-  sshPassphrase?: string
+  sshHost?: string | null
+  sshPort?: number | null
+  sshUsername?: string | null
+  sshPrivateKey?: string | null
+  sshPassphrase?: string | null
 }
 
 export interface ColumnInfo {

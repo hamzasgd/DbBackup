@@ -23,15 +23,16 @@ const schema = z.object({
   host: z.string().min(1, 'Host is required'),
   port: z.coerce.number().int().min(1).max(65535),
   username: z.string().min(1, 'Username is required'),
-  password: z.string().min(1, 'Password is required'),
+  password: z.string().optional(),
   database: z.string().min(1, 'Database name is required'),
   sslEnabled: z.boolean().default(false),
   sshEnabled: z.boolean().default(false),
-  sshHost: z.string().optional(),
-  sshPort: z.coerce.number().optional(),
-  sshUsername: z.string().optional(),
-  sshPrivateKey: z.string().optional(),
-  sshPassphrase: z.string().optional(),
+  sshHost: z.string().optional().nullable(),
+  sshPort: z.coerce.number().optional().nullable(),
+  sshUsername: z.string().optional().nullable(),
+  sshPrivateKey: z.string().optional().nullable(),
+  sshPassphrase: z.string().optional().nullable(),
+  connectionTimeout: z.coerce.number().optional().default(30000),
 })
 type FormData = z.infer<typeof schema>
 
@@ -215,6 +216,8 @@ export default function ConnectionsPage() {
           </div>
 
           <Input label="Database name" placeholder="my_database" error={errors.database?.message} {...register('database')} required />
+
+          <Input label="Connection Timeout (ms)" type="number" placeholder="30000" error={errors.connectionTimeout?.message} {...register('connectionTimeout')} />
 
           <div className="flex items-center gap-2">
             <input type="checkbox" id="sslEnabled" {...register('sslEnabled')} className="rounded" />

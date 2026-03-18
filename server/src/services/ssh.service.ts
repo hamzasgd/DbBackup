@@ -59,8 +59,14 @@ export class SSHTunnel {
     });
   }
 
+  getLocalPort(): number {
+    return this.localPort;
+  }
+
   close(): void {
-    this.server?.close();
+    if (this.server) {
+      this.server.close();
+    }
     this.client.end();
   }
 }

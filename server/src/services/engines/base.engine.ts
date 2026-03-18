@@ -1,11 +1,15 @@
 export interface ConnectionConfig {
-  type: string;
+  type: 'MYSQL' | 'POSTGRES' | 'MARIADB';
   host: string;
   port: number;
   username: string;
-  password: string;
+  password?: string;
   database: string;
   sslEnabled?: boolean;
+  sslCa?: string;
+  sslCert?: string;
+  sslKey?: string;
+  connectionTimeout?: number;
   sshEnabled?: boolean;
   sshHost?: string;
   sshPort?: number;

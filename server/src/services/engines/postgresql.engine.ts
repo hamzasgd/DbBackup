@@ -12,9 +12,12 @@ export class PostgreSQLEngine extends BaseEngine {
   }
 
   private getBaseArgs(): string[] {
+    const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+    const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+    
     return [
-      '-h', this.config.host,
-      '-p', String(this.config.port),
+      '-h', host,
+      '-p', String(port),
       '-U', this.config.username,
     ];
   }
@@ -24,16 +27,23 @@ export class PostgreSQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       return await new Promise((resolve, reject) => {
+        const timeout = this.config.connectionTimeout ? Math.floor(this.config.connectionTimeout / 1000).toString() : '30';
         const proc = spawn('psql', [
           ...this.getBaseArgs(),
           '-d', this.config.database,
           '-c', 'SELECT version();',
-          '-t', '-A',
-        ], { env: this.getEnv() });
+          '-t'
+        ], { 
+          env: {
+            ...this.getEnv(),
+            PGCONNECT_TIMEOUT: timeout
+          }
+        });
 
         let output = '';
         let errorOutput = '';
@@ -55,12 +65,14 @@ export class PostgreSQLEngine extends BaseEngine {
   }
 
   async backup(outputDir: string, options: BackupOptions = {}): Promise<BackupResult> {
-    const { format = 'CUSTOM', onProgress } = options;
+    const { format = 'COMPRESSED_SQL', onProgress } = options;
+
     let tunnel: SSHTunnel | null = null;
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
@@ -148,7 +160,8 @@ export class PostgreSQLEngine extends BaseEngine {
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
 
       const dbName = targetDatabase || this.config.database;
@@ -201,45 +214,62 @@ export class PostgreSQLEngine extends BaseEngine {
   }
 
   async listDatabases(): Promise<string[]> {
-    return new Promise((resolve, reject) => {
-      const proc = spawn('psql', [
-        ...this.getBaseArgs(),
-        '-l', '-t', '-A',
-      ], { env: this.getEnv() });
+    let tunnel: SSHTunnel | null = null;
+    let pool: Pool | null = null;
+    try {
+      if (this.config.sshEnabled) {
+        tunnel = new SSHTunnel(this.config);
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
+      }
 
-      let output = '';
-      proc.stdout.on('data', (d: Buffer) => output += d.toString());
-      proc.on('close', (code: number) => {
-        if (code === 0) {
-          const dbs = output.trim().split('\n')
-            .map(line => line.split('|')[0].trim())
-            .filter(db => db && !['template0', 'template1'].includes(db));
-          resolve(dbs);
-        } else {
-          reject(new Error('Failed to list databases'));
-        }
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+
+      pool = new Pool({
+        host,
+        port,
+        user: this.config.username,
+        password: this.config.password,
+        database: 'postgres',
+        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        connectionTimeoutMillis: 10000,
+        max: 1,
       });
-    });
+
+      const res = await pool.query('SELECT datname FROM pg_database WHERE datistemplate = false;');
+      return res.rows.map(r => r.datname);
+    } catch (error: any) {
+      throw new Error(`Failed to list databases: ${error.message}`);
+    } finally {
+      await pool?.end();
+      tunnel?.close();
+    }
   }
 
   async getDbInfo(): Promise<DbInfo> {
     let tunnel: SSHTunnel | null = null;
-    const pool = new Pool({
-      host: this.config.host,
-      port: this.config.port,
-      user: this.config.username,
-      password: this.config.password,
-      database: this.config.database,
-      ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
-      connectionTimeoutMillis: 10000,
-      max: 1,
-    });
-
+    let pool: Pool | null = null;
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
-        await tunnel.connect();
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
       }
+
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+
+      pool = new Pool({
+        host,
+        port,
+        user: this.config.username,
+        password: this.config.password,
+        database: this.config.database,
+        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        connectionTimeoutMillis: 10000,
+        max: 1,
+      });
 
       // Version
       const { rows: [vRow] } = await pool.query('SELECT version() AS v');
@@ -282,9 +312,9 @@ export class PostgreSQLEngine extends BaseEngine {
       // Columns for each table
       const tables: TableInfo[] = await Promise.all(
         tableRows.map(async (t) => {
-          const { rows: colRows } = await pool.query(`
-            SELECT
-              column_name             AS name,
+          const { rows: colRows } = await pool!.query(`
+            SELECT 
+              column_name as name, 
               data_type               AS type,
               character_maximum_length,
               numeric_precision,
@@ -333,7 +363,7 @@ export class PostgreSQLEngine extends BaseEngine {
         tables,
       };
     } finally {
-      await pool.end();
+      await pool?.end();
       tunnel?.close();
     }
   }
