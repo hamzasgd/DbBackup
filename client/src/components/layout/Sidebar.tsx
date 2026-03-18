@@ -1,7 +1,7 @@
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   Database, HardDrive, Clock, LayoutDashboard,
-  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X,
+  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, RefreshCw,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/auth.store'
@@ -16,6 +16,7 @@ const navItems = [
   { to: '/backups', icon: HardDrive, label: 'Backups' },
   { to: '/schedules', icon: Clock, label: 'Schedules' },
   { to: '/migrations', icon: ArrowLeftRight, label: 'Migrations' },
+  { to: '/sync', icon: RefreshCw, label: 'Sync' },
   { to: '/settings', icon: Settings, label: 'Settings' },
 ]
 
