@@ -6,6 +6,9 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
+    "test": "vitest --run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio"
@@ -51,8 +54,11 @@
     "@types/pg": "^8.18.0",
     "@types/ssh2": "^1.15.0",
     "@types/uuid": "^9.0.8",
+    "@vitest/ui": "^4.1.0",
+    "fast-check": "^4.6.0",
     "prisma": "^5.10.0",
     "tsx": "^4.7.1",
-    "typescript": "^5.4.2"
+    "typescript": "^5.4.2",
+    "vitest": "^4.1.0"
   }
 }

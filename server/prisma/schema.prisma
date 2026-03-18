@@ -24,11 +24,11 @@ enum BackupStatus {
 }
 
 enum BackupFormat {
-  COMPRESSED_SQL   // .sql.gz  — MySQL, MariaDB, PostgreSQL
-  PLAIN_SQL        // .sql     — MySQL, MariaDB, PostgreSQL
-  CUSTOM           // .dump    — PostgreSQL only (pg_dump -Fc)
-  DIRECTORY        // folder   — PostgreSQL only (pg_dump -Fd, parallel)
-  TAR              // .tar     — PostgreSQL only (pg_dump -Ft)
+  COMPRESSED_SQL // .sql.gz  — MySQL, MariaDB, PostgreSQL
+  PLAIN_SQL // .sql     — MySQL, MariaDB, PostgreSQL
+  CUSTOM // .dump    — PostgreSQL only (pg_dump -Fc)
+  DIRECTORY // folder   — PostgreSQL only (pg_dump -Fd, parallel)
+  TAR // .tar     — PostgreSQL only (pg_dump -Ft)
 }
 
 enum MigrationStatus {
@@ -60,6 +60,37 @@ enum ScheduleFrequency {
   CUSTOM
 }
 
+enum SyncDirection {
+  UNIDIRECTIONAL
+  BIDIRECTIONAL
+}
+
+enum SyncMode {
+  REALTIME
+  SCHEDULED
+  MANUAL
+}
+
+enum ConflictStrategy {
+  LAST_WRITE_WINS
+  SOURCE_WINS
+  TARGET_WINS
+  MANUAL_RESOLUTION
+}
+
+enum SyncStatus {
+  ACTIVE
+  PAUSED
+  FAILED
+  STOPPED
+}
+
+enum ChangeOperation {
+  INSERT
+  UPDATE
+  DELETE
+}
+
 model User {
   id                   String                @id @default(uuid())
   email                String                @unique
@@ -71,6 +102,7 @@ model User {
   refreshTokens        RefreshToken[]
   notificationSettings NotificationSettings?
   storageSettings      StorageSettings?
+  syncConfigurations   SyncConfiguration[]
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
 
@@ -89,66 +121,68 @@ model RefreshToken {
 }
 
 model Connection {
-  id            String       @id @default(uuid())
-  name          String
-  type          DatabaseType
-  host          String
-  port          Int
-  username      String
-  password      String
-  database      String
-  sslEnabled    Boolean      @default(false)
-  sslCa         String?
-  sslCert       String?
-  sslKey        String?
+  id         String       @id @default(uuid())
+  name       String
+  type       DatabaseType
+  host       String
+  port       Int
+  username   String
+  password   String
+  database   String
+  sslEnabled Boolean      @default(false)
+  sslCa      String?
+  sslCert    String?
+  sslKey     String?
 
   // SSH Tunnel
-  sshEnabled    Boolean      @default(false)
+  sshEnabled    Boolean @default(false)
   sshHost       String?
-  sshPort       Int?         @default(22)
+  sshPort       Int?    @default(22)
   sshUsername   String?
   sshPrivateKey String?
   sshPassphrase String?
 
-  connectionTimeout      Int?         @default(30000)
+  connectionTimeout Int? @default(30000)
 
   // Relations
-  userId        String?
-  user          User?        @relation(fields: [userId], references: [id], onDelete: Cascade)
-  backups       Backup[]
-  schedules     Schedule[]
-  migrationsAsSource Migration[] @relation("MigrationSource")
-  migrationsAsTarget Migration[] @relation("MigrationTarget")
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  userId              String?
+  user                User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backups             Backup[]
+  schedules           Schedule[]
+  migrationsAsSource  Migration[]         @relation("MigrationSource")
+  migrationsAsTarget  Migration[]         @relation("MigrationTarget")
+  syncConfigsAsSource SyncConfiguration[] @relation("SyncSource")
+  syncConfigsAsTarget SyncConfiguration[] @relation("SyncTarget")
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   @@map("connections")
 }
 
 model Backup {
-  id            String       @id @default(uuid())
-  connectionId  String
-  connection    Connection   @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  fileName      String
-  filePath      String
-  fileSize      BigInt       @default(0)
-  dbType        DatabaseType
-  dbName        String
-  status        BackupStatus @default(PENDING)
-  format        BackupFormat @default(COMPRESSED_SQL)
-  isCompressed  Boolean      @default(true)
-  snapshotName  String?
-  notes         String?
-  error         String?
-  progress      Int          @default(0)
-  checksum      String?
-  verified      Boolean      @default(false)
-  verifiedAt    DateTime?
-  storageType   StorageProvider @default(LOCAL)
-  storageKey    String?
-  startedAt     DateTime?
-  completedAt   DateTime?
-  createdAt     DateTime     @default(now())
+  id           String          @id @default(uuid())
+  connectionId String
+  connection   Connection      @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  fileName     String
+  filePath     String
+  fileSize     BigInt          @default(0)
+  dbType       DatabaseType
+  dbName       String
+  status       BackupStatus    @default(PENDING)
+  format       BackupFormat    @default(COMPRESSED_SQL)
+  isCompressed Boolean         @default(true)
+  snapshotName String?
+  notes        String?
+  error        String?
+  progress     Int             @default(0)
+  checksum     String?
+  verified     Boolean         @default(false)
+  verifiedAt   DateTime?
+  storageType  StorageProvider @default(LOCAL)
+  storageKey   String?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime        @default(now())
 
   @@map("backups")
 }
@@ -185,22 +219,22 @@ model AuditLog {
 }
 
 model Migration {
-  id                   String          @id @default(uuid())
-  sourceConnectionId   String
-  sourceConnection     Connection      @relation("MigrationSource", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
-  targetConnectionId   String
-  targetConnection     Connection      @relation("MigrationTarget", fields: [targetConnectionId], references: [id], onDelete: Cascade)
-  status               MigrationStatus @default(PENDING)
-  tableCount           Int             @default(0)
-  tablesCompleted      Int             @default(0)
-  rowsMigrated         BigInt          @default(0)
-  currentTable         String?
-  progress             Int             @default(0)
-  notes                String?
-  error                String?
-  startedAt            DateTime?
-  completedAt          DateTime?
-  createdAt            DateTime        @default(now())
+  id                 String          @id @default(uuid())
+  sourceConnectionId String
+  sourceConnection   Connection      @relation("MigrationSource", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  targetConnectionId String
+  targetConnection   Connection      @relation("MigrationTarget", fields: [targetConnectionId], references: [id], onDelete: Cascade)
+  status             MigrationStatus @default(PENDING)
+  tableCount         Int             @default(0)
+  tablesCompleted    Int             @default(0)
+  rowsMigrated       BigInt          @default(0)
+  currentTable       String?
+  progress           Int             @default(0)
+  notes              String?
+  error              String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime        @default(now())
 
   @@map("migrations")
 }
@@ -243,4 +277,151 @@ model StorageSettings {
   updatedAt       DateTime        @updatedAt
 
   @@map("storage_settings")
+}
+
+model SyncConfiguration {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  name               String
+  sourceConnectionId String
+  sourceConnection   Connection @relation("SyncSource", fields: [sourceConnectionId], references: [id], onDelete: Cascade)
+  targetConnectionId String
+  targetConnection   Connection @relation("SyncTarget", fields: [targetConnectionId], references: [id], onDelete: Cascade)
+
+  direction        SyncDirection    @default(UNIDIRECTIONAL)
+  mode             SyncMode         @default(MANUAL)
+  conflictStrategy ConflictStrategy @default(LAST_WRITE_WINS)
+
+  // Table filtering
+  includeTables String[] @default([]) // empty = all tables
+  excludeTables String[] @default([])
+
+  // Scheduling
+  cronExpression String? // for SCHEDULED mode
+
+  // Performance tuning
+  batchSize      Int @default(500)
+  parallelTables Int @default(1)
+
+  // State
+  isActive Boolean @default(false)
+
+  // Relations
+  syncState   SyncState?
+  changeLogs  ChangeLog[]
+  conflicts   Conflict[]
+  syncHistory SyncHistory[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("sync_configurations")
+}
+
+model SyncState {
+  id           String            @id @default(uuid())
+  syncConfigId String            @unique
+  syncConfig   SyncConfiguration @relation(fields: [syncConfigId], references: [id], onDelete: Cascade)
+
+  status SyncStatus @default(ACTIVE)
+
+  // Checkpoints
+  sourceCheckpoint String? // database-specific checkpoint (binlog pos, LSN, timestamp)
+  targetCheckpoint String? // for bidirectional sync
+
+  // Timing
+  lastSyncAt DateTime?
+  nextSyncAt DateTime?
+
+  // Statistics
+  totalRowsSynced     BigInt @default(0)
+  lastSyncDuration    Int? // milliseconds
+  averageSyncDuration Int? // milliseconds
+
+  // Current job
+  currentJobId    String?
+  currentTable    String?
+  currentProgress Int     @default(0)
+
+  // Error tracking
+  consecutiveFailures Int       @default(0)
+  lastError           String?
+  lastErrorAt         DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("sync_states")
+}
+
+model ChangeLog {
+  id           String            @id @default(uuid())
+  syncConfigId String
+  syncConfig   SyncConfiguration @relation(fields: [syncConfigId], references: [id], onDelete: Cascade)
+
+  tableName        String
+  operation        ChangeOperation
+  primaryKeyValues Json // { "id": 123, "tenant_id": "abc" }
+  changeData       Json? // full row data for INSERT/UPDATE
+
+  timestamp  DateTime @default(now())
+  checkpoint String // database-specific position
+  origin     String   @default("source") // "source" or "target"
+
+  synchronized   Boolean   @default(false)
+  synchronizedAt DateTime?
+
+  @@index([syncConfigId, synchronized, timestamp])
+  @@map("change_logs")
+}
+
+model Conflict {
+  id           String            @id @default(uuid())
+  syncConfigId String
+  syncConfig   SyncConfiguration @relation(fields: [syncConfigId], references: [id], onDelete: Cascade)
+
+  tableName        String
+  primaryKeyValues Json
+
+  sourceData      Json
+  targetData      Json
+  sourceTimestamp DateTime
+  targetTimestamp DateTime
+
+  strategy     ConflictStrategy
+  resolution   String? // "source", "target", "manual"
+  resolvedData Json?
+
+  resolved   Boolean   @default(false)
+  resolvedAt DateTime?
+  resolvedBy String? // userId for manual resolution
+
+  createdAt DateTime @default(now())
+
+  @@index([syncConfigId, resolved])
+  @@map("conflicts")
+}
+
+model SyncHistory {
+  id           String            @id @default(uuid())
+  syncConfigId String
+  syncConfig   SyncConfiguration @relation(fields: [syncConfigId], references: [id], onDelete: Cascade)
+
+  status String // COMPLETED, FAILED
+
+  rowsSynced        BigInt @default(0)
+  tablesProcessed   Int    @default(0)
+  conflictsDetected Int    @default(0)
+  conflictsResolved Int    @default(0)
+
+  startedAt   DateTime
+  completedAt DateTime
+  duration    Int // milliseconds
+
+  error String?
+
+  @@index([syncConfigId, startedAt])
+  @@map("sync_history")
 }
