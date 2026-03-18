@@ -6,6 +6,15 @@ import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { logger } from '../config/logger';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
+import parser from 'cron-parser';
+
+function getNextRunAt(cronExpression: string): Date | null {
+  try {
+    return parser.parseExpression(cronExpression, { currentDate: new Date() }).next().toDate();
+  } catch {
+    return null;
+  }
+}
 
 export const SCHEDULE_QUEUE_NAME = 'schedules';
 
@@ -96,7 +105,7 @@ export function createScheduleWorker(): Worker {
 
       await prisma.schedule.update({
         where: { id: scheduleId },
-        data: { lastRunAt: new Date() },
+        data: { lastRunAt: new Date(), nextRunAt: getNextRunAt(schedule.cronExpression) },
       });
 
       logger.info(`Scheduled backup triggered for connection ${conn.name}`);

@@ -1,9 +1,18 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
+import parser from 'cron-parser';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { addScheduleJob, removeScheduleJob } from '../queue/schedule.queue';
+
+function getNextRunAt(cronExpression: string): Date {
+  try {
+    return parser.parseExpression(cronExpression, { currentDate: new Date() }).next().toDate();
+  } catch {
+    throw new AppError('Invalid cron expression', 400);
+  }
+}
 
 export async function getSchedules(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -12,7 +21,49 @@ export async function getSchedules(req: AuthRequest, res: Response, next: NextFu
       include: { connection: { select: { id: true, name: true, type: true } } },
       orderBy: { createdAt: 'desc' },
     });
-    res.json({ success: true, data: schedules });
+
+    const enriched = await Promise.all(
+      schedules.map(async (schedule) => {
+        const computedNextRunAt = schedule.isActive
+          ? getNextRunAt(schedule.cronExpression)
+          : null;
+
+        if (
+          schedule.isActive &&
+          (!schedule.nextRunAt || Math.abs(computedNextRunAt.getTime() - schedule.nextRunAt.getTime()) > 1000)
+        ) {
+          await prisma.schedule.update({
+            where: { id: schedule.id },
+            data: { nextRunAt: computedNextRunAt },
+          });
+        }
+
+        const history = await prisma.backup.findMany({
+          where: {
+            connectionId: schedule.connectionId,
+            snapshotName: { startsWith: `scheduled-${schedule.name}` },
+          },
+          orderBy: { createdAt: 'desc' },
+          take: 5,
+          select: {
+            id: true,
+            status: true,
+            createdAt: true,
+            completedAt: true,
+            fileSize: true,
+            error: true,
+          },
+        });
+
+        return {
+          ...schedule,
+          nextRunAt: schedule.isActive ? computedNextRunAt : null,
+          history,
+        };
+      })
+    );
+
+    res.json({ success: true, data: enriched });
   } catch (err) { next(err); }
 }
 
@@ -32,6 +83,7 @@ export async function createSchedule(req: AuthRequest, res: Response, next: Next
         name,
         frequency,
         cronExpression,
+        nextRunAt: getNextRunAt(cronExpression),
         retentionDays: retentionDays || 30,
         isActive: true,
       },
@@ -50,9 +102,13 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
     if (!existing) throw new AppError('Schedule not found', 404);
 
     const { name, frequency, cronExpression, isActive, retentionDays } = req.body;
+    const nextRunAt = isActive === false
+      ? null
+      : (cronExpression ? getNextRunAt(cronExpression) : getNextRunAt(existing.cronExpression));
+
     const updated = await prisma.schedule.update({
       where: { id: req.params.id },
-      data: { name, frequency, cronExpression, isActive, retentionDays },
+      data: { name, frequency, cronExpression, isActive, retentionDays, nextRunAt },
     });
 
     await removeScheduleJob(req.params.id);

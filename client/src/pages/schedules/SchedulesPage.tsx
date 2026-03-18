@@ -129,7 +129,27 @@ export default function SchedulesPage() {
                 <p><span className="font-medium text-gray-700">Cron:</span> <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{s.cronExpression}</code></p>
                 <p><span className="font-medium text-gray-700">Retention:</span> {s.retentionDays} days</p>
                 {s.lastRunAt && <p><span className="font-medium text-gray-700">Last run:</span> {formatDate(s.lastRunAt)}</p>}
+                {s.nextRunAt && s.isActive && <p><span className="font-medium text-gray-700">Next run:</span> {formatDate(s.nextRunAt)}</p>}
               </div>
+
+              <div className="pt-2 border-t border-gray-50">
+                <p className="text-xs font-medium text-gray-600 mb-1">History</p>
+                {s.history && s.history.length > 0 ? (
+                  <div className="space-y-1">
+                    {s.history.slice(0, 3).map((h) => (
+                      <div key={h.id} className="flex items-center justify-between text-xs">
+                        <span className="text-gray-500">{formatDate(h.createdAt)}</span>
+                        <Badge className={h.status === 'COMPLETED' ? 'bg-green-100 text-green-700' : h.status === 'FAILED' ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}>
+                          {h.status}
+                        </Badge>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-xs text-gray-400">No runs yet</p>
+                )}
+              </div>
+
               <div className="flex gap-2 pt-2 border-t border-gray-50">
                 <Button size="sm" variant="ghost"
                   onClick={() => toggleMutation.mutate({ id: s.id, isActive: !s.isActive })}>

@@ -11,6 +11,14 @@ export interface Schedule {
   retentionDays: number
   lastRunAt?: string
   nextRunAt?: string
+  history?: Array<{
+    id: string
+    status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+    createdAt: string
+    completedAt?: string
+    fileSize: number
+    error?: string | null
+  }>
   createdAt: string
 }
 
