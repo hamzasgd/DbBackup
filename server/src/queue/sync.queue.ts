@@ -7,6 +7,7 @@ import { notify } from '../services/notification.service';
 import { engineFactory } from '../services/engines/engine.factory';
 import { ConnectionConfig } from '../services/engines/base.engine';
 import { ConflictResolverService } from '../services/sync/conflict-resolver.service';
+import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { 
   SyncDirection, 
   SyncStatus, 
@@ -107,44 +108,44 @@ export function createSyncWorker(): Worker<SyncJobData> {
       });
 
       try {
-        // Create connection configs
+        // Create connection configs with decryption
         const sourceConfig: ConnectionConfig = {
           type: config.sourceConnection.type as any,
-          host: config.sourceConnection.host,
+          host: decrypt(config.sourceConnection.host),
           port: config.sourceConnection.port,
-          username: config.sourceConnection.username,
-          password: config.sourceConnection.password,
-          database: config.sourceConnection.database,
+          username: decrypt(config.sourceConnection.username),
+          password: decrypt(config.sourceConnection.password),
+          database: decrypt(config.sourceConnection.database),
           sslEnabled: config.sourceConnection.sslEnabled,
-          sslCa: config.sourceConnection.sslCa ?? undefined,
-          sslCert: config.sourceConnection.sslCert ?? undefined,
-          sslKey: config.sourceConnection.sslKey ?? undefined,
+          sslCa: decryptIfPresent(config.sourceConnection.sslCa) ?? undefined,
+          sslCert: decryptIfPresent(config.sourceConnection.sslCert) ?? undefined,
+          sslKey: decryptIfPresent(config.sourceConnection.sslKey) ?? undefined,
           sshEnabled: config.sourceConnection.sshEnabled,
-          sshHost: config.sourceConnection.sshHost ?? undefined,
+          sshHost: decryptIfPresent(config.sourceConnection.sshHost) ?? undefined,
           sshPort: config.sourceConnection.sshPort ?? undefined,
-          sshUsername: config.sourceConnection.sshUsername ?? undefined,
-          sshPrivateKey: config.sourceConnection.sshPrivateKey ?? undefined,
-          sshPassphrase: config.sourceConnection.sshPassphrase ?? undefined,
+          sshUsername: decryptIfPresent(config.sourceConnection.sshUsername) ?? undefined,
+          sshPrivateKey: decryptIfPresent(config.sourceConnection.sshPrivateKey) ?? undefined,
+          sshPassphrase: decryptIfPresent(config.sourceConnection.sshPassphrase) ?? undefined,
           connectionTimeout: 30000,
         };
 
         const targetConfig: ConnectionConfig = {
           type: config.targetConnection.type as any,
-          host: config.targetConnection.host,
+          host: decrypt(config.targetConnection.host),
           port: config.targetConnection.port,
-          username: config.targetConnection.username,
-          password: config.targetConnection.password,
-          database: config.targetConnection.database,
+          username: decrypt(config.targetConnection.username),
+          password: decrypt(config.targetConnection.password),
+          database: decrypt(config.targetConnection.database),
           sslEnabled: config.targetConnection.sslEnabled,
-          sslCa: config.targetConnection.sslCa ?? undefined,
-          sslCert: config.targetConnection.sslCert ?? undefined,
-          sslKey: config.targetConnection.sslKey ?? undefined,
+          sslCa: decryptIfPresent(config.targetConnection.sslCa) ?? undefined,
+          sslCert: decryptIfPresent(config.targetConnection.sslCert) ?? undefined,
+          sslKey: decryptIfPresent(config.targetConnection.sslKey) ?? undefined,
           sshEnabled: config.targetConnection.sshEnabled,
-          sshHost: config.targetConnection.sshHost ?? undefined,
+          sshHost: decryptIfPresent(config.targetConnection.sshHost) ?? undefined,
           sshPort: config.targetConnection.sshPort ?? undefined,
-          sshUsername: config.targetConnection.sshUsername ?? undefined,
-          sshPrivateKey: config.targetConnection.sshPrivateKey ?? undefined,
-          sshPassphrase: config.targetConnection.sshPassphrase ?? undefined,
+          sshUsername: decryptIfPresent(config.targetConnection.sshUsername) ?? undefined,
+          sshPrivateKey: decryptIfPresent(config.targetConnection.sshPrivateKey) ?? undefined,
+          sshPassphrase: decryptIfPresent(config.targetConnection.sshPassphrase) ?? undefined,
           connectionTimeout: 30000,
         };
 

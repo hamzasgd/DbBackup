@@ -563,10 +563,12 @@ export class SyncEngineService {
       throw new Error('A sync job is already running for this configuration');
     }
 
-    // TODO: Enqueue sync job using BullMQ
-    // This will be implemented in task 10.1 when sync queue is created
-    // For now, we'll generate a job ID and update the state
-    const jobId = `sync-${id}-${Date.now()}`;
+    // Enqueue sync job using BullMQ
+    const { addSyncJob } = await import('../../queue/sync.queue');
+    const jobId = await addSyncJob({
+      configId: id,
+      mode: force ? 'full' : 'incremental',
+    });
 
     // Update sync state to indicate job is pending
     await prisma.syncState.update({
@@ -576,9 +578,6 @@ export class SyncEngineService {
         status: SyncStatus.ACTIVE,
       },
     });
-
-    // TODO: Call addSyncJob(jobId, id, force ? 'full' : 'incremental')
-    // Placeholder for BullMQ integration
 
     return jobId;
   }
