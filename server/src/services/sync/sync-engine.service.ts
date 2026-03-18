@@ -12,6 +12,7 @@ import { ConnectionConfig } from '../engines/base.engine';
 import { CDCTrackerService } from './cdc-tracker.service';
 import { MySQLCDCTracker } from './mysql-cdc-tracker.service';
 import { PostgreSQLCDCTracker } from './postgresql-cdc-tracker.service';
+import { decrypt, decryptIfPresent } from '../crypto.service';
 
 /**
  * DTO for creating a sync configuration
@@ -158,21 +159,21 @@ export class SyncEngineService {
     
     const config: ConnectionConfig = {
       type: connection.type,
-      host: connection.host,
+      host: decrypt(connection.host),
       port: connection.port,
-      username: connection.username,
-      password: connection.password,
-      database: connection.database,
+      username: decrypt(connection.username),
+      password: decrypt(connection.password),
+      database: decrypt(connection.database),
       sslEnabled: connection.sslEnabled,
-      sslCa: connection.sslCa ?? undefined,
-      sslCert: connection.sslCert ?? undefined,
-      sslKey: connection.sslKey ?? undefined,
+      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
+      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
+      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
       sshEnabled: connection.sshEnabled,
-      sshHost: connection.sshHost ?? undefined,
+      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
       sshPort: connection.sshPort ?? undefined,
-      sshUsername: connection.sshUsername ?? undefined,
-      sshPrivateKey: connection.sshPrivateKey ?? undefined,
-      sshPassphrase: connection.sshPassphrase ?? undefined,
+      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
+      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
+      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
       connectionTimeout: connection.connectionTimeout ?? 30000,
     };
 
@@ -658,21 +659,21 @@ export class SyncEngineService {
   private connectionToConfig(connection: Connection): ConnectionConfig {
     return {
       type: connection.type,
-      host: connection.host,
+      host: decrypt(connection.host),
       port: connection.port,
-      username: connection.username,
-      password: connection.password,
-      database: connection.database,
+      username: decrypt(connection.username),
+      password: decrypt(connection.password),
+      database: decrypt(connection.database),
       sslEnabled: connection.sslEnabled,
-      sslCa: connection.sslCa ?? undefined,
-      sslCert: connection.sslCert ?? undefined,
-      sslKey: connection.sslKey ?? undefined,
+      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
+      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
+      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
       sshEnabled: connection.sshEnabled,
-      sshHost: connection.sshHost ?? undefined,
+      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
       sshPort: connection.sshPort ?? undefined,
-      sshUsername: connection.sshUsername ?? undefined,
-      sshPrivateKey: connection.sshPrivateKey ?? undefined,
-      sshPassphrase: connection.sshPassphrase ?? undefined,
+      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
+      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
+      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
       connectionTimeout: 30000,
     };
   }
