@@ -175,6 +175,9 @@ export default function MigrationsPage() {
   })
 
   const targetOptions = connections.filter(c => c.id !== sourceId)
+  const selectedSource = connections.find(c => c.id === sourceId)
+  const selectedTarget = connections.find(c => c.id === targetId)
+  const usesRowBatching = selectedSource?.type === 'POSTGRESQL' && (selectedTarget?.type === 'MYSQL' || selectedTarget?.type === 'MARIADB')
 
   return (
     <div className="space-y-6">
@@ -350,14 +353,22 @@ export default function MigrationsPage() {
             <label className="text-sm font-medium text-gray-700">Batch Size</label>
             <input
               type="number"
-              className="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className={cn(
+                'mt-1 w-full px-3 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500',
+                usesRowBatching ? 'border-gray-300' : 'border-gray-200 bg-gray-50 text-gray-400 cursor-not-allowed'
+              )}
               value={batchSize}
               min={100}
               max={10000}
               step={100}
               onChange={e => setBatchSize(Number(e.target.value))}
+              disabled={!usesRowBatching}
             />
-            <p className="text-xs text-gray-400 mt-1">Rows per INSERT batch. Lower = safer for large tables, higher = faster.</p>
+            <p className="text-xs text-gray-400 mt-1">
+              {usesRowBatching
+                ? 'Rows per INSERT batch (row-copy mode). Lower = safer for large tables, higher = faster.'
+                : 'Ignored for this route. This migration uses stream mode (dump/restore or pgloader).'}
+            </p>
           </div>
 
           <div>
