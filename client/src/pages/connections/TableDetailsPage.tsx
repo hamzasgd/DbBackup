@@ -29,6 +29,10 @@ export default function TableDetailsPage() {
 
   const info = data?.data.data
   const table = useMemo(() => info?.tables.find((t) => t.name === decodedTableName), [info, decodedTableName])
+  const regularIndexes = useMemo(
+    () => table?.indexes.filter((idx) => !idx.primary && !idx.unique) ?? [],
+    [table]
+  )
 
   return (
     <div className="space-y-6">
@@ -109,7 +113,7 @@ export default function TableDetailsPage() {
             </div>
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
               <p className="text-xs text-gray-500 uppercase tracking-wide">Indexes</p>
-              <p className="text-sm font-semibold text-gray-800 mt-1">{table.indexes.length}</p>
+              <p className="text-sm font-semibold text-gray-800 mt-1">{regularIndexes.length}</p>
             </div>
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
               <p className="text-xs text-gray-500 uppercase tracking-wide">Foreign Keys</p>
@@ -223,7 +227,7 @@ export default function TableDetailsPage() {
 
           <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
             <div className="px-6 py-4 border-b border-gray-100">
-              <h2 className="text-sm font-semibold text-gray-900">Indexes ({table.indexes.length})</h2>
+              <h2 className="text-sm font-semibold text-gray-900">Indexes ({regularIndexes.length})</h2>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs">
@@ -235,21 +239,20 @@ export default function TableDetailsPage() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-50">
-                  {table.indexes.map((idx) => (
+                  {regularIndexes.map((idx) => (
                     <tr key={idx.name} className="hover:bg-blue-50/40 transition-colors">
                       <td className="px-4 py-2 font-mono text-gray-800">{idx.name}</td>
                       <td className="px-4 py-2 text-gray-700">{idx.columns.join(', ')}</td>
                       <td className="px-4 py-2">
-                        {idx.primary ? (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-amber-100 text-amber-700 text-xs font-medium">PRIMARY</span>
-                        ) : idx.unique ? (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-blue-100 text-blue-700 text-xs font-medium">UNIQUE</span>
-                        ) : (
-                          <span className="inline-flex items-center px-2 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium">INDEX</span>
-                        )}
+                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-purple-100 text-purple-700 text-xs font-medium">INDEX</span>
                       </td>
                     </tr>
                   ))}
+                  {regularIndexes.length === 0 && (
+                    <tr>
+                      <td className="px-4 py-3 text-gray-400" colSpan={3}>No non-unique secondary indexes found.</td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

@@ -41,6 +41,7 @@ async function downloadExport(connectionId: string, tableName: string, format: E
 function TableRow({ table, connectionId }: { table: TableInfo; connectionId: string }) {
   const [open, setOpen] = useState(false)
   const [exporting, setExporting] = useState<ExportFormat | null>(null)
+  const regularIndexCount = table.indexes.filter((idx) => !idx.primary && !idx.unique).length
 
   const handleExport = async (format: ExportFormat) => {
     setExporting(format)
@@ -80,7 +81,7 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
             <span className="text-gray-400">{table.columns.length} cols</span>
             <span className="text-gray-400">PK {table.primaryKeyColumns.length}</span>
             <span className="text-gray-400">UQ {table.uniqueConstraints.length}</span>
-            <span className="text-gray-400">IDX {table.indexes.length}</span>
+            <span className="text-gray-400">IDX {regularIndexCount}</span>
             <span className="text-gray-400">FK {table.foreignKeys.length}</span>
           </div>
           {/* Export buttons */}
@@ -124,7 +125,7 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
                 <Hash className="h-3 w-3" /> Unique: {table.uniqueConstraints.length}
               </span>
               <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-purple-100 text-purple-800">
-                <Hash className="h-3 w-3" /> Indexes: {table.indexes.length}
+                <Hash className="h-3 w-3" /> Indexes: {regularIndexCount}
               </span>
               <span className="inline-flex items-center gap-1 px-2 py-1 rounded bg-emerald-100 text-emerald-800">
                 <Link2 className="h-3 w-3" /> Foreign Keys: {table.foreignKeys.length}
