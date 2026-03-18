@@ -2,6 +2,7 @@ import * as mysql2 from 'mysql2/promise';
 import { CDCTrackerService } from './cdc-tracker.service';
 import { SSHTunnel } from '../ssh.service';
 import { prisma } from '../../config/database';
+import { decrypt, decryptIfPresent } from '../crypto.service';
 
 interface SyncConfiguration {
   id: string;
@@ -65,25 +66,38 @@ export class MySQLCDCTracker implements CDCTrackerService {
     let tunnel: SSHTunnel | null = null;
 
     try {
-      if (connectionConfig.sshEnabled) {
-        tunnel = new SSHTunnel(connectionConfig);
+      // Decrypt connection credentials
+      const decryptedConfig = {
+        ...connectionConfig,
+        host: decrypt(connectionConfig.host),
+        username: decrypt(connectionConfig.username),
+        password: decrypt(connectionConfig.password),
+        database: decrypt(connectionConfig.database),
+        sshHost: decryptIfPresent(connectionConfig.sshHost),
+        sshUsername: decryptIfPresent(connectionConfig.sshUsername),
+        sshPrivateKey: decryptIfPresent(connectionConfig.sshPrivateKey),
+        sshPassphrase: decryptIfPresent(connectionConfig.sshPassphrase),
+      };
+
+      if (decryptedConfig.sshEnabled) {
+        tunnel = new SSHTunnel(decryptedConfig);
         const localPort = await tunnel.connect();
-        (connectionConfig as any)._localPort = localPort;
+        (decryptedConfig as any)._localPort = localPort;
       }
 
-      const host = connectionConfig.sshEnabled ? '127.0.0.1' : connectionConfig.host;
-      const port = connectionConfig.sshEnabled
-        ? (connectionConfig as any)._localPort || connectionConfig.port
-        : connectionConfig.port;
+      const host = decryptedConfig.sshEnabled ? '127.0.0.1' : decryptedConfig.host;
+      const port = decryptedConfig.sshEnabled
+        ? (decryptedConfig as any)._localPort || decryptedConfig.port
+        : decryptedConfig.port;
 
       const conn = await mysql2.createConnection({
         host,
         port,
-        user: connectionConfig.username,
-        password: connectionConfig.password,
-        database: connectionConfig.database,
-        ssl: connectionConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
-        connectTimeout: connectionConfig.connectionTimeout || 30000,
+        user: decryptedConfig.username,
+        password: decryptedConfig.password,
+        database: decryptedConfig.database,
+        ssl: decryptedConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        connectTimeout: decryptedConfig.connectionTimeout || 30000,
       });
 
       return { conn, tunnel };
