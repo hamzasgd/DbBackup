@@ -52,15 +52,22 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
       });
 
       try {
-        let lastProgressUpdate = Date.now();
+        let lastProgressUpdate = 0;
+        let hasPublishedProgress = false;
 
         const result = await runMigration(sourceConfig, targetConfig, {
           tables,
           batchSize: batchSize ?? 500,
           onProgress: async (info) => {
             const now = Date.now();
-            if (now - lastProgressUpdate > 3000) {
+            const shouldPublish =
+              !hasPublishedProgress ||
+              info.progress >= 100 ||
+              now - lastProgressUpdate > 3000;
+
+            if (shouldPublish) {
               lastProgressUpdate = now;
+              hasPublishedProgress = true;
               logger.info(
                 `Migration ${migrationId} progress ${Math.min(info.progress, 99)}% ` +
                 `(table=${info.currentTable}, tables=${info.tablesCompleted}/${info.tableCount}, rows=${info.rowsMigrated})`

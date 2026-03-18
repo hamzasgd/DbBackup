@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeftRight, Plus, Trash2, RefreshCw, MoveRight, CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
+import { ArrowLeftRight, Plus, Trash2, RefreshCw, MoveRight, CheckCircle2, XCircle, Clock, Loader2, Info } from 'lucide-react'
 import { migrationsApi, type Migration, type MigrationVerificationResult } from '../../services/migrations.service'
 import { connectionsApi } from '../../services/connections.service'
 import { toast } from '../../store/toast.store'
@@ -41,6 +41,11 @@ function durationLabel(m: Migration) {
   return `${min}m ${s % 60}s`
 }
 
+function rowsLabel(rowsMigrated?: number) {
+  if (rowsMigrated === -1) return 'N/A (stream mode)'
+  return ((rowsMigrated ?? 0)).toLocaleString()
+}
+
 function ActiveMigrationCard({ m }: { m: Migration }) {
   const isActive = m.status === 'RUNNING' || m.status === 'PENDING'
   const sse = useProgressSSE(`/migrations/${m.id}/progress`, isActive)
@@ -50,6 +55,7 @@ function ActiveMigrationCard({ m }: { m: Migration }) {
   const tablesCompleted = sse?.tablesCompleted ?? m.tablesCompleted
   const tableCount = sse?.tableCount ?? m.tableCount
   const rowsMigrated = sse?.rowsMigrated ?? m.rowsMigrated
+  const isStreamMode = rowsMigrated === -1 || /dump pipe|pgloader/i.test(currentTable ?? '')
 
   return (
     <Card className="border-blue-200 bg-blue-50/40">
@@ -73,16 +79,29 @@ function ActiveMigrationCard({ m }: { m: Migration }) {
             <div className="mt-3 space-y-1">
               <div className="flex justify-between text-xs text-gray-500">
                 <span>{tablesCompleted} / {tableCount} tables</span>
-                <span>{progress}%</span>
+                <span className="inline-flex items-center gap-1">
+                  {isStreamMode ? 'Streaming' : `${progress}%`}
+                  {isStreamMode && (
+                    <span
+                      className="inline-flex items-center text-gray-400"
+                      title="This migration runs in stream mode (CLI pipe), so exact row-by-row progress is not available."
+                    >
+                      <Info className="h-3.5 w-3.5" />
+                    </span>
+                  )}
+                </span>
               </div>
               <div className="h-2 bg-blue-200 rounded-full overflow-hidden">
                 <div
-                  className="h-full bg-blue-500 rounded-full transition-all duration-700"
-                  style={{ width: `${progress}%` }}
+                  className={cn(
+                    'h-full rounded-full transition-all duration-700',
+                    isStreamMode ? 'bg-blue-400 animate-pulse w-full' : 'bg-blue-500'
+                  )}
+                  style={isStreamMode ? undefined : { width: `${progress}%` }}
                 />
               </div>
               <div className="flex justify-between text-xs text-gray-400">
-                <span>{((rowsMigrated ?? 0)).toLocaleString()} rows migrated</span>
+                <span>{rowsLabel(rowsMigrated)} rows migrated</span>
                 <span>Running for {durationLabel(m)}</span>
               </div>
             </div>
@@ -245,7 +264,12 @@ export default function MigrationsPage() {
                         {m.error && <p className="text-xs text-red-500 mt-0.5 max-w-[220px] truncate" title={m.error}>{m.error}</p>}
                       </td>
                       <td className="px-6 py-3 text-gray-600">{m.tablesCompleted} / {m.tableCount}</td>
-                      <td className="px-6 py-3 text-gray-600">{(m.rowsMigrated ?? 0).toLocaleString()}</td>
+                      <td
+                        className="px-6 py-3 text-gray-600"
+                        title={m.rowsMigrated === -1 ? 'Stream mode does not provide exact migrated row count.' : undefined}
+                      >
+                        {rowsLabel(m.rowsMigrated)}
+                      </td>
                       <td className="px-6 py-3 text-gray-500 text-xs">{durationLabel(m)}</td>
                       <td className="px-6 py-3 text-gray-500 text-xs">{formatDate(m.createdAt)}</td>
                       <td className="px-4 py-3">
