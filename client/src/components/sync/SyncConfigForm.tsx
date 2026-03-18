@@ -91,8 +91,8 @@ export function SyncConfigForm({ open, onClose, editId }: SyncConfigFormProps) {
         mode: config.mode,
         cronExpression: config.cronExpression || '',
         conflictStrategy: config.conflictStrategy,
-        includedTables: config.includedTables.join(', '),
-        excludedTables: config.excludedTables.join(', '),
+        includedTables: config.includeTables.join(', '),
+        excludedTables: config.excludeTables.join(', '),
         batchSize: config.batchSize
       })
     }

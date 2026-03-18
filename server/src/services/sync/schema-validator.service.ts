@@ -1,6 +1,7 @@
 import { engineFactory } from '../engines/engine.factory';
 import { ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from '../engines/base.engine';
 import { prisma } from '../../config/database';
+import { decrypt, decryptIfPresent } from '../crypto.service';
 
 export interface ColumnMismatch {
   tableName: string;
@@ -564,22 +565,22 @@ export class SchemaValidatorService {
   private prismaConnectionToConfig(connection: any): ConnectionConfig {
     return {
       type: connection.type,
-      host: connection.host,
+      host: decrypt(connection.host),
       port: connection.port,
-      username: connection.username,
-      password: connection.password,
-      database: connection.database,
+      username: decrypt(connection.username),
+      password: decrypt(connection.password),
+      database: decrypt(connection.database),
       sslEnabled: connection.sslEnabled,
-      sslCa: connection.sslCa,
-      sslCert: connection.sslCert,
-      sslKey: connection.sslKey,
-      connectionTimeout: connection.connectionTimeout,
+      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
+      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
+      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
+      connectionTimeout: connection.connectionTimeout ?? 30000,
       sshEnabled: connection.sshEnabled,
-      sshHost: connection.sshHost,
-      sshPort: connection.sshPort,
-      sshUsername: connection.sshUsername,
-      sshPrivateKey: connection.sshPrivateKey,
-      sshPassphrase: connection.sshPassphrase,
+      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
+      sshPort: connection.sshPort ?? undefined,
+      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
+      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
+      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
     };
   }
 }

@@ -9,7 +9,6 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Ca
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { CardSkeleton } from '../../components/ui/Skeleton'
 import { SyncStatusBadge } from '../../components/sync/SyncStatusBadge'
-import { ProgressIndicator } from '../../components/sync/ProgressIndicator'
 import { SyncConfigForm } from '../../components/sync/SyncConfigForm'
 
 export default function SyncConfigurationsPage() {
@@ -64,6 +63,13 @@ export default function SyncConfigurationsPage() {
 
   const getConflictsForConfig = (configId: string): number => {
     return conflictsData?.find((c: { id: string; count: number }) => c.id === configId)?.count ?? 0
+  }
+
+  // Helper to get display status from config and state
+  const getDisplayStatus = (config: SyncConfiguration, state?: SyncState): 'ACTIVE' | 'PAUSED' | 'FAILED' | 'STOPPED' => {
+    if (!config.isActive) return 'STOPPED'
+    if (!state) return 'STOPPED'
+    return state.status
   }
 
   const deleteMutation = useMutation({
@@ -130,7 +136,7 @@ export default function SyncConfigurationsPage() {
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
         {configurations.map((config: SyncConfiguration) => {
           const state = getStateForConfig(config.id)
-          const isRunning = state?.status === 'RUNNING' || state?.status === 'PENDING'
+          const displayStatus = getDisplayStatus(config, state)
           const conflictCount = getConflictsForConfig(config.id)
           const hasConflicts = conflictCount > 0
           const hasFailures = state && state.consecutiveFailures > 2
@@ -152,7 +158,7 @@ export default function SyncConfigurationsPage() {
                     </div>
                   )}
                 </div>
-                <SyncStatusBadge status={config.status} />
+                <SyncStatusBadge status={displayStatus} />
               </CardHeader>
               <CardContent className="space-y-3">
                 <div className="text-sm text-gray-500 space-y-2">
@@ -171,16 +177,6 @@ export default function SyncConfigurationsPage() {
                     <span className="truncate">Target: {config.targetConnectionId}</span>
                   </div>
                 </div>
-
-                {isRunning && state && (
-                  <div className="pt-2 border-t border-gray-50">
-                    <ProgressIndicator 
-                      configId={config.id} 
-                      status={state.status}
-                      mini={true}
-                    />
-                  </div>
-                )}
 
                 <div className="text-xs text-gray-400 pt-2 border-t border-gray-50">
                   <p>Last sync: {formatTimestamp(state?.lastSyncAt || config.updatedAt)}</p>

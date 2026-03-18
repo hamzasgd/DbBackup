@@ -11,18 +11,19 @@ export interface SyncConfiguration {
   mode: 'REALTIME' | 'SCHEDULED' | 'MANUAL'
   cronExpression?: string
   conflictStrategy: 'LAST_WRITE_WINS' | 'SOURCE_WINS' | 'TARGET_WINS' | 'MANUAL'
-  includedTables: string[]
-  excludedTables: string[]
+  includeTables: string[]
+  excludeTables: string[]
   batchSize: number
-  status: 'ACTIVE' | 'PAUSED' | 'FAILED' | 'STOPPED'
+  isActive: boolean
   createdAt: string
   updatedAt: string
+  syncState?: SyncState
 }
 
 export interface SyncState {
   id: string
   configurationId: string
-  status: 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+  status: 'ACTIVE' | 'PAUSED' | 'FAILED' | 'STOPPED'
   lastSyncAt?: string
   nextSyncAt?: string
   totalRowsSynced: number

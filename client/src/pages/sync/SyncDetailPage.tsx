@@ -7,7 +7,6 @@ import {
 } from 'lucide-react'
 import { syncApi } from '../../services/sync.service'
 import { SyncStatusBadge } from '../../components/sync/SyncStatusBadge'
-import { ProgressIndicator } from '../../components/sync/ProgressIndicator'
 import { LifecycleControls } from '../../components/sync/LifecycleControls'
 import { SyncHistoryTable } from '../../components/sync/SyncHistoryTable'
 import { ConflictResolutionModal } from '../../components/sync/ConflictResolutionModal'
@@ -45,15 +44,23 @@ export default function SyncDetailPage() {
   })
   const config = configResponse?.data.data
 
+  // Helper to get display status from config and state
+  const getDisplayStatus = (): 'ACTIVE' | 'PAUSED' | 'FAILED' | 'STOPPED' | undefined => {
+    if (!config) return undefined
+    if (!config.isActive) return 'STOPPED'
+    if (!state) return 'STOPPED'
+    return state.status
+  }
+
   // Fetch sync state with polling when running
   const { data: stateResponse, isLoading: stateLoading } = useQuery({
     queryKey: ['sync-state', id],
     queryFn: () => syncApi.getState(id!),
     enabled: !!id,
     refetchInterval: (query) => {
-      // Poll every 3 seconds if running
+      // Poll every 3 seconds if active
       const status = query.state.data?.data?.data?.status
-      return status === 'RUNNING' || status === 'PENDING' ? 3000 : false
+      return status === 'ACTIVE' ? 3000 : false
     }
   })
   const state = stateResponse?.data.data
@@ -118,7 +125,7 @@ export default function SyncDetailPage() {
             </>
           )}
         </div>
-        {config && <SyncStatusBadge status={config.status} />}
+        {config && <SyncStatusBadge status={getDisplayStatus()} />}
       </div>
 
       {/* Configuration details header */}
@@ -324,19 +331,10 @@ export default function SyncDetailPage() {
         <Card>
           <CardContent className="p-6">
             <h3 className="text-lg font-semibold text-gray-900 mb-4">Lifecycle Controls</h3>
-            <LifecycleControls configId={id!} status={config.status} />
+            <LifecycleControls configId={id!} status={getDisplayStatus() || 'STOPPED'} />
           </CardContent>
         </Card>
       )}
-
-      {/* Progress Indicator for Running Syncs */}
-      {state?.status === 'RUNNING' || state?.status === 'PENDING' ? (
-        <ProgressIndicator 
-          configId={id!} 
-          status={state.status}
-          mini={false}
-        />
-      ) : null}
 
       {/* Tab Navigation */}
       <div className="border-b border-gray-200">
@@ -368,9 +366,9 @@ export default function SyncDetailPage() {
               <div className="space-y-4 text-sm">
                 <div>
                   <p className="text-gray-500 mb-2">Included Tables</p>
-                  {config?.includedTables && config.includedTables.length > 0 ? (
+                  {config?.includeTables && config.includeTables.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {config.includedTables.map((table) => (
+                      {config.includeTables.map((table) => (
                         <span 
                           key={table}
                           className="px-2 py-1 bg-blue-50 text-blue-700 rounded text-xs font-mono"
@@ -385,9 +383,9 @@ export default function SyncDetailPage() {
                 </div>
                 <div>
                   <p className="text-gray-500 mb-2">Excluded Tables</p>
-                  {config?.excludedTables && config.excludedTables.length > 0 ? (
+                  {config?.excludeTables && config.excludeTables.length > 0 ? (
                     <div className="flex flex-wrap gap-2">
-                      {config.excludedTables.map((table) => (
+                      {config.excludeTables.map((table) => (
                         <span 
                           key={table}
                           className="px-2 py-1 bg-red-50 text-red-700 rounded text-xs font-mono"
