@@ -147,14 +147,14 @@ export default function SyncDetailPage() {
                 <p className="text-gray-500 mb-1">Source Connection</p>
                 <div className="flex items-center gap-2">
                   <Database className="h-4 w-4 text-blue-500" />
-                  <p className="font-medium text-gray-900 truncate">{config.sourceConnectionId}</p>
+                  <p className="font-medium text-gray-900 truncate">{config.sourceConnection?.name || config.sourceConnectionId}</p>
                 </div>
               </div>
               <div>
                 <p className="text-gray-500 mb-1">Target Connection</p>
                 <div className="flex items-center gap-2">
                   <Database className="h-4 w-4 text-blue-500" />
-                  <p className="font-medium text-gray-900 truncate">{config.targetConnectionId}</p>
+                  <p className="font-medium text-gray-900 truncate">{config.targetConnection?.name || config.targetConnectionId}</p>
                 </div>
               </div>
               <div>

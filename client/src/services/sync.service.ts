@@ -18,6 +18,14 @@ export interface SyncConfiguration {
   createdAt: string
   updatedAt: string
   syncState?: SyncState
+  sourceConnection?: {
+    id: string
+    name: string
+  }
+  targetConnection?: {
+    id: string
+    name: string
+  }
 }
 
 export interface SyncState {

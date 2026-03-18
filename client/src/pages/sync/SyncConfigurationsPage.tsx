@@ -164,7 +164,7 @@ export default function SyncConfigurationsPage() {
                 <div className="text-sm text-gray-500 space-y-2">
                   <div className="flex items-center gap-2">
                     <Database className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">Source: {config.sourceConnectionId}</span>
+                    <span className="truncate">Source: {config.sourceConnection?.name || config.sourceConnectionId}</span>
                   </div>
                   <div className="flex items-center gap-2">
                     <ArrowRight className="h-3.5 w-3.5 shrink-0" />
@@ -174,7 +174,7 @@ export default function SyncConfigurationsPage() {
                   </div>
                   <div className="flex items-center gap-2">
                     <Database className="h-3.5 w-3.5 shrink-0" />
-                    <span className="truncate">Target: {config.targetConnectionId}</span>
+                    <span className="truncate">Target: {config.targetConnection?.name || config.targetConnectionId}</span>
                   </div>
                 </div>
 
