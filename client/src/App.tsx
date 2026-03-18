@@ -8,6 +8,7 @@ import RegisterPage from './pages/auth/RegisterPage'
 import DashboardPage from './pages/dashboard/DashboardPage'
 import ConnectionsPage from './pages/connections/ConnectionsPage'
 import ConnectionInfoPage from './pages/connections/ConnectionInfoPage'
+import TableDetailsPage from './pages/connections/TableDetailsPage'
 import BackupsPage from './pages/backups/BackupsPage'
 import SchedulesPage from './pages/schedules/SchedulesPage'
 import SettingsPage from './pages/settings/SettingsPage'
@@ -31,6 +32,7 @@ function App() {
               <Route path="/dashboard" element={<DashboardPage />} />
               <Route path="/connections" element={<ConnectionsPage />} />
               <Route path="/connections/:id/info" element={<ConnectionInfoPage />} />
+              <Route path="/connections/:id/info/tables/:tableName" element={<TableDetailsPage />} />
               <Route path="/backups" element={<BackupsPage />} />
               <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/migrations" element={<MigrationsPage />} />

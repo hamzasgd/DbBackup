@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { Link, useParams, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import {
   Database, Table2, ChevronDown, ChevronRight,
@@ -58,7 +58,7 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
           {open ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
         </span>
         <Table2 className="h-4 w-4 text-blue-500 shrink-0" />
-        <span className="font-mono text-sm font-medium text-gray-800 flex-1">{table.name}</span>
+        <span className="font-mono text-sm font-medium text-gray-800 flex-1 truncate">{table.name}</span>
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-4 text-xs text-gray-500">
             <span className="flex items-center gap-1">
@@ -85,6 +85,12 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
           </div>
           {/* Export buttons */}
           <div className="flex items-center gap-1" onClick={e => e.stopPropagation()}>
+            <Link
+              to={`/connections/${connectionId}/info/tables/${encodeURIComponent(table.name)}`}
+              className="px-2 py-1 text-xs font-medium rounded border bg-white border-gray-200 text-gray-500 hover:border-blue-400 hover:text-blue-600 hover:bg-blue-50"
+            >
+              Details
+            </Link>
             {(['json', 'csv', 'sql'] as ExportFormat[]).map(fmt => (
               <button
                 key={fmt}
