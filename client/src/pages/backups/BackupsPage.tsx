@@ -14,25 +14,20 @@ import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabe
 import { useProgressSSE } from '../../hooks/useProgressSSE'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton } from '../../components/ui/Skeleton'
-import api from '../../lib/api'
 import { useAuthStore } from '../../store/auth.store'
 
-async function downloadBackup(backup: Backup) {
-  try {
-    const accessToken = useAuthStore.getState().accessToken
-    const res = await api.get(`/backups/${backup.id}/download`, {
-      responseType: 'blob',
-      params: accessToken ? { token: accessToken } : undefined,
-    })
-    const url = URL.createObjectURL(res.data as Blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = backup.fileName
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch {
-    toast.error('Failed to download backup')
-  }
+function startBackupDownload(backup: Backup) {
+  const accessToken = useAuthStore.getState().accessToken
+  const tokenQuery = accessToken ? `?token=${encodeURIComponent(accessToken)}` : ''
+  const url = `/api/backups/${backup.id}/download${tokenQuery}`
+
+  const a = document.createElement('a')
+  a.href = url
+  a.download = backup.fileName
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
 }
 
 const MYSQL_FORMATS: { label: string; value: BackupFormat }[] = [
@@ -94,6 +89,7 @@ function BackupRow({
   const sse = useProgressSSE(`/backups/${b.id}/progress`, isActive)
   const progress = sse?.progress ?? b.progress
   const [verifying, setVerifying] = useState(false)
+  const [downloading, setDownloading] = useState(false)
 
   async function handleVerify() {
     setVerifying(true)
@@ -107,6 +103,14 @@ function BackupRow({
     } finally {
       setVerifying(false)
     }
+  }
+
+  function handleDownload() {
+    if (downloading) return
+    setDownloading(true)
+    startBackupDownload(b)
+    toast.success('Download started in browser')
+    window.setTimeout(() => setDownloading(false), 4000)
   }
 
   return (
@@ -151,8 +155,15 @@ function BackupRow({
         <div className="flex items-center gap-1 justify-end flex-wrap">
           {b.status === 'COMPLETED' && (
             <>
-              <Button size="sm" variant="ghost" onClick={() => downloadBackup(b)} title="Download backup file">
-                <Download className="h-3.5 w-3.5" />
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={handleDownload}
+                title="Download backup file"
+                loading={downloading}
+                disabled={downloading}
+              >
+                {!downloading && <Download className="h-3.5 w-3.5" />}
               </Button>
               <Button size="sm" variant="ghost" onClick={onRestore} title="Restore backup">
                 <RotateCcw className="h-3.5 w-3.5" />
