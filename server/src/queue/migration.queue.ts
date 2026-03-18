@@ -106,14 +106,17 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
           include: { sourceConnection: { select: { userId: true, name: true } }, targetConnection: { select: { name: true } } },
         });
         if (migRecord) {
-          void notify(migRecord.sourceConnection.userId, {
-            event: 'MIGRATION_COMPLETED',
-            title: '✅ Migration Completed',
-            message: `Migration from "${migRecord.sourceConnection.name}" to "${migRecord.targetConnection.name}" completed.`,
-            details: { 'Rows Migrated': Number(result.rowsMigrated).toLocaleString() },
-          });
+          if (migRecord.sourceConnection && migRecord.sourceConnection.userId) {
+            void notify(migRecord.sourceConnection.userId, {
+              event: 'MIGRATION_COMPLETED',
+              title: 'Migration Completed',
+              message: `Migration to ${migRecord.targetConnection.name} completed successfully`
+            });
+          }
         }
-      } catch (error) {
+
+        return result;
+      } catch (error: any) {
         const errMsg = error instanceof Error ? error.message : 'Unknown error';
         await prisma.migration.update({
           where: { id: migrationId },
@@ -126,12 +129,13 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
           include: { sourceConnection: { select: { userId: true, name: true } }, targetConnection: { select: { name: true } } },
         });
         if (migRecord) {
-          void notify(migRecord.sourceConnection.userId, {
-            event: 'MIGRATION_FAILED',
-            title: '❌ Migration Failed',
-            message: `Migration from "${migRecord.sourceConnection.name}" to "${migRecord.targetConnection.name}" failed.`,
-            details: { Error: errMsg },
-          });
+          if (migRecord?.sourceConnection && migRecord.sourceConnection.userId) {
+            void notify(migRecord.sourceConnection.userId, {
+              event: 'MIGRATION_FAILED',
+              title: 'Migration Failed',
+              message: `Migration to ${migRecord.targetConnection.name} failed`
+            });
+          }
         }
 
         logger.error(`❌ Migration ${migrationId} failed:`, error);
