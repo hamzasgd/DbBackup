@@ -5,14 +5,11 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { addMigrationJob } from '../queue/migration.queue';
+import { ConnectionConfig } from '../services/engines/base.engine';
 
-function decryptConn(conn: {
-  type: string; host: string; port: number; username: string; password: string; database: string;
-  sslEnabled: boolean; sshEnabled: boolean; sshHost: string | null; sshPort: number | null;
-  sshUsername: string | null; sshPrivateKey: string | null; sshPassphrase: string | null;
-}) {
+const decryptConn = (conn: any): ConnectionConfig => {
   return {
-    type: conn.type,
+    type: conn.type as ConnectionConfig['type'],
     host: decrypt(conn.host),
     port: conn.port,
     username: decrypt(conn.username),
