@@ -15,10 +15,15 @@ import { useProgressSSE } from '../../hooks/useProgressSSE'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton } from '../../components/ui/Skeleton'
 import api from '../../lib/api'
+import { useAuthStore } from '../../store/auth.store'
 
 async function downloadBackup(backup: Backup) {
   try {
-    const res = await api.get(`/backups/${backup.id}/download`, { responseType: 'blob' })
+    const accessToken = useAuthStore.getState().accessToken
+    const res = await api.get(`/backups/${backup.id}/download`, {
+      responseType: 'blob',
+      params: accessToken ? { token: accessToken } : undefined,
+    })
     const url = URL.createObjectURL(res.data as Blob)
     const a = document.createElement('a')
     a.href = url
