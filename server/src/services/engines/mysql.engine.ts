@@ -276,6 +276,11 @@ export class MySQLEngine extends BaseEngine {
             rowCount: Number((countRow as mysql2.RowDataPacket)['row_count']) || 0,
             sizeBytes: Number(t['size_bytes']) || 0,
             logicalSizeBytes: Number(t['data_bytes']) || 0,
+            indexSizeBytes: Number(t['index_bytes']) || 0,
+            extraStorageBytes: Math.max(
+              (Number(t['size_bytes']) || 0) - (Number(t['data_bytes']) || 0) - (Number(t['index_bytes']) || 0),
+              0
+            ),
             overheadBytes: Number(t['index_bytes']) || 0,
             overheadPercent: (Number(t['data_bytes']) || 0) > 0
               ? ((Number(t['index_bytes']) || 0) / Number(t['data_bytes'])) * 100
@@ -286,7 +291,9 @@ export class MySQLEngine extends BaseEngine {
       );
 
       const logicalSizeBytes = tables.reduce((sum, t) => sum + t.logicalSizeBytes, 0);
+      const indexSizeBytes = tables.reduce((sum, t) => sum + t.indexSizeBytes, 0);
       const overheadBytes = Math.max(totalSizeBytes - logicalSizeBytes, 0);
+      const extraStorageBytes = Math.max(overheadBytes - indexSizeBytes, 0);
       const overheadPercent = logicalSizeBytes > 0 ? (overheadBytes / logicalSizeBytes) * 100 : 0;
 
       return {
@@ -294,6 +301,8 @@ export class MySQLEngine extends BaseEngine {
         version,
         totalSizeBytes,
         logicalSizeBytes,
+        indexSizeBytes,
+        extraStorageBytes,
         overheadBytes,
         overheadPercent,
         tableCount: tables.length,

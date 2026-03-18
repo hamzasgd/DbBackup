@@ -12,6 +12,11 @@ import api from '../../lib/api'
 
 type ExportFormat = 'json' | 'csv' | 'sql'
 
+function pct(part: number, base: number): string {
+  if (base <= 0) return '0.0'
+  return ((part / base) * 100).toFixed(1)
+}
+
 async function downloadExport(connectionId: string, tableName: string, format: ExportFormat) {
   try {
     const res = await api.post(
@@ -63,9 +68,13 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
               {formatBytes(table.sizeBytes)} physical
             </span>
             <span>{formatBytes(table.logicalSizeBytes)} logical</span>
-            <span>
-              +{table.overheadPercent.toFixed(1)}% overhead
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-blue-50 text-blue-700 font-medium">
+              IDX {formatBytes(table.indexSizeBytes)} ({pct(table.indexSizeBytes, table.logicalSizeBytes)}%)
             </span>
+            <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 font-medium">
+              Extra {formatBytes(table.extraStorageBytes)} ({pct(table.extraStorageBytes, table.logicalSizeBytes)}%)
+            </span>
+            <span>+{table.overheadPercent.toFixed(1)}% total</span>
             <span className="text-gray-400">{table.columns.length} cols</span>
           </div>
           {/* Export buttons */}
@@ -210,7 +219,7 @@ export default function ConnectionInfoPage() {
 
       {/* Stats bar */}
       {info && (
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-4">
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Database</p>
             <p className="text-sm font-semibold text-gray-800 font-mono">{info.database}</p>
@@ -227,6 +236,16 @@ export default function ConnectionInfoPage() {
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Overhead</p>
             <p className="text-sm font-semibold text-gray-800">{formatBytes(info.overheadBytes)}</p>
             <p className="text-xs text-gray-500 mt-1">+{info.overheadPercent.toFixed(1)}%</p>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Index Overhead</p>
+            <p className="text-sm font-semibold text-gray-800">{formatBytes(info.indexSizeBytes)}</p>
+            <p className="text-xs text-gray-500 mt-1">{pct(info.indexSizeBytes, info.logicalSizeBytes)}%</p>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Extra Storage</p>
+            <p className="text-sm font-semibold text-gray-800">{formatBytes(info.extraStorageBytes)}</p>
+            <p className="text-xs text-gray-500 mt-1">{pct(info.extraStorageBytes, info.logicalSizeBytes)}%</p>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Tables</p>

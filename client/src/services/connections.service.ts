@@ -49,6 +49,8 @@ export interface TableInfo {
   rowCount: number
   sizeBytes: number
   logicalSizeBytes: number
+  indexSizeBytes: number
+  extraStorageBytes: number
   overheadBytes: number
   overheadPercent: number
   columns: ColumnInfo[]
@@ -59,6 +61,8 @@ export interface DbInfo {
   version: string
   totalSizeBytes: number
   logicalSizeBytes: number
+  indexSizeBytes: number
+  extraStorageBytes: number
   overheadBytes: number
   overheadPercent: number
   tableCount: number

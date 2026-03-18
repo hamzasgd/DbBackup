@@ -290,9 +290,12 @@ export class PostgreSQLEngine extends BaseEngine {
         SELECT
           t.table_schema                            AS schema,
           t.table_name                              AS name,
-          pg_table_size(
+          pg_relation_size(
             quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
           )                                         AS logical_size_bytes,
+          pg_indexes_size(
+            quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
+          )                                         AS index_size_bytes,
           pg_total_relation_size(
             quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
           )                                         AS size_bytes
@@ -365,6 +368,11 @@ export class PostgreSQLEngine extends BaseEngine {
             rowCount: Number(countRow?.row_count ?? 0),
             sizeBytes: Number(t.size_bytes),
             logicalSizeBytes: Number(t.logical_size_bytes),
+            indexSizeBytes: Number(t.index_size_bytes),
+            extraStorageBytes: Math.max(
+              Number(t.size_bytes) - Number(t.logical_size_bytes) - Number(t.index_size_bytes),
+              0
+            ),
             overheadBytes: Math.max(Number(t.size_bytes) - Number(t.logical_size_bytes), 0),
             overheadPercent: Number(t.logical_size_bytes) > 0
               ? (Math.max(Number(t.size_bytes) - Number(t.logical_size_bytes), 0) / Number(t.logical_size_bytes)) * 100
@@ -375,7 +383,9 @@ export class PostgreSQLEngine extends BaseEngine {
       );
 
       const logicalSizeBytes = tables.reduce((sum, t) => sum + t.logicalSizeBytes, 0);
+      const indexSizeBytes = tables.reduce((sum, t) => sum + t.indexSizeBytes, 0);
       const overheadBytes = Math.max(totalSizeBytes - logicalSizeBytes, 0);
+      const extraStorageBytes = Math.max(overheadBytes - indexSizeBytes, 0);
       const overheadPercent = logicalSizeBytes > 0 ? (overheadBytes / logicalSizeBytes) * 100 : 0;
 
       return {
@@ -383,6 +393,8 @@ export class PostgreSQLEngine extends BaseEngine {
         version,
         totalSizeBytes,
         logicalSizeBytes,
+        indexSizeBytes,
+        extraStorageBytes,
         overheadBytes,
         overheadPercent,
         tableCount: tables.length,
