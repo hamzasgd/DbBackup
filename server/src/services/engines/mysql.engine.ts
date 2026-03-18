@@ -222,6 +222,8 @@ export class MySQLEngine extends BaseEngine {
       const [tableRows] = await conn.query<mysql2.RowDataPacket[]>(`
         SELECT
           TABLE_NAME        AS name,
+          DATA_LENGTH       AS data_bytes,
+          INDEX_LENGTH      AS index_bytes,
           DATA_LENGTH + INDEX_LENGTH AS size_bytes
         FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
@@ -273,15 +275,27 @@ export class MySQLEngine extends BaseEngine {
             name: tableName,
             rowCount: Number((countRow as mysql2.RowDataPacket)['row_count']) || 0,
             sizeBytes: Number(t['size_bytes']) || 0,
+            logicalSizeBytes: Number(t['data_bytes']) || 0,
+            overheadBytes: Number(t['index_bytes']) || 0,
+            overheadPercent: (Number(t['data_bytes']) || 0) > 0
+              ? ((Number(t['index_bytes']) || 0) / Number(t['data_bytes'])) * 100
+              : 0,
             columns,
           };
         })
       );
 
+      const logicalSizeBytes = tables.reduce((sum, t) => sum + t.logicalSizeBytes, 0);
+      const overheadBytes = Math.max(totalSizeBytes - logicalSizeBytes, 0);
+      const overheadPercent = logicalSizeBytes > 0 ? (overheadBytes / logicalSizeBytes) * 100 : 0;
+
       return {
         database: this.config.database,
         version,
         totalSizeBytes,
+        logicalSizeBytes,
+        overheadBytes,
+        overheadPercent,
         tableCount: tables.length,
         tables,
       };

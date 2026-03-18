@@ -50,6 +50,9 @@ export interface TableInfo {
   name: string;
   rowCount: number;
   sizeBytes: number;
+  logicalSizeBytes: number;
+  overheadBytes: number;
+  overheadPercent: number;
   columns: ColumnInfo[];
 }
 
@@ -57,6 +60,9 @@ export interface DbInfo {
   database: string;
   version: string;
   totalSizeBytes: number;
+  logicalSizeBytes: number;
+  overheadBytes: number;
+  overheadPercent: number;
   tableCount: number;
   tables: TableInfo[];
 }

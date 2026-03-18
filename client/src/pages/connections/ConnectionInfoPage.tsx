@@ -60,7 +60,11 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
             </span>
             <span className="flex items-center gap-1">
               <HardDrive className="h-3.5 w-3.5" />
-              {formatBytes(table.sizeBytes)}
+              {formatBytes(table.sizeBytes)} physical
+            </span>
+            <span>{formatBytes(table.logicalSizeBytes)} logical</span>
+            <span>
+              +{table.overheadPercent.toFixed(1)}% overhead
             </span>
             <span className="text-gray-400">{table.columns.length} cols</span>
           </div>
@@ -206,14 +210,23 @@ export default function ConnectionInfoPage() {
 
       {/* Stats bar */}
       {info && (
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4">
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Database</p>
             <p className="text-sm font-semibold text-gray-800 font-mono">{info.database}</p>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
-            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Total Size</p>
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Physical Size</p>
             <p className="text-sm font-semibold text-gray-800">{formatBytes(info.totalSizeBytes)}</p>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Logical Size</p>
+            <p className="text-sm font-semibold text-gray-800">{formatBytes(info.logicalSizeBytes)}</p>
+          </div>
+          <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
+            <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Overhead</p>
+            <p className="text-sm font-semibold text-gray-800">{formatBytes(info.overheadBytes)}</p>
+            <p className="text-xs text-gray-500 mt-1">+{info.overheadPercent.toFixed(1)}%</p>
           </div>
           <div className="bg-white border border-gray-200 rounded-xl px-6 py-4 text-center shadow-sm">
             <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Tables</p>

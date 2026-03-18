@@ -290,6 +290,9 @@ export class PostgreSQLEngine extends BaseEngine {
         SELECT
           t.table_schema                            AS schema,
           t.table_name                              AS name,
+          pg_table_size(
+            quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
+          )                                         AS logical_size_bytes,
           pg_total_relation_size(
             quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
           )                                         AS size_bytes
@@ -361,15 +364,27 @@ export class PostgreSQLEngine extends BaseEngine {
             name: tableName,
             rowCount: Number(countRow?.row_count ?? 0),
             sizeBytes: Number(t.size_bytes),
+            logicalSizeBytes: Number(t.logical_size_bytes),
+            overheadBytes: Math.max(Number(t.size_bytes) - Number(t.logical_size_bytes), 0),
+            overheadPercent: Number(t.logical_size_bytes) > 0
+              ? (Math.max(Number(t.size_bytes) - Number(t.logical_size_bytes), 0) / Number(t.logical_size_bytes)) * 100
+              : 0,
             columns,
           };
         })
       );
 
+      const logicalSizeBytes = tables.reduce((sum, t) => sum + t.logicalSizeBytes, 0);
+      const overheadBytes = Math.max(totalSizeBytes - logicalSizeBytes, 0);
+      const overheadPercent = logicalSizeBytes > 0 ? (overheadBytes / logicalSizeBytes) * 100 : 0;
+
       return {
         database: this.config.database,
         version,
         totalSizeBytes,
+        logicalSizeBytes,
+        overheadBytes,
+        overheadPercent,
         tableCount: tables.length,
         tables,
       };
