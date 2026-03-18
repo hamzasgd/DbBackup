@@ -30,6 +30,7 @@ export async function getSchedules(req: AuthRequest, res: Response, next: NextFu
 
         if (
           schedule.isActive &&
+          computedNextRunAt &&
           (!schedule.nextRunAt || Math.abs(computedNextRunAt.getTime() - schedule.nextRunAt.getTime()) > 1000)
         ) {
           await prisma.schedule.update({
