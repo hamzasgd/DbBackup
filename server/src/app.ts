@@ -19,6 +19,10 @@ import exportRoutes from './routes/export.routes';
 import migrationRoutes from './routes/migration.routes';
 import notificationRoutes from './routes/notification.routes';
 import storageRoutes from './routes/storage.routes';
+import syncConfigRoutes from './routes/sync-config.routes';
+import syncConflictRoutes from './routes/sync-conflict.routes';
+import syncStateRoutes from './routes/sync-state.routes';
+import syncOperationsRoutes from './routes/sync-operations.routes';
 
 const app = express();
 
@@ -73,6 +77,10 @@ app.use('/api/audit', auditRoutes);
 app.use('/api/migrations', migrationRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/storage', storageRoutes);
+app.use('/api/sync/configurations', syncConfigRoutes);
+app.use('/api/sync/configurations', syncStateRoutes);
+app.use('/api/sync/configurations', syncOperationsRoutes);
+app.use('/api/sync/conflicts', syncConflictRoutes);
 
 // Serve React frontend in production
 if (process.env.NODE_ENV === 'production') {

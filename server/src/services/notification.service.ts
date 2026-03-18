@@ -10,7 +10,9 @@ export type NotificationEventType =
   | 'MIGRATION_COMPLETED'
   | 'MIGRATION_FAILED'
   | 'VERIFICATION_FAILED'
-  | 'RETENTION_CLEANUP';
+  | 'RETENTION_CLEANUP'
+  | 'SYNC_COMPLETED'
+  | 'SYNC_FAILED';
 
 export interface NotificationPayload {
   event: NotificationEventType;
