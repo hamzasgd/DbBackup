@@ -44,6 +44,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
     BACKUP_QUEUE_NAME,
     async (job: Job<BackupJobData>) => {
       const { backupId, config, outputDir, format } = job.data;
+      logger.info(`Backup worker picked job ${job.id} (backupId=${backupId}, db=${config.database})`);
 
       // Fetch connection to get userId for notifications/retention
       const backupRecord = await prisma.backup.findUnique({
@@ -68,6 +69,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         const onProgress = async (pct: number) => {
           if (pct - lastReported >= 10) {
             lastReported = pct;
+            logger.info(`Backup ${backupId} progress ${pct}%`);
             await prisma.backup.update({ where: { id: backupId }, data: { progress: pct } });
             await publishProgress(BACKUP_PROGRESS_CHANNEL(backupId), { progress: pct, status: 'RUNNING' });
           }
@@ -181,6 +183,9 @@ export function createBackupWorker(): Worker<BackupJobData> {
 
   worker.on('completed', (job) => logger.info(`Backup job ${job.id} completed`));
   worker.on('failed', (job, err) => logger.error(`Backup job ${job?.id} failed:`, err));
+  worker.on('active', (job) => logger.info(`Backup job ${job.id} is active`));
+  worker.on('stalled', (jobId) => logger.warn(`Backup job ${jobId} stalled`));
+  worker.on('error', (err) => logger.error('Backup worker error:', err));
 
   return worker;
 }

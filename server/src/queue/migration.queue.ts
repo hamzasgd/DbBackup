@@ -44,6 +44,8 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
     async (job: Job<MigrationJobData>) => {
       const { migrationId, sourceConfig, targetConfig, tables, batchSize } = job.data;
 
+      logger.info(`Migration worker picked job ${job.id} (migrationId=${migrationId})`);
+
       await prisma.migration.update({
         where: { id: migrationId },
         data: { status: 'RUNNING', startedAt: new Date(), progress: 0 },
@@ -59,6 +61,10 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
             const now = Date.now();
             if (now - lastProgressUpdate > 3000) {
               lastProgressUpdate = now;
+              logger.info(
+                `Migration ${migrationId} progress ${Math.min(info.progress, 99)}% ` +
+                `(table=${info.currentTable}, tables=${info.tablesCompleted}/${info.tableCount}, rows=${info.rowsMigrated})`
+              );
               await prisma.migration.update({
                 where: { id: migrationId },
                 data: {
@@ -150,6 +156,9 @@ export function createMigrationWorker(): Worker<MigrationJobData> {
 
   worker.on('completed', (job) => logger.info(`Migration job ${job.id} completed`));
   worker.on('failed', (job, err) => logger.error(`Migration job ${job?.id} failed:`, err));
+  worker.on('active', (job) => logger.info(`Migration job ${job.id} is active`));
+  worker.on('stalled', (jobId) => logger.warn(`Migration job ${jobId} stalled`));
+  worker.on('error', (err) => logger.error('Migration worker error:', err));
 
   return worker;
 }

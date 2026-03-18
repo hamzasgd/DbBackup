@@ -41,6 +41,7 @@ export function createScheduleWorker(): Worker {
     SCHEDULE_QUEUE_NAME,
     async (job: Job) => {
       const { scheduleId } = job.data;
+      logger.info(`Schedule worker picked job ${job.id} (scheduleId=${scheduleId})`);
 
       const schedule = await prisma.schedule.findUnique({
         where: { id: scheduleId },
@@ -102,6 +103,12 @@ export function createScheduleWorker(): Worker {
     },
     { connection: getRedisConfig() }
   );
+
+  worker.on('active', (job) => logger.info(`Schedule job ${job.id} is active`));
+  worker.on('completed', (job) => logger.info(`Schedule job ${job.id} completed`));
+  worker.on('failed', (job, err) => logger.error(`Schedule job ${job?.id} failed:`, err));
+  worker.on('stalled', (jobId) => logger.warn(`Schedule job ${jobId} stalled`));
+  worker.on('error', (err) => logger.error('Schedule worker error:', err));
 
   return worker;
 }

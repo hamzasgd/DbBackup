@@ -9,6 +9,9 @@ export async function startWorkers(): Promise<void> {
   const migrationWorker = createMigrationWorker();
 
   logger.info('✅ Queue workers started');
+  logger.info(`Backup worker id=${backupWorker.id}`);
+  logger.info(`Schedule worker id=${scheduleWorker.id}`);
+  logger.info(`Migration worker id=${migrationWorker.id}`);
 
   process.on('SIGTERM', async () => {
     await backupWorker.close();
