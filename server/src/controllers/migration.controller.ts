@@ -6,6 +6,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { addMigrationJob } from '../queue/migration.queue';
 import { ConnectionConfig } from '../services/engines/base.engine';
+import { verifyMigrationConsistency } from '../services/migration-verification.service';
 
 const decryptConn = (conn: any): ConnectionConfig => {
   return {
@@ -119,5 +120,38 @@ export async function deleteMigration(req: AuthRequest, res: Response, next: Nex
     if (migration.status === 'RUNNING') throw new AppError('Cannot delete a running migration', 409);
     await prisma.migration.delete({ where: { id: migration.id } });
     res.json({ success: true, message: 'Migration deleted' });
+  } catch (err) { next(err); }
+}
+
+export async function verifyMigration(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const migration = await prisma.migration.findFirst({
+      where: { id: req.params.id, sourceConnection: { userId: req.user!.userId } },
+      include: {
+        sourceConnection: true,
+        targetConnection: true,
+      },
+    });
+
+    if (!migration) throw new AppError('Migration not found', 404);
+    if (migration.status !== 'COMPLETED') {
+      throw new AppError('Only completed migrations can be verified', 409);
+    }
+
+    const sourceConfig = decryptConn(migration.sourceConnection);
+    const targetConfig = decryptConn(migration.targetConnection);
+    const bodyTables = Array.isArray(req.body?.tables)
+      ? req.body.tables.filter((t: unknown) => typeof t === 'string' && t.trim().length > 0)
+      : undefined;
+
+    const verification = await verifyMigrationConsistency(sourceConfig, targetConfig, bodyTables);
+
+    res.json({
+      success: true,
+      data: verification,
+      message: verification.ok
+        ? 'Verification passed: schema, rows, and index signatures match.'
+        : 'Verification found mismatches. Review details.',
+    });
   } catch (err) { next(err); }
 }

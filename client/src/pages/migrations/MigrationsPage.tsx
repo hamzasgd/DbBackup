@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { ArrowLeftRight, Plus, Trash2, RefreshCw, MoveRight, CheckCircle2, XCircle, Clock, Loader2 } from 'lucide-react'
-import { migrationsApi, type Migration } from '../../services/migrations.service'
+import { migrationsApi, type Migration, type MigrationVerificationResult } from '../../services/migrations.service'
 import { connectionsApi } from '../../services/connections.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
@@ -101,6 +101,8 @@ export default function MigrationsPage() {
   const [batchSize, setBatchSize] = useState(500)
   const [notes, setNotes] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [verification, setVerification] = useState<MigrationVerificationResult | null>(null)
+  const [verificationOpen, setVerificationOpen] = useState(false)
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
   const connections = connsData?.data.data ?? []
@@ -139,6 +141,18 @@ export default function MigrationsPage() {
     mutationFn: (id: string) => migrationsApi.delete(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['migrations'] }); toast.success('Migration removed') },
     onError: () => toast.error('Failed to delete migration'),
+  })
+
+  const verifyMutation = useMutation({
+    mutationFn: (id: string) => migrationsApi.verify(id),
+    onSuccess: (res) => {
+      setVerification(res.data.data)
+      setVerificationOpen(true)
+      if (res.data.data.ok) toast.success('Verification passed')
+      else toast.error('Verification found mismatches')
+    },
+    onError: (err: { response?: { data?: { message?: string } } }) =>
+      toast.error(err?.response?.data?.message ?? 'Verification failed'),
   })
 
   const targetOptions = connections.filter(c => c.id !== sourceId)
@@ -235,13 +249,26 @@ export default function MigrationsPage() {
                       <td className="px-6 py-3 text-gray-500 text-xs">{durationLabel(m)}</td>
                       <td className="px-6 py-3 text-gray-500 text-xs">{formatDate(m.createdAt)}</td>
                       <td className="px-4 py-3">
-                        <Button
-                          size="sm" variant="ghost"
-                          className="text-red-500 hover:bg-red-50"
-                          onClick={() => setDeleteTarget(m.id)}
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
+                        <div className="flex items-center gap-1 justify-end">
+                          {m.status === 'COMPLETED' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-blue-600 hover:bg-blue-50"
+                              onClick={() => verifyMutation.mutate(m.id)}
+                              loading={verifyMutation.isPending}
+                            >
+                              Verify
+                            </Button>
+                          )}
+                          <Button
+                            size="sm" variant="ghost"
+                            className="text-red-500 hover:bg-red-50"
+                            onClick={() => setDeleteTarget(m.id)}
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </Button>
+                        </div>
                       </td>
                     </tr>
                   ))}
@@ -343,6 +370,92 @@ export default function MigrationsPage() {
         variant="danger"
         loading={deleteMutation.isPending}
       />
+
+      <Modal
+        open={verificationOpen}
+        onClose={() => setVerificationOpen(false)}
+        title="Migration Verification"
+        className="max-w-4xl"
+      >
+        {!verification ? null : (
+          <div className="space-y-4">
+            <div className={cn(
+              'rounded-lg border px-3 py-2 text-sm',
+              verification.ok
+                ? 'bg-green-50 border-green-200 text-green-800'
+                : 'bg-amber-50 border-amber-200 text-amber-800'
+            )}>
+              {verification.ok
+                ? 'Verification passed: row counts, schema compatibility, and index signatures matched.'
+                : 'Verification found mismatches. Review details below.'}
+            </div>
+
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Tables Checked</p>
+                <p className="font-semibold text-gray-800">{verification.tableCountChecked}</p>
+              </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Row Mismatches</p>
+                <p className="font-semibold text-gray-800">{verification.rowMismatchCount}</p>
+              </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Missing Tables</p>
+                <p className="font-semibold text-gray-800">{verification.missingTableCount}</p>
+              </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Missing Index Signatures</p>
+                <p className="font-semibold text-gray-800">{verification.missingIndexCount}</p>
+              </div>
+            </div>
+
+            {verification.schemaErrors.length > 0 && (
+              <div>
+                <p className="text-sm font-medium text-red-700 mb-1">Schema Errors</p>
+                <ul className="text-xs text-red-600 space-y-1 max-h-28 overflow-y-auto pr-1">
+                  {verification.schemaErrors.map((err) => (
+                    <li key={err}>• {err}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            <div className="border border-gray-200 rounded-lg overflow-hidden">
+              <div className="max-h-72 overflow-auto">
+                <table className="w-full text-xs">
+                  <thead className="bg-gray-50 sticky top-0">
+                    <tr>
+                      <th className="text-left px-3 py-2">Table</th>
+                      <th className="text-left px-3 py-2">Rows (src -> dst)</th>
+                      <th className="text-left px-3 py-2">Missing Idx</th>
+                      <th className="text-left px-3 py-2">Extra Idx</th>
+                      <th className="text-left px-3 py-2">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    {verification.tableResults.map((t) => {
+                      const issue = t.missingInTarget || !t.rowsMatch || t.missingIndexes.length > 0
+                      return (
+                        <tr key={t.tableName}>
+                          <td className="px-3 py-2 font-mono text-gray-700">{t.tableName}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.sourceRows.toLocaleString()} -> {t.targetRows.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.missingIndexes.length}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.extraIndexes.length}</td>
+                          <td className="px-3 py-2">
+                            <Badge className={issue ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}>
+                              {issue ? 'Needs Review' : 'OK'}
+                            </Badge>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
+      </Modal>
     </div>
   )
 }

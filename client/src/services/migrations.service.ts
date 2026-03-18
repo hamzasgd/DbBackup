@@ -29,6 +29,29 @@ export interface CreateMigrationPayload {
   notes?: string
 }
 
+export interface MigrationTableVerification {
+  tableName: string
+  sourceRows: number
+  targetRows: number
+  rowsMatch: boolean
+  missingInTarget: boolean
+  missingIndexes: string[]
+  extraIndexes: string[]
+}
+
+export interface MigrationVerificationResult {
+  ok: boolean
+  sourceDatabase: string
+  targetDatabase: string
+  tableCountChecked: number
+  rowMismatchCount: number
+  missingTableCount: number
+  missingIndexCount: number
+  schemaErrors: string[]
+  schemaWarnings: string[]
+  tableResults: MigrationTableVerification[]
+}
+
 export const migrationsApi = {
   getAll: () =>
     api.get<{ success: boolean; data: { migrations: Migration[]; total: number } }>('/migrations'),
@@ -36,6 +59,8 @@ export const migrationsApi = {
     api.get<{ success: boolean; data: Migration }>(`/migrations/${id}`),
   create: (data: CreateMigrationPayload) =>
     api.post<{ success: boolean; data: Migration }>('/migrations', data),
+  verify: (id: string, tables?: string[]) =>
+    api.post<{ success: boolean; data: MigrationVerificationResult; message: string }>(`/migrations/${id}/verify`, { tables }),
   delete: (id: string) =>
     api.delete(`/migrations/${id}`),
 }
