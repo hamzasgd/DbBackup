@@ -7,6 +7,10 @@ import { SSHTunnel } from '../ssh.service';
 import mysql2 from 'mysql2/promise';
 
 export class MySQLEngine extends BaseEngine {
+  private quoteIdentifier(identifier: string): string {
+    return `\`${identifier.replace(/`/g, '``')}\``;
+  }
+
   private getArgs(includePassword = true): string[] {
     const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
     const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
@@ -214,11 +218,10 @@ export class MySQLEngine extends BaseEngine {
       const [[versionRow]] = await conn.query<mysql2.RowDataPacket[]>('SELECT VERSION() AS v');
       const version = (versionRow as mysql2.RowDataPacket)['v'] as string;
 
-      // Table stats from information_schema
+      // Table sizes from information_schema. Row counts are fetched exactly per table below.
       const [tableRows] = await conn.query<mysql2.RowDataPacket[]>(`
         SELECT
           TABLE_NAME        AS name,
-          TABLE_ROWS        AS row_count,
           DATA_LENGTH + INDEX_LENGTH AS size_bytes
         FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
@@ -237,6 +240,13 @@ export class MySQLEngine extends BaseEngine {
       // Columns for each table
       const tables: TableInfo[] = await Promise.all(
         (tableRows as mysql2.RowDataPacket[]).map(async (t) => {
+          const tableName = t['name'] as string;
+          const safeTable = this.quoteIdentifier(tableName);
+
+          const [[countRow]] = await conn!.query<mysql2.RowDataPacket[]>(
+            `SELECT COUNT(*) AS row_count FROM ${safeTable}`
+          );
+
           const [colRows] = await conn!.query<mysql2.RowDataPacket[]>(`
             SELECT
               COLUMN_NAME             AS col_name,
@@ -248,7 +258,7 @@ export class MySQLEngine extends BaseEngine {
             FROM information_schema.COLUMNS
             WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
             ORDER BY ORDINAL_POSITION
-          `, [this.config.database, t['name']]);
+          `, [this.config.database, tableName]);
 
           const columns: ColumnInfo[] = (colRows as mysql2.RowDataPacket[]).map((c) => ({
             name: c['col_name'] as string,
@@ -260,8 +270,8 @@ export class MySQLEngine extends BaseEngine {
           }));
 
           return {
-            name: t['name'] as string,
-            rowCount: Number(t['row_count']) || 0,
+            name: tableName,
+            rowCount: Number((countRow as mysql2.RowDataPacket)['row_count']) || 0,
             sizeBytes: Number(t['size_bytes']) || 0,
             columns,
           };

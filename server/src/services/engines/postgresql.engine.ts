@@ -7,6 +7,10 @@ import { SSHTunnel } from '../ssh.service';
 import { Pool } from 'pg';
 
 export class PostgreSQLEngine extends BaseEngine {
+  private quoteIdentifier(identifier: string): string {
+    return `"${identifier.replace(/"/g, '""')}"`;
+  }
+
   private getEnv(): NodeJS.ProcessEnv {
     return { ...process.env, PGPASSWORD: this.config.password };
   }
@@ -281,17 +285,15 @@ export class PostgreSQLEngine extends BaseEngine {
       );
       const totalSizeBytes = Number(sizeRow.total);
 
-      // Tables with row estimates and sizes
+      // Tables and sizes. Row counts are fetched exactly per table below.
       const { rows: tableRows } = await pool.query(`
         SELECT
+          t.table_schema                            AS schema,
           t.table_name                              AS name,
           pg_total_relation_size(
             quote_ident(t.table_schema) || '.' || quote_ident(t.table_name)
-          )                                         AS size_bytes,
-          COALESCE(s.n_live_tup, 0)                 AS row_count
+          )                                         AS size_bytes
         FROM information_schema.tables t
-        LEFT JOIN pg_stat_user_tables s
-          ON s.schemaname = t.table_schema AND s.relname = t.table_name
         WHERE t.table_schema = 'public'
           AND t.table_type = 'BASE TABLE'
         ORDER BY t.table_name
@@ -312,6 +314,15 @@ export class PostgreSQLEngine extends BaseEngine {
       // Columns for each table
       const tables: TableInfo[] = await Promise.all(
         tableRows.map(async (t) => {
+          const tableSchema = t.schema as string;
+          const tableName = t.name as string;
+          const safeSchema = this.quoteIdentifier(tableSchema);
+          const safeTable = this.quoteIdentifier(tableName);
+
+          const { rows: [countRow] } = await pool!.query(
+            `SELECT COUNT(*)::bigint AS row_count FROM ${safeSchema}.${safeTable}`
+          );
+
           const { rows: colRows } = await pool!.query(`
             SELECT 
               column_name as name, 
@@ -324,7 +335,7 @@ export class PostgreSQLEngine extends BaseEngine {
             FROM information_schema.columns
             WHERE table_schema = 'public' AND table_name = $1
             ORDER BY ordinal_position
-          `, [t.name]);
+          `, [tableName]);
 
           const columns: ColumnInfo[] = colRows.map((c) => {
             // Build a readable type string
@@ -347,8 +358,8 @@ export class PostgreSQLEngine extends BaseEngine {
           });
 
           return {
-            name: t.name as string,
-            rowCount: Number(t.row_count),
+            name: tableName,
+            rowCount: Number(countRow?.row_count ?? 0),
             sizeBytes: Number(t.size_bytes),
             columns,
           };
