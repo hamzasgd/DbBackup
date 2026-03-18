@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { RequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
@@ -42,7 +42,7 @@ app.use('/api/', limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(compression());
+app.use(compression() as RequestHandler);
 
 // Serialize BigInt fields (e.g. fileSize from Prisma BigInt columns) as numbers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
