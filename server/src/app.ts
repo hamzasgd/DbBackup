@@ -42,7 +42,7 @@ app.use('/api/', limiter);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(cookieParser());
-app.use(compression() as RequestHandler);
+app.use(compression() as unknown as RequestHandler);
 
 // Serialize BigInt fields (e.g. fileSize from Prisma BigInt columns) as numbers
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
