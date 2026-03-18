@@ -426,7 +426,7 @@ export default function MigrationsPage() {
                   <thead className="bg-gray-50 sticky top-0">
                     <tr>
                       <th className="text-left px-3 py-2">Table</th>
-                      <th className="text-left px-3 py-2">Rows (src -> dst)</th>
+                      <th className="text-left px-3 py-2">Rows (src -&gt; dst)</th>
                       <th className="text-left px-3 py-2">Missing Idx</th>
                       <th className="text-left px-3 py-2">Extra Idx</th>
                       <th className="text-left px-3 py-2">Status</th>
@@ -438,7 +438,7 @@ export default function MigrationsPage() {
                       return (
                         <tr key={t.tableName}>
                           <td className="px-3 py-2 font-mono text-gray-700">{t.tableName}</td>
-                          <td className="px-3 py-2 text-gray-600">{t.sourceRows.toLocaleString()} -> {t.targetRows.toLocaleString()}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.sourceRows.toLocaleString()} -&gt; {t.targetRows.toLocaleString()}</td>
                           <td className="px-3 py-2 text-gray-600">{t.missingIndexes.length}</td>
                           <td className="px-3 py-2 text-gray-600">{t.extraIndexes.length}</td>
                           <td className="px-3 py-2">
