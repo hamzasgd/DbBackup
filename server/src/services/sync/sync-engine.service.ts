@@ -714,7 +714,36 @@ export class SyncEngineService {
 
     // Check if a sync job is already running
     if (config.syncState.currentJobId) {
-      throw new Error('A sync job is already running for this configuration');
+      // Check if the job actually exists in the queue
+      const { getSyncQueue } = await import('../../queue/sync.queue');
+      const queue = getSyncQueue();
+      
+      try {
+        const job = await queue.getJob(config.syncState.currentJobId);
+        
+        // If job doesn't exist or is completed/failed, clear the stale job ID
+        if (!job || await job.isCompleted() || await job.isFailed()) {
+          logger.warn(`Clearing stale job ID ${config.syncState.currentJobId} for sync ${id}`);
+          await prisma.syncState.update({
+            where: { id: config.syncState.id },
+            data: { currentJobId: null },
+          });
+        } else {
+          // Job is actually running
+          throw new Error('A sync job is already running for this configuration');
+        }
+      } catch (error) {
+        // If we can't get the job, it probably doesn't exist - clear the stale ID
+        if (error instanceof Error && error.message !== 'A sync job is already running for this configuration') {
+          logger.warn(`Error checking job status, clearing stale job ID: ${error.message}`);
+          await prisma.syncState.update({
+            where: { id: config.syncState.id },
+            data: { currentJobId: null },
+          });
+        } else {
+          throw error;
+        }
+      }
     }
 
     // For incremental sync, check if there are any pending changes
