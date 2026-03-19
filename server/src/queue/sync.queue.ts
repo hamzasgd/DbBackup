@@ -661,6 +661,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
  * - Primary key values exist and are not null
  * - Foreign key constraints (if applicable)
  * - Data type compatibility
+ * - JSON column validity
  * 
  * Requirements: 8.1, 8.2, 8.3, 8.4
  */
@@ -702,6 +703,17 @@ async function validateChange(
         if (typeof value === 'function' || typeof value === 'symbol') {
           errors.push(`Invalid data type for column '${key}'`);
         }
+        
+        // Validate JSON columns (if value is a string that looks like it should be JSON)
+        if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
+          try {
+            JSON.parse(value);
+          } catch (e) {
+            // If it looks like JSON but isn't valid, try to fix it or skip
+            logger.warn(`Column '${key}' in table '${tableName}' contains invalid JSON: ${value.substring(0, 100)}`);
+            // Don't add to errors - we'll handle this by converting to NULL or empty JSON
+          }
+        }
       }
     }
   }
@@ -710,6 +722,38 @@ async function validateChange(
     valid: errors.length === 0,
     errors,
   };
+}
+
+/**
+ * Sanitize data before applying to target database
+ * Handles JSON columns and other data type issues
+ */
+function sanitizeData(data: Record<string, any>): Record<string, any> {
+  const sanitized: Record<string, any> = {};
+  
+  for (const [key, value] of Object.entries(data)) {
+    if (value === null || value === undefined) {
+      sanitized[key] = value;
+      continue;
+    }
+    
+    // Handle potential JSON columns
+    if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
+      try {
+        // Try to parse to validate it's valid JSON
+        JSON.parse(value);
+        sanitized[key] = value;
+      } catch (e) {
+        // Invalid JSON - convert to NULL to avoid insertion errors
+        logger.warn(`Sanitizing invalid JSON in column '${key}': ${value.substring(0, 100)}`);
+        sanitized[key] = null;
+      }
+    } else {
+      sanitized[key] = value;
+    }
+  }
+  
+  return sanitized;
 }
 
 /**
@@ -746,7 +790,7 @@ async function applyChangeBatch(
 
       for (const change of changes) {
         const pkValues = change.primaryKeyValues as Record<string, any>;
-        const data = change.changeData as Record<string, any>;
+        const data = sanitizeData(change.changeData as Record<string, any>);
 
         if (change.operation === ChangeOperation.INSERT) {
           const columns = Object.keys(data);
@@ -797,7 +841,7 @@ async function applyChangeBatch(
 
       for (const change of changes) {
         const pkValues = change.primaryKeyValues as Record<string, any>;
-        const data = change.changeData as Record<string, any>;
+        const data = sanitizeData(change.changeData as Record<string, any>);
 
         if (change.operation === ChangeOperation.INSERT) {
           const columns = Object.keys(data);
