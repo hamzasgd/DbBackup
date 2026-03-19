@@ -625,6 +625,39 @@ export class SyncEngineService {
   }
 
   /**
+   * Cancel a running or pending BullMQ sync job by ID.
+   * Removes it from the queue so it won't be retried.
+   */
+  private async cancelRunningJob(jobId: string | null): Promise<void> {
+    if (!jobId) return;
+
+    try {
+      const { getSyncQueue } = await import('../../queue/sync.queue');
+      const queue = getSyncQueue();
+      const job = await queue.getJob(jobId);
+
+      if (job) {
+        // Try to remove the job. If it's active, this will stop it from being retried.
+        const state = await job.getState();
+        if (state === 'active') {
+          // For active jobs, move to failed so the worker stops processing
+          await job.moveToFailed(new Error('Sync configuration stopped by user'), '0', true);
+          logger.info(`Cancelled active sync job ${jobId}`);
+        } else if (state === 'waiting' || state === 'delayed') {
+          await job.remove();
+          logger.info(`Removed pending sync job ${jobId}`);
+        } else {
+          // completed, failed, etc — nothing to do
+          logger.info(`Sync job ${jobId} already in state: ${state}`);
+        }
+      }
+    } catch (error) {
+      logger.warn(`Failed to cancel job ${jobId}:`, error);
+      // Don't throw — stopping the config is more important than cleaning up the job
+    }
+  }
+
+  /**
    * Set up scheduled sync mode
    * 
    * Uses the existing schedule queue infrastructure to schedule sync jobs

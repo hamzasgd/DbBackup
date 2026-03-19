@@ -237,6 +237,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
                     tableCount: orderedTables.length,
                     rowsSynced: totalRowsSynced,
                   });
+
+                  // Keep BullMQ lock alive
+                  await job.updateProgress(progress);
                 }
               }
 
@@ -458,6 +461,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
                   tableCount: orderedTables.length,
                   rowsSynced: totalRowsSynced,
                 });
+
+                // Keep BullMQ lock alive
+                await job.updateProgress(progress);
 
                 logger.info(
                   `Sync ${configId} progress ${progress}% ` +
