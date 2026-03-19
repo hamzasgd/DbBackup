@@ -172,8 +172,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
           const filteredTables = tablesToSync.filter(
             t => !config.excludeTables.includes(t)
           );
+          const orderedTables = await getTablesInDependencyOrder(targetConfig, filteredTables);
 
-          for (const tableName of filteredTables) {
+          for (const tableName of orderedTables) {
             await prisma.syncState.update({
               where: { id: syncStateId },
               data: { currentTable: tableName },
@@ -212,7 +213,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
               if (now - lastProgressUpdate >= 2000) {
                 lastProgressUpdate = now;
                 const progress = Math.min(
-                  Math.round(((tablesProcessed + (i / sourceRecords.length)) / filteredTables.length) * 100),
+                  Math.round(((tablesProcessed + (i / sourceRecords.length)) / orderedTables.length) * 100),
                   99
                 );
 
@@ -229,7 +230,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
                   status: 'RUNNING',
                   currentTable: tableName,
                   tablesProcessed,
-                  tableCount: filteredTables.length,
+                  tableCount: orderedTables.length,
                   rowsSynced: totalRowsSynced,
                 });
               }
@@ -342,6 +343,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
           }
 
           const tables = Array.from(changesByTable.keys());
+          const orderedTables = await getTablesInDependencyOrder(targetConfig, tables);
 
           // Log sync details
           if (tables.length > 0) {
@@ -349,7 +351,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
           }
 
           // Process each table
-          for (const tableName of tables) {
+          for (const tableName of orderedTables) {
             const tableChanges = changesByTable.get(tableName)!;
             
             await prisma.syncState.update({
@@ -424,13 +426,13 @@ export function createSyncWorker(): Worker<SyncJobData> {
                   status: 'RUNNING',
                   currentTable: tableName,
                   tablesProcessed,
-                  tableCount: tables.length,
+                  tableCount: orderedTables.length,
                   rowsSynced: totalRowsSynced,
                 });
 
                 logger.info(
                   `Sync ${configId} progress ${progress}% ` +
-                  `(table=${tableName}, tables=${tablesProcessed}/${tables.length}, rows=${totalRowsSynced})`
+                  `(table=${tableName}, tables=${tablesProcessed}/${orderedTables.length}, rows=${totalRowsSynced})`
                 );
               }
             }
@@ -449,7 +451,13 @@ export function createSyncWorker(): Worker<SyncJobData> {
               targetChangesByTable.get(tableName)!.push(change);
             }
 
-            for (const [tableName, tableChanges] of targetChangesByTable) {
+            const orderedTargetTables = await getTablesInDependencyOrder(
+              sourceConfig,
+              Array.from(targetChangesByTable.keys())
+            );
+
+            for (const tableName of orderedTargetTables) {
+              const tableChanges = targetChangesByTable.get(tableName)!;
               const batchSize = config.batchSize;
               for (let i = 0; i < tableChanges.length; i += batchSize) {
                 const batch = tableChanges.slice(i, Math.min(i + batchSize, tableChanges.length));
@@ -1000,6 +1008,174 @@ async function applyChangeBatch(
 async function getTableList(engine: any, config: ConnectionConfig): Promise<string[]> {
   const dbInfo = await engine.getDbInfo();
   return dbInfo.tables.map((t: any) => t.name);
+}
+
+type TableDependency = {
+  childTable: string;
+  parentTable: string;
+};
+
+/**
+ * Order tables so parent tables are synchronized before child tables.
+ * Falls back to original order if metadata query fails.
+ */
+async function getTablesInDependencyOrder(
+  config: ConnectionConfig,
+  tables: string[]
+): Promise<string[]> {
+  if (tables.length <= 1) {
+    return tables;
+  }
+
+  try {
+    const dependencies = await getForeignKeyDependencies(config);
+    return topologicalSortTables(tables, dependencies);
+  } catch (error) {
+    logger.warn(`Could not resolve table dependency order, using original order: ${String(error)}`);
+    return tables;
+  }
+}
+
+async function getForeignKeyDependencies(config: ConnectionConfig): Promise<TableDependency[]> {
+  if (config.type === 'MYSQL' || config.type === 'MARIADB') {
+    const mysql = await import('mysql2/promise');
+    const connection = await mysql.createConnection({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+        rejectUnauthorized: false,
+      } : undefined,
+    });
+
+    try {
+      const sql = `
+        SELECT TABLE_NAME AS childTable, REFERENCED_TABLE_NAME AS parentTable
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = ?
+          AND REFERENCED_TABLE_NAME IS NOT NULL
+      `;
+      const [rows] = await connection.execute(sql, [config.database]);
+      return (rows as any[]).map((row: any) => ({
+        childTable: String(row.childTable),
+        parentTable: String(row.parentTable),
+      }));
+    } finally {
+      await connection.end();
+    }
+  }
+
+  if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+    const { Client } = await import('pg');
+    const client = new Client({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+        rejectUnauthorized: false,
+      } : undefined,
+    });
+
+    try {
+      await client.connect();
+      const sql = `
+        SELECT tc.table_name AS child_table, ccu.table_name AS parent_table
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+         AND tc.table_schema = kcu.table_schema
+        JOIN information_schema.constraint_column_usage ccu
+          ON ccu.constraint_name = tc.constraint_name
+         AND ccu.table_schema = tc.table_schema
+        WHERE tc.constraint_type = 'FOREIGN KEY'
+          AND tc.table_schema = 'public'
+      `;
+      const result = await client.query(sql);
+      return result.rows.map((row: any) => ({
+        childTable: String(row.child_table),
+        parentTable: String(row.parent_table),
+      }));
+    } finally {
+      await client.end();
+    }
+  }
+
+  return [];
+}
+
+function topologicalSortTables(tables: string[], dependencies: TableDependency[]): string[] {
+  const tableSet = new Set(tables);
+  const tableIndex = new Map(tables.map((table, index) => [table, index]));
+  const inDegree = new Map<string, number>();
+  const adjacency = new Map<string, Set<string>>();
+
+  for (const table of tables) {
+    inDegree.set(table, 0);
+    adjacency.set(table, new Set());
+  }
+
+  for (const dep of dependencies) {
+    if (!tableSet.has(dep.parentTable) || !tableSet.has(dep.childTable)) {
+      continue;
+    }
+    if (dep.parentTable === dep.childTable) {
+      continue;
+    }
+
+    const children = adjacency.get(dep.parentTable)!;
+    if (children.has(dep.childTable)) {
+      continue;
+    }
+
+    children.add(dep.childTable);
+    inDegree.set(dep.childTable, (inDegree.get(dep.childTable) ?? 0) + 1);
+  }
+
+  const queue = tables
+    .filter(table => (inDegree.get(table) ?? 0) === 0)
+    .sort((a, b) => (tableIndex.get(a) ?? 0) - (tableIndex.get(b) ?? 0));
+
+  const ordered: string[] = [];
+
+  while (queue.length > 0) {
+    const current = queue.shift()!;
+    ordered.push(current);
+
+    const children = Array.from(adjacency.get(current) ?? []).sort(
+      (a, b) => (tableIndex.get(a) ?? 0) - (tableIndex.get(b) ?? 0)
+    );
+
+    for (const child of children) {
+      const nextDegree = (inDegree.get(child) ?? 0) - 1;
+      inDegree.set(child, nextDegree);
+      if (nextDegree === 0) {
+        queue.push(child);
+      }
+    }
+  }
+
+  if (ordered.length === tables.length) {
+    return ordered;
+  }
+
+  // Cycles or unresolved dependencies: preserve original order for remaining tables.
+  for (const table of tables) {
+    if (!ordered.includes(table)) {
+      ordered.push(table);
+    }
+  }
+
+  return ordered;
 }
 
 /**
