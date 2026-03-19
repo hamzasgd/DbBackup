@@ -114,6 +114,7 @@ export class PostgreSQLEngine extends BaseEngine {
           '-d', this.config.database,
           flag,
           '--no-password',
+          '--no-tablespaces',
         ];
 
         if (format === 'DIRECTORY') {
@@ -127,7 +128,7 @@ export class PostgreSQLEngine extends BaseEngine {
         } else if (format === 'COMPRESSED_SQL') {
           // pipe plain SQL through gzip
           args.push('-f', '-'); // write to stdout
-          const dump = spawn('pg_dump', [...this.getBaseArgs(), '-d', this.config.database, '-Fp', '--no-password'], { env: this.getEnv() });
+          const dump = spawn('pg_dump', [...this.getBaseArgs(), '-d', this.config.database, '-Fp', '--no-password', '--no-tablespaces'], { env: this.getEnv() });
           const gzip = createGzip();
           const out = createWriteStream(outputPath);
           dump.stdout.pipe(gzip).pipe(out);
@@ -138,7 +139,7 @@ export class PostgreSQLEngine extends BaseEngine {
           dump.on('error', reject);
         } else {
           // CUSTOM, TAR, PLAIN_SQL — write direct to file
-          const dumpArgs = [...this.getBaseArgs(), '-d', this.config.database, flag, '--no-password', '-f', outputPath];
+          const dumpArgs = [...this.getBaseArgs(), '-d', this.config.database, flag, '--no-password', '--no-tablespaces', '-f', outputPath];
           const dump = spawn('pg_dump', dumpArgs, { env: this.getEnv() });
           let error = '';
           dump.stderr.on('data', (d: Buffer) => error += d.toString());

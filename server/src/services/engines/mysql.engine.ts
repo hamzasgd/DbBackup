@@ -100,6 +100,8 @@ export class MySQLEngine extends BaseEngine {
           '--single-transaction',
           '--routines',
           '--triggers',
+          '--events',
+          '--set-charset',
           '--add-drop-table',
           this.config.database,
         ], { env: this.getEnv() });
