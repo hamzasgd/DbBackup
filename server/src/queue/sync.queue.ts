@@ -871,8 +871,22 @@ async function applyChangeBatch(
           const columns = Object.keys(data);
           const values = Object.values(data);
           const placeholders = columns.map(() => '?').join(', ');
-          const sql = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
-          await connection.execute(sql, values);
+          const pkColumns = Object.keys(pkValues);
+          const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
+
+          if (nonPkColumns.length > 0) {
+            const updateClause = nonPkColumns
+              .map(col => `\`${col}\` = VALUES(\`${col}\`)`)
+              .join(', ');
+            const sql =
+              `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders}) ` +
+              `ON DUPLICATE KEY UPDATE ${updateClause}`;
+            await connection.execute(sql, values);
+          } else {
+            // If only PK columns are present, duplicate keys should be ignored.
+            const sql = `INSERT IGNORE INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
+            await connection.execute(sql, values);
+          }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
           const values = Object.values(data);
@@ -922,8 +936,31 @@ async function applyChangeBatch(
           const columns = Object.keys(data);
           const values = Object.values(data);
           const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
-          const sql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
-          await client.query(sql, values);
+          const pkColumns = Object.keys(pkValues);
+          const hasAllPkColumns = pkColumns.length > 0 && pkColumns.every(col => columns.includes(col));
+
+          if (hasAllPkColumns) {
+            const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
+            const conflictTarget = pkColumns.map(col => `"${col}"`).join(', ');
+
+            if (nonPkColumns.length > 0) {
+              const updateClause = nonPkColumns
+                .map(col => `"${col}" = EXCLUDED."${col}"`)
+                .join(', ');
+              const sql =
+                `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders}) ` +
+                `ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateClause}`;
+              await client.query(sql, values);
+            } else {
+              const sql =
+                `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders}) ` +
+                `ON CONFLICT (${conflictTarget}) DO NOTHING`;
+              await client.query(sql, values);
+            }
+          } else {
+            const sql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
+            await client.query(sql, values);
+          }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
           const values = Object.values(data);
