@@ -66,6 +66,7 @@ export async function addSyncJob(data: SyncJobData): Promise<string> {
  */
 export function createSyncWorker(): Worker<SyncJobData> {
   const conflictResolver = new ConflictResolverService();
+  const strictTableOrdering = (process.env.SYNC_STRICT_TABLE_ORDER ?? 'true').toLowerCase() !== 'false';
 
   const worker = new Worker<SyncJobData>(
     SYNC_QUEUE_NAME,
@@ -172,7 +173,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
           const filteredTables = tablesToSync.filter(
             t => !config.excludeTables.includes(t)
           );
-          const orderedTables = await getTablesInDependencyOrder(targetConfig, filteredTables);
+          const orderedTables = await getTablesInDependencyOrder(targetConfig, filteredTables, {
+            strict: strictTableOrdering,
+          });
 
           for (const tableName of orderedTables) {
             await prisma.syncState.update({
@@ -343,7 +346,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
           }
 
           const tables = Array.from(changesByTable.keys());
-          const orderedTables = await getTablesInDependencyOrder(targetConfig, tables);
+          const orderedTables = await getTablesInDependencyOrder(targetConfig, tables, {
+            strict: strictTableOrdering,
+          });
 
           // Log sync details
           if (tables.length > 0) {
@@ -453,7 +458,8 @@ export function createSyncWorker(): Worker<SyncJobData> {
 
             const orderedTargetTables = await getTablesInDependencyOrder(
               sourceConfig,
-              Array.from(targetChangesByTable.keys())
+              Array.from(targetChangesByTable.keys()),
+              { strict: strictTableOrdering }
             );
 
             for (const tableName of orderedTargetTables) {
@@ -1021,7 +1027,8 @@ type TableDependency = {
  */
 async function getTablesInDependencyOrder(
   config: ConnectionConfig,
-  tables: string[]
+  tables: string[],
+  options?: { strict?: boolean }
 ): Promise<string[]> {
   if (tables.length <= 1) {
     return tables;
@@ -1031,6 +1038,12 @@ async function getTablesInDependencyOrder(
     const dependencies = await getForeignKeyDependencies(config);
     return topologicalSortTables(tables, dependencies);
   } catch (error) {
+    if (options?.strict) {
+      const details = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `Strict table ordering is enabled and foreign key dependency metadata could not be resolved: ${details}`
+      );
+    }
     logger.warn(`Could not resolve table dependency order, using original order: ${String(error)}`);
     return tables;
   }
