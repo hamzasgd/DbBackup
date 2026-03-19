@@ -150,7 +150,13 @@ export function SyncHistoryTable({ configId }: SyncHistoryTableProps) {
                         )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
-                        {entry.rowsSynced.toLocaleString()}
+                        {entry.rowsSynced === 0 ? (
+                          <span className="text-gray-400 italic" title="No changes were detected during this sync">
+                            0 (no changes)
+                          </span>
+                        ) : (
+                          entry.rowsSynced.toLocaleString()
+                        )}
                       </td>
                       <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900 text-right">
                         {entry.conflictsDetected > 0 ? (
@@ -229,7 +235,13 @@ export function SyncHistoryTable({ configId }: SyncHistoryTableProps) {
                   <div className="grid grid-cols-2 gap-3 text-sm">
                     <div>
                       <p className="text-gray-500 text-xs">Rows Synced</p>
-                      <p className="font-medium text-gray-900">{entry.rowsSynced.toLocaleString()}</p>
+                      {entry.rowsSynced === 0 ? (
+                        <p className="font-medium text-gray-400 italic" title="No changes were detected during this sync">
+                          0 (no changes)
+                        </p>
+                      ) : (
+                        <p className="font-medium text-gray-900">{entry.rowsSynced.toLocaleString()}</p>
+                      )}
                     </div>
                     <div>
                       <p className="text-gray-500 text-xs">Conflicts</p>

@@ -1,4 +1,5 @@
 import { prisma } from '../../config/database';
+import { logger } from '../../config/logger';
 import { 
   SyncConfiguration, 
   SyncDirection, 
@@ -314,6 +315,7 @@ export class SyncEngineService {
    * 3. Creates SyncState record
    * 4. Optionally performs initial full sync
    * 5. Sets configuration to active
+   * 6. Sets up real-time or scheduled mode if configured
    * 
    * Requirements: 2.1, 6.5, 13.1, 13.5, 13.6, 13.7, 13.8, 14.1
    */
@@ -391,8 +393,29 @@ export class SyncEngineService {
       data: { isActive: true },
     });
 
-    // TODO: If performInitialSync is true, trigger initial full sync job
-    // This will be implemented in task 9.1 when sync operations are added
+    // Perform initial full sync if requested
+    if (performInitialSync) {
+      try {
+        const { addSyncJob } = await import('../../queue/sync.queue');
+        await addSyncJob({
+          configId: id,
+          mode: 'full',
+        });
+      } catch (error) {
+        // Rollback activation if initial sync fails
+        await this.stopSyncConfiguration(id);
+        throw new Error(
+          `Initial sync failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        );
+      }
+    }
+
+    // Set up real-time or scheduled mode
+    if (config.mode === SyncMode.REALTIME) {
+      await this.setupRealtimeMode(id);
+    } else if (config.mode === SyncMode.SCHEDULED && config.cronExpression) {
+      await this.setupScheduledMode(id);
+    }
   }
 
   /**
@@ -484,6 +507,7 @@ export class SyncEngineService {
    * 2. Tears down CDC tracking
    * 3. Removes SyncState record
    * 4. Sets configuration to inactive
+   * 5. Cancels real-time or scheduled mode
    * 
    * Requirements: 13.7
    */
@@ -505,8 +529,12 @@ export class SyncEngineService {
       throw new Error('Sync configuration is not active');
     }
 
-    // TODO: Cancel pending sync jobs from queue
-    // This will be implemented when sync queue is created in task 10.1
+    // Cancel real-time or scheduled mode
+    if (config.mode === SyncMode.REALTIME) {
+      await this.cancelRealtimeMode(id);
+    } else if (config.mode === SyncMode.SCHEDULED) {
+      await this.cancelScheduledMode(id);
+    }
 
     // Teardown CDC tracking on source
     const sourceCDC = this.getCDCTracker(config.sourceConnection.type);
@@ -531,6 +559,132 @@ export class SyncEngineService {
       data: { isActive: false },
     });
   }
+
+  /**
+   * Set up real-time sync mode
+   * 
+   * Polls the ChangeLog table every 5 seconds for new changes.
+   * If changes are detected, triggers a sync job.
+   * 
+   * Requirements: 6.1, 15.1
+   */
+  private async setupRealtimeMode(configId: string): Promise<void> {
+    // Store interval ID in a map for later cancellation
+    if (!this.realtimeIntervals) {
+      this.realtimeIntervals = new Map();
+    }
+
+    const intervalId = setInterval(async () => {
+      try {
+        // Check if configuration is still active
+        const config = await prisma.syncConfiguration.findUnique({
+          where: { id: configId },
+          include: { syncState: true },
+        });
+
+        if (!config || !config.isActive || config.mode !== SyncMode.REALTIME) {
+          // Configuration was deactivated or mode changed, cancel interval
+          clearInterval(intervalId);
+          this.realtimeIntervals?.delete(configId);
+          return;
+        }
+
+        // Check if a sync job is already running
+        if (config.syncState?.currentJobId) {
+          return; // Skip this cycle if sync is already running
+        }
+
+        // Check for new changes in ChangeLog
+        const changeCount = await prisma.changeLog.count({
+          where: {
+            syncConfigId: configId,
+            synchronized: false,
+          },
+        });
+
+        if (changeCount > 0) {
+          // Trigger sync job
+          await this.triggerSync(configId, false);
+        }
+      } catch (error) {
+        logger.error(`Real-time sync check failed for ${configId}:`, error);
+      }
+    }, 5000); // Check every 5 seconds
+
+    this.realtimeIntervals.set(configId, intervalId);
+  }
+
+  /**
+   * Cancel real-time sync mode
+   */
+  private async cancelRealtimeMode(configId: string): Promise<void> {
+    if (this.realtimeIntervals?.has(configId)) {
+      const intervalId = this.realtimeIntervals.get(configId);
+      clearInterval(intervalId);
+      this.realtimeIntervals.delete(configId);
+    }
+  }
+
+  /**
+   * Set up scheduled sync mode
+   * 
+   * Uses the existing schedule queue infrastructure to schedule sync jobs
+   * based on the cron expression.
+   * 
+   * Requirements: 6.2, 15.1
+   */
+  private async setupScheduledMode(configId: string): Promise<void> {
+    const config = await prisma.syncConfiguration.findUnique({
+      where: { id: configId },
+    });
+
+    if (!config || !config.cronExpression) {
+      throw new Error('Cron expression not found for scheduled sync');
+    }
+
+    // Import schedule queue
+    const { addScheduleJob } = await import('../../queue/schedule.queue');
+
+    // Create a schedule job that triggers sync
+    await addScheduleJob({
+      id: configId,
+      cronExpression: config.cronExpression,
+    });
+
+    // Calculate and store next scheduled sync time
+    const parser = await import('cron-parser');
+    const interval = parser.parseExpression(config.cronExpression);
+    const nextRun = interval.next().toDate();
+
+    await prisma.syncState.update({
+      where: { syncConfigId: configId },
+      data: {
+        nextSyncAt: nextRun,
+      },
+    });
+  }
+
+  /**
+   * Cancel scheduled sync mode
+   */
+  private async cancelScheduledMode(configId: string): Promise<void> {
+    // Import schedule queue
+    const { getScheduleQueue } = await import('../../queue/schedule.queue');
+    const queue = getScheduleQueue();
+
+    // Remove the scheduled job for this sync configuration
+    await queue.removeJobScheduler(configId);
+
+    // Clear next scheduled sync time
+    await prisma.syncState.update({
+      where: { syncConfigId: configId },
+      data: {
+        nextSyncAt: null,
+      },
+    });
+  }
+
+  private realtimeIntervals?: Map<string, NodeJS.Timeout>;
 
   /**
    * Trigger a manual sync job
@@ -561,6 +715,18 @@ export class SyncEngineService {
     // Check if a sync job is already running
     if (config.syncState.currentJobId) {
       throw new Error('A sync job is already running for this configuration');
+    }
+
+    // For incremental sync, check if there are any pending changes
+    if (!force) {
+      const pendingChanges = await prisma.changeLog.count({
+        where: {
+          syncConfigId: id,
+          synchronized: false,
+        },
+      });
+
+      logger.info(`Triggering sync for ${id}. Pending changes: ${pendingChanges}`);
     }
 
     // Enqueue sync job using BullMQ

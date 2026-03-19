@@ -326,6 +326,28 @@ export default function SyncDetailPage() {
         </Card>
       )}
 
+      {/* Info Banner for No Changes Detected */}
+      {state && state.lastSyncAt && Number(state.totalRowsSynced) === 0 && (
+        <Card className="border-blue-200 bg-blue-50">
+          <CardContent className="p-4">
+            <div className="flex items-start gap-3">
+              <CheckCircle className="h-5 w-5 text-blue-600 shrink-0 mt-0.5" />
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium text-blue-900 mb-1">
+                  No Changes Detected
+                </p>
+                <p className="text-sm text-blue-700">
+                  The last sync completed successfully but found no changes to synchronize. This is normal if no data has been modified in the source database since CDC tracking was initialized.
+                </p>
+                <p className="text-sm text-blue-700 mt-2">
+                  <strong>Tip:</strong> If you want to copy existing data, use the "Trigger Full Sync" button in Lifecycle Controls to perform an initial synchronization.
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Lifecycle Controls */}
       {config && (
         <Card>

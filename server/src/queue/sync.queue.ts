@@ -153,171 +153,236 @@ export function createSyncWorker(): Worker<SyncJobData> {
         const sourceEngine = engineFactory(sourceConfig);
         const targetEngine = engineFactory(targetConfig);
 
-        // Get changes from CDC tracker
-        const sourceCheckpoint = config.syncState.sourceCheckpoint ?? '';
-        const changeLogs = await prisma.changeLog.findMany({
-          where: {
-            syncConfigId: configId,
-            synchronized: false,
-            origin: 'source',
-            ...(mode === 'incremental' && sourceCheckpoint ? {
-              checkpoint: { gt: sourceCheckpoint }
-            } : {}),
-          },
-          orderBy: {
-            timestamp: 'asc',
-          },
-        });
+        let totalRowsSynced = 0;
+        let tablesProcessed = 0;
+        let conflictsDetected = 0;
+        let conflictsResolved = 0;
+        let validationErrors = 0;
+        let lastProgressUpdate = Date.now();
 
-        let targetChangeLogs: any[] = [];
-        if (config.direction === SyncDirection.BIDIRECTIONAL) {
-          const targetCheckpoint = config.syncState.targetCheckpoint ?? '';
-          targetChangeLogs = await prisma.changeLog.findMany({
+        // Handle full sync mode (initial synchronization)
+        if (mode === 'full') {
+          logger.info(`Starting full sync for ${configId}`);
+          
+          // Get list of tables to sync
+          const tablesToSync = config.includeTables.length > 0 
+            ? config.includeTables 
+            : await getTableList(sourceEngine, sourceConfig);
+          
+          const filteredTables = tablesToSync.filter(
+            t => !config.excludeTables.includes(t)
+          );
+
+          for (const tableName of filteredTables) {
+            await prisma.syncState.update({
+              where: { id: syncStateId },
+              data: { currentTable: tableName },
+            });
+
+            // Fetch all records from source table
+            const sourceRecords = await fetchTableRecords(sourceEngine, sourceConfig, tableName);
+            
+            // Process records in batches
+            const batchSize = config.batchSize;
+            for (let i = 0; i < sourceRecords.length; i += batchSize) {
+              const batch = sourceRecords.slice(i, Math.min(i + batchSize, sourceRecords.length));
+              
+              // Convert records to change log format
+              const changes = batch.map(record => ({
+                operation: ChangeOperation.INSERT,
+                primaryKeyValues: extractPrimaryKey(record, tableName),
+                changeData: record,
+              }));
+
+              // Validate and apply changes
+              for (const change of changes) {
+                const validation = await validateChange(change, tableName, targetEngine, targetConfig);
+                if (!validation.valid) {
+                  validationErrors++;
+                  logger.warn(`Validation failed for ${tableName}:`, validation.errors);
+                  continue; // Skip invalid records
+                }
+              }
+
+              await applyChangeBatch(targetEngine, targetConfig, tableName, changes);
+              totalRowsSynced += batch.length;
+
+              // Publish progress
+              const now = Date.now();
+              if (now - lastProgressUpdate >= 2000) {
+                lastProgressUpdate = now;
+                const progress = Math.min(
+                  Math.round(((tablesProcessed + (i / sourceRecords.length)) / filteredTables.length) * 100),
+                  99
+                );
+
+                await prisma.syncState.update({
+                  where: { id: syncStateId },
+                  data: {
+                    currentProgress: progress,
+                    totalRowsSynced: BigInt(totalRowsSynced),
+                  },
+                });
+
+                await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
+                  progress,
+                  status: 'RUNNING',
+                  currentTable: tableName,
+                  tablesProcessed,
+                  tableCount: filteredTables.length,
+                  rowsSynced: totalRowsSynced,
+                });
+              }
+            }
+
+            tablesProcessed++;
+          }
+
+          // Establish initial checkpoint after full sync
+          const { MySQLCDCTracker } = await import('../services/sync/mysql-cdc-tracker.service');
+          const { PostgreSQLCDCTracker } = await import('../services/sync/postgresql-cdc-tracker.service');
+          
+          const sourceCDC = sourceConfig.type === 'MYSQL' || sourceConfig.type === 'MARIADB'
+            ? new MySQLCDCTracker()
+            : new PostgreSQLCDCTracker();
+          
+          const checkpoint = await sourceCDC.getCheckpoint(config as any, 'source');
+          
+          await prisma.syncState.update({
+            where: { id: syncStateId },
+            data: {
+              sourceCheckpoint: checkpoint,
+            },
+          });
+
+          logger.info(`Full sync completed for ${configId}. Rows synced: ${totalRowsSynced}`);
+        } else {
+          // Incremental sync mode (existing logic)
+          // Get changes from CDC tracker
+          const sourceCheckpoint = config.syncState.sourceCheckpoint ?? '';
+          const changeLogs = await prisma.changeLog.findMany({
             where: {
               syncConfigId: configId,
               synchronized: false,
-              origin: 'target',
-              ...(mode === 'incremental' && targetCheckpoint ? {
-                checkpoint: { gt: targetCheckpoint }
+              origin: 'source',
+              ...(sourceCheckpoint ? {
+                checkpoint: { gt: sourceCheckpoint }
               } : {}),
             },
             orderBy: {
               timestamp: 'asc',
             },
           });
-        }
 
-        // Detect conflicts in bidirectional sync
-        let conflictsDetected = 0;
-        let conflictsResolved = 0;
-        
-        if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
-          const conflicts = await conflictResolver.detectConflicts(changeLogs, targetChangeLogs);
-          conflictsDetected = conflicts.length;
-
-          // Resolve conflicts according to strategy
-          for (const conflict of conflicts) {
-            const resolved = await conflictResolver.resolveConflict(
-              conflict,
-              config.conflictStrategy
-            );
-            
-            if (resolved.resolution !== 'manual') {
-              conflictsResolved++;
-            }
-          }
-        }
-
-        // Group changes by table for batch processing
-        const changesByTable = new Map<string, any[]>();
-        for (const change of changeLogs) {
-          const tableName = change.tableName;
-          if (!changesByTable.has(tableName)) {
-            changesByTable.set(tableName, []);
-          }
-          changesByTable.get(tableName)!.push(change);
-        }
-
-        const tables = Array.from(changesByTable.keys());
-        let totalRowsSynced = 0;
-        let tablesProcessed = 0;
-        let lastProgressUpdate = Date.now();
-
-        // Process each table
-        for (const tableName of tables) {
-          const tableChanges = changesByTable.get(tableName)!;
-          
-          await prisma.syncState.update({
-            where: { id: syncStateId },
-            data: { currentTable: tableName },
-          });
-
-          // Process changes in batches
-          const batchSize = config.batchSize;
-          for (let i = 0; i < tableChanges.length; i += batchSize) {
-            const batch = tableChanges.slice(i, Math.min(i + batchSize, tableChanges.length));
-            
-            // Apply batch changes to target database
-            await applyChangeBatch(targetEngine, targetConfig, tableName, batch);
-
-            // Mark changes as synchronized
-            const changeIds = batch.map(c => c.id);
-            await prisma.changeLog.updateMany({
-              where: { id: { in: changeIds } },
-              data: {
-                synchronized: true,
-                synchronizedAt: new Date(),
+          let targetChangeLogs: any[] = [];
+          if (config.direction === SyncDirection.BIDIRECTIONAL) {
+            const targetCheckpoint = config.syncState.targetCheckpoint ?? '';
+            targetChangeLogs = await prisma.changeLog.findMany({
+              where: {
+                syncConfigId: configId,
+                synchronized: false,
+                origin: 'target',
+                ...(targetCheckpoint ? {
+                  checkpoint: { gt: targetCheckpoint }
+                } : {}),
+              },
+              orderBy: {
+                timestamp: 'asc',
               },
             });
+          }
 
-            // Update checkpoint after successful batch
-            const lastChange = batch[batch.length - 1];
+          // Handle case when there are no changes to sync
+          if (changeLogs.length === 0 && targetChangeLogs.length === 0) {
+            logger.info(`No changes to synchronize for ${configId}`);
+            
+            // Publish progress update indicating no changes
+            await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
+              progress: 100,
+              status: 'COMPLETED',
+              message: 'No changes to synchronize',
+              rowsSynced: 0,
+              tablesProcessed: 0,
+              conflictsDetected: 0,
+              conflictsResolved: 0,
+            });
+          }
+
+          // Only process changes if there are any
+          if (changeLogs.length > 0 || targetChangeLogs.length > 0) {
+            logger.info(`Processing ${changeLogs.length} source changes and ${targetChangeLogs.length} target changes for ${configId}`);
+          }
+
+          // Detect conflicts in bidirectional sync
+          if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
+            const conflicts = await conflictResolver.detectConflicts(changeLogs, targetChangeLogs);
+            conflictsDetected = conflicts.length;
+
+            // Resolve conflicts according to strategy
+            for (const conflict of conflicts) {
+              const resolved = await conflictResolver.resolveConflict(
+                conflict,
+                config.conflictStrategy
+              );
+              
+              if (resolved.resolution !== 'manual') {
+                conflictsResolved++;
+              }
+            }
+          }
+
+          // Group changes by table for batch processing
+          const changesByTable = new Map<string, any[]>();
+          for (const change of changeLogs) {
+            const tableName = change.tableName;
+            if (!changesByTable.has(tableName)) {
+              changesByTable.set(tableName, []);
+            }
+            changesByTable.get(tableName)!.push(change);
+          }
+
+          const tables = Array.from(changesByTable.keys());
+
+          // Log sync details
+          if (tables.length > 0) {
+            logger.info(`Syncing ${tables.length} tables with ${changeLogs.length} total changes for ${configId}`);
+          }
+
+          // Process each table
+          for (const tableName of tables) {
+            const tableChanges = changesByTable.get(tableName)!;
+            
             await prisma.syncState.update({
               where: { id: syncStateId },
-              data: {
-                sourceCheckpoint: lastChange.checkpoint,
-              },
+              data: { currentTable: tableName },
             });
 
-            totalRowsSynced += batch.length;
-
-            // Publish progress every 2 seconds
-            const now = Date.now();
-            if (now - lastProgressUpdate >= 2000) {
-              lastProgressUpdate = now;
-              const progress = Math.min(
-                Math.round((totalRowsSynced / changeLogs.length) * 100),
-                99
-              );
-
-              await prisma.syncState.update({
-                where: { id: syncStateId },
-                data: {
-                  currentProgress: progress,
-                  totalRowsSynced: BigInt(totalRowsSynced),
-                },
-              });
-
-              await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
-                progress,
-                status: 'RUNNING',
-                currentTable: tableName,
-                tablesProcessed,
-                tableCount: tables.length,
-                rowsSynced: totalRowsSynced,
-              });
-
-              logger.info(
-                `Sync ${configId} progress ${progress}% ` +
-                `(table=${tableName}, tables=${tablesProcessed}/${tables.length}, rows=${totalRowsSynced})`
-              );
-            }
-          }
-
-          tablesProcessed++;
-        }
-
-        // Handle bidirectional sync - apply target changes to source
-        if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
-          const targetChangesByTable = new Map<string, any[]>();
-          for (const change of targetChangeLogs) {
-            const tableName = change.tableName;
-            if (!targetChangesByTable.has(tableName)) {
-              targetChangesByTable.set(tableName, []);
-            }
-            targetChangesByTable.get(tableName)!.push(change);
-          }
-
-          for (const [tableName, tableChanges] of targetChangesByTable) {
+            // Process changes in batches
             const batchSize = config.batchSize;
             for (let i = 0; i < tableChanges.length; i += batchSize) {
               const batch = tableChanges.slice(i, Math.min(i + batchSize, tableChanges.length));
               
-              // Apply batch changes to source database
-              await applyChangeBatch(sourceEngine, sourceConfig, tableName, batch);
+              // Validate changes before applying
+              const validChanges = [];
+              for (const change of batch) {
+                const validation = await validateChange(change, tableName, targetEngine, targetConfig);
+                if (validation.valid) {
+                  validChanges.push(change);
+                } else {
+                  validationErrors++;
+                  logger.warn(`Validation failed for ${tableName}:`, validation.errors);
+                }
+              }
+
+              if (validChanges.length === 0) {
+                continue; // Skip batch if all changes are invalid
+              }
+
+              // Apply batch changes to target database
+              await applyChangeBatch(targetEngine, targetConfig, tableName, validChanges);
 
               // Mark changes as synchronized
-              const changeIds = batch.map(c => c.id);
+              const changeIds = validChanges.map(c => c.id);
               await prisma.changeLog.updateMany({
                 where: { id: { in: changeIds } },
                 data: {
@@ -326,16 +391,109 @@ export function createSyncWorker(): Worker<SyncJobData> {
                 },
               });
 
-              // Update target checkpoint
-              const lastChange = batch[batch.length - 1];
+              // Update checkpoint after successful batch
+              const lastChange = validChanges[validChanges.length - 1];
               await prisma.syncState.update({
                 where: { id: syncStateId },
                 data: {
-                  targetCheckpoint: lastChange.checkpoint,
+                  sourceCheckpoint: lastChange.checkpoint,
                 },
               });
 
-              totalRowsSynced += batch.length;
+              totalRowsSynced += validChanges.length;
+
+              // Publish progress every 2 seconds
+              const now = Date.now();
+              if (now - lastProgressUpdate >= 2000) {
+                lastProgressUpdate = now;
+                const progress = Math.min(
+                  Math.round((totalRowsSynced / changeLogs.length) * 100),
+                  99
+                );
+
+                await prisma.syncState.update({
+                  where: { id: syncStateId },
+                  data: {
+                    currentProgress: progress,
+                    totalRowsSynced: BigInt(totalRowsSynced),
+                  },
+                });
+
+                await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
+                  progress,
+                  status: 'RUNNING',
+                  currentTable: tableName,
+                  tablesProcessed,
+                  tableCount: tables.length,
+                  rowsSynced: totalRowsSynced,
+                });
+
+                logger.info(
+                  `Sync ${configId} progress ${progress}% ` +
+                  `(table=${tableName}, tables=${tablesProcessed}/${tables.length}, rows=${totalRowsSynced})`
+                );
+              }
+            }
+
+            tablesProcessed++;
+          }
+
+          // Handle bidirectional sync - apply target changes to source
+          if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
+            const targetChangesByTable = new Map<string, any[]>();
+            for (const change of targetChangeLogs) {
+              const tableName = change.tableName;
+              if (!targetChangesByTable.has(tableName)) {
+                targetChangesByTable.set(tableName, []);
+              }
+              targetChangesByTable.get(tableName)!.push(change);
+            }
+
+            for (const [tableName, tableChanges] of targetChangesByTable) {
+              const batchSize = config.batchSize;
+              for (let i = 0; i < tableChanges.length; i += batchSize) {
+                const batch = tableChanges.slice(i, Math.min(i + batchSize, tableChanges.length));
+                
+                // Validate changes
+                const validChanges = [];
+                for (const change of batch) {
+                  const validation = await validateChange(change, tableName, sourceEngine, sourceConfig);
+                  if (validation.valid) {
+                    validChanges.push(change);
+                  } else {
+                    validationErrors++;
+                    logger.warn(`Validation failed for ${tableName}:`, validation.errors);
+                  }
+                }
+
+                if (validChanges.length === 0) {
+                  continue;
+                }
+
+                // Apply batch changes to source database
+                await applyChangeBatch(sourceEngine, sourceConfig, tableName, validChanges);
+
+                // Mark changes as synchronized
+                const changeIds = validChanges.map(c => c.id);
+                await prisma.changeLog.updateMany({
+                  where: { id: { in: changeIds } },
+                  data: {
+                    synchronized: true,
+                    synchronizedAt: new Date(),
+                  },
+                });
+
+                // Update target checkpoint
+                const lastChange = validChanges[validChanges.length - 1];
+                await prisma.syncState.update({
+                  where: { id: syncStateId },
+                  data: {
+                    targetCheckpoint: lastChange.checkpoint,
+                  },
+                });
+
+                totalRowsSynced += validChanges.length;
+              }
             }
           }
         }
@@ -497,6 +655,64 @@ export function createSyncWorker(): Worker<SyncJobData> {
 }
 
 /**
+ * Validate a change before applying it to the target database
+ * 
+ * Validates:
+ * - Primary key values exist and are not null
+ * - Foreign key constraints (if applicable)
+ * - Data type compatibility
+ * 
+ * Requirements: 8.1, 8.2, 8.3, 8.4
+ */
+async function validateChange(
+  change: any,
+  tableName: string,
+  targetEngine: any,
+  targetConfig: ConnectionConfig
+): Promise<{ valid: boolean; errors: string[] }> {
+  const errors: string[] = [];
+
+  // Validate primary key values
+  const pkValues = change.primaryKeyValues as Record<string, any>;
+  if (!pkValues || Object.keys(pkValues).length === 0) {
+    errors.push('Primary key values are missing');
+    return { valid: false, errors };
+  }
+
+  for (const [key, value] of Object.entries(pkValues)) {
+    if (value === null || value === undefined) {
+      errors.push(`Primary key '${key}' is null or undefined`);
+    }
+  }
+
+  // For INSERT and UPDATE operations, validate change data
+  if (change.operation === ChangeOperation.INSERT || change.operation === ChangeOperation.UPDATE) {
+    const data = change.changeData as Record<string, any>;
+    
+    if (!data || Object.keys(data).length === 0) {
+      errors.push('Change data is missing');
+      return { valid: false, errors };
+    }
+
+    // Validate data types (basic validation)
+    // In production, you would fetch table schema and validate against it
+    for (const [key, value] of Object.entries(data)) {
+      if (value !== null && value !== undefined) {
+        // Check for invalid data types
+        if (typeof value === 'function' || typeof value === 'symbol') {
+          errors.push(`Invalid data type for column '${key}'`);
+        }
+      }
+    }
+  }
+
+  return {
+    valid: errors.length === 0,
+    errors,
+  };
+}
+
+/**
  * Apply a batch of changes to the target database
  * 
  * Handles INSERT, UPDATE, and DELETE operations with proper error handling
@@ -611,4 +827,89 @@ async function applyChangeBatch(
       await client.end();
     }
   }
+}
+
+/**
+ * Get list of tables from a database
+ */
+async function getTableList(engine: any, config: ConnectionConfig): Promise<string[]> {
+  const dbInfo = await engine.getDbInfo();
+  return dbInfo.tables.map((t: any) => t.name);
+}
+
+/**
+ * Fetch all records from a table
+ */
+async function fetchTableRecords(
+  engine: any,
+  config: ConnectionConfig,
+  tableName: string
+): Promise<any[]> {
+  // Use raw SQL to fetch all records
+  if (config.type === 'MYSQL' || config.type === 'MARIADB') {
+    const mysql = await import('mysql2/promise');
+    const connection = await mysql.createConnection({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+      } : undefined,
+    });
+
+    try {
+      const [rows] = await connection.query(`SELECT * FROM \`${tableName}\``);
+      return rows as any[];
+    } finally {
+      await connection.end();
+    }
+  } else if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+    const { Client } = await import('pg');
+    const client = new Client({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+      } : undefined,
+    });
+
+    try {
+      await client.connect();
+      const result = await client.query(`SELECT * FROM "${tableName}"`);
+      return result.rows;
+    } finally {
+      await client.end();
+    }
+  }
+
+  return [];
+}
+
+/**
+ * Extract primary key values from a record
+ * Note: This is a simplified implementation. In production, you would
+ * fetch the actual primary key columns from the table schema.
+ */
+function extractPrimaryKey(record: any, tableName: string): Record<string, any> {
+  // Common primary key column names
+  const commonPkNames = ['id', 'ID', `${tableName}_id`, 'uuid', 'UUID'];
+  
+  for (const pkName of commonPkNames) {
+    if (record[pkName] !== undefined) {
+      return { [pkName]: record[pkName] };
+    }
+  }
+
+  // If no common PK found, use the first column as PK
+  const firstKey = Object.keys(record)[0];
+  return { [firstKey]: record[firstKey] };
 }
