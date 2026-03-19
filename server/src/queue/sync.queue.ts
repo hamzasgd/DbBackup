@@ -728,12 +728,22 @@ async function validateChange(
  * Sanitize data before applying to target database
  * Handles JSON columns and other data type issues
  */
-function sanitizeData(data: Record<string, any>): Record<string, any> {
+function sanitizeData(
+  data: Record<string, any>,
+  options?: { jsonColumns?: Set<string> }
+): Record<string, any> {
   const sanitized: Record<string, any> = {};
+  const jsonColumns = options?.jsonColumns;
   
   for (const [key, value] of Object.entries(data)) {
     if (value === null || value === undefined) {
       sanitized[key] = value;
+      continue;
+    }
+
+    // MySQL JSON columns expect valid JSON text. Normalize values first.
+    if (jsonColumns?.has(key)) {
+      sanitized[key] = normalizeJsonValue(value);
       continue;
     }
     
@@ -754,6 +764,68 @@ function sanitizeData(data: Record<string, any>): Record<string, any> {
   }
   
   return sanitized;
+}
+
+/**
+ * Convert a runtime value into JSON text accepted by MySQL JSON columns.
+ */
+function normalizeJsonValue(value: any): string | null {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (trimmed.length === 0) {
+      return JSON.stringify(value);
+    }
+
+    try {
+      JSON.parse(trimmed);
+      return trimmed;
+    } catch {
+      // If it is plain text, persist it as a valid JSON string.
+      return JSON.stringify(value);
+    }
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === 'bigint') {
+    return JSON.stringify(value.toString());
+  }
+
+  if (value instanceof Date) {
+    return JSON.stringify(value.toISOString());
+  }
+
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return JSON.stringify(String(value));
+  }
+}
+
+/**
+ * Fetch JSON column names for a MySQL/MariaDB table.
+ */
+async function getMySqlJsonColumns(
+  connection: any,
+  database: string,
+  tableName: string
+): Promise<Set<string>> {
+  const sql = `
+    SELECT COLUMN_NAME AS columnName
+    FROM information_schema.COLUMNS
+    WHERE TABLE_SCHEMA = ?
+      AND TABLE_NAME = ?
+      AND DATA_TYPE = 'json'
+  `;
+
+  const [rows] = await connection.execute(sql, [database, tableName]);
+  return new Set((rows as any[]).map((row: any) => String(row.columnName)));
 }
 
 /**
@@ -786,11 +858,14 @@ async function applyChangeBatch(
     });
 
     try {
+      const jsonColumns = await getMySqlJsonColumns(connection, config.database, tableName);
       await connection.beginTransaction();
 
       for (const change of changes) {
         const pkValues = change.primaryKeyValues as Record<string, any>;
-        const data = sanitizeData(change.changeData as Record<string, any>);
+        const data = sanitizeData(change.changeData as Record<string, any>, {
+          jsonColumns,
+        });
 
         if (change.operation === ChangeOperation.INSERT) {
           const columns = Object.keys(data);
