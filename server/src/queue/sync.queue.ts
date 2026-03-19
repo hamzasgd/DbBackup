@@ -718,16 +718,7 @@ async function validateChange(
           errors.push(`Invalid data type for column '${key}'`);
         }
         
-        // Validate JSON columns (if value is a string that looks like it should be JSON)
-        if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
-          try {
-            JSON.parse(value);
-          } catch (e) {
-            // If it looks like JSON but isn't valid, try to fix it or skip
-            logger.warn(`Column '${key}' in table '${tableName}' contains invalid JSON: ${value.substring(0, 100)}`);
-            // Don't add to errors - we'll handle this by converting to NULL or empty JSON
-          }
-        }
+        // JSON validation is handled when applying to known JSON columns.
       }
     }
   }
@@ -744,7 +735,7 @@ async function validateChange(
  */
 function sanitizeData(
   data: Record<string, any>,
-  options?: { jsonColumns?: Set<string> }
+  options?: { jsonColumns?: Set<string>; tableName?: string }
 ): Record<string, any> {
   const sanitized: Record<string, any> = {};
   const jsonColumns = options?.jsonColumns;
@@ -757,24 +748,18 @@ function sanitizeData(
 
     // MySQL JSON columns expect valid JSON text. Normalize values first.
     if (jsonColumns?.has(key)) {
-      sanitized[key] = normalizeJsonValue(value);
+      const normalized = normalizeJsonValue(value);
+      sanitized[key] = normalized.value;
+      if (normalized.coerced) {
+        logger.info(
+          `Normalized JSON column '${options?.tableName ?? 'unknown_table'}.${key}' (${normalized.reason})`
+        );
+      }
       continue;
     }
     
-    // Handle potential JSON columns
-    if (typeof value === 'string' && (value.startsWith('{') || value.startsWith('['))) {
-      try {
-        // Try to parse to validate it's valid JSON
-        JSON.parse(value);
-        sanitized[key] = value;
-      } catch (e) {
-        // Invalid JSON - convert to NULL to avoid insertion errors
-        logger.warn(`Sanitizing invalid JSON in column '${key}': ${value.substring(0, 100)}`);
-        sanitized[key] = null;
-      }
-    } else {
-      sanitized[key] = value;
-    }
+    // Only known JSON columns are transformed. Non-JSON columns are preserved as-is.
+    sanitized[key] = value;
   }
   
   return sanitized;
@@ -783,42 +768,42 @@ function sanitizeData(
 /**
  * Convert a runtime value into JSON text accepted by MySQL JSON columns.
  */
-function normalizeJsonValue(value: any): string | null {
+function normalizeJsonValue(value: any): { value: string | null; coerced: boolean; reason?: string } {
   if (value === null || value === undefined) {
-    return null;
+    return { value: null, coerced: false };
   }
 
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (trimmed.length === 0) {
-      return JSON.stringify(value);
+      return { value: JSON.stringify(value), coerced: true, reason: 'empty_or_whitespace_string' };
     }
 
     try {
       JSON.parse(trimmed);
-      return trimmed;
+      return { value: trimmed, coerced: false };
     } catch {
       // If it is plain text, persist it as a valid JSON string.
-      return JSON.stringify(value);
+      return { value: JSON.stringify(value), coerced: true, reason: 'plain_text_to_json_string' };
     }
   }
 
   if (typeof value === 'number' || typeof value === 'boolean') {
-    return JSON.stringify(value);
+    return { value: JSON.stringify(value), coerced: true, reason: `primitive_${typeof value}` };
   }
 
   if (typeof value === 'bigint') {
-    return JSON.stringify(value.toString());
+    return { value: JSON.stringify(value.toString()), coerced: true, reason: 'bigint_to_string' };
   }
 
   if (value instanceof Date) {
-    return JSON.stringify(value.toISOString());
+    return { value: JSON.stringify(value.toISOString()), coerced: true, reason: 'date_to_iso_string' };
   }
 
   try {
-    return JSON.stringify(value);
+    return { value: JSON.stringify(value), coerced: true, reason: 'object_to_json' };
   } catch {
-    return JSON.stringify(String(value));
+    return { value: JSON.stringify(String(value)), coerced: true, reason: 'stringified_fallback' };
   }
 }
 
@@ -879,6 +864,7 @@ async function applyChangeBatch(
         const pkValues = change.primaryKeyValues as Record<string, any>;
         const data = sanitizeData(change.changeData as Record<string, any>, {
           jsonColumns,
+          tableName,
         });
 
         if (change.operation === ChangeOperation.INSERT) {
