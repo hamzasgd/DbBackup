@@ -432,8 +432,12 @@ export class SyncEngineService {
       where: { id: config.syncState.id },
       data: {
         status: SyncStatus.PAUSED,
+        currentJobId: null,
       },
     });
+
+    // Cancel any running/pending BullMQ job
+    await this.cancelRunningJob(config.syncState.currentJobId);
 
     // Cancel real-time intervals or scheduled jobs
     if (config.mode === SyncMode.REALTIME) {
@@ -517,6 +521,11 @@ export class SyncEngineService {
 
     if (!config.isActive) {
       throw new Error('Sync configuration is not active');
+    }
+
+    // Cancel any running/pending BullMQ job first
+    if (config.syncState?.currentJobId) {
+      await this.cancelRunningJob(config.syncState.currentJobId);
     }
 
     // Cancel real-time or scheduled mode

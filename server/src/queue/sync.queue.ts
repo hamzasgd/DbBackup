@@ -701,6 +701,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
     {
       connection: getRedisConfig(),
       concurrency: 5, // max 5 sync jobs in parallel (Requirement 12.5)
+      lockDuration: 600000, // 10 minutes — sync jobs can run long on large tables
+      stalledInterval: 300000, // 5 minutes — check for stalled jobs every 5 min
+      maxStalledCount: 3, // allow up to 3 stall retries before failing
     }
   );
 
