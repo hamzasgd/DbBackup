@@ -3,27 +3,11 @@ import { CDCTrackerService } from './cdc-tracker.service';
 import { SSHTunnel } from '../ssh.service';
 import { prisma } from '../../config/database';
 import { decrypt, decryptIfPresent } from '../crypto.service';
-
-interface SyncConfiguration {
-  id: string;
-  userId: string;
-  name: string;
-  sourceConnectionId: string;
-  targetConnectionId: string;
-  direction: string;
-  mode: string;
-  conflictStrategy: string;
-  includeTables: string[];
-  excludeTables: string[];
-  cronExpression: string | null;
-  batchSize: number;
-  parallelTables: number;
-  isActive: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-  sourceConnection?: any;
-  targetConnection?: any;
-}
+import { logger } from '../../config/logger';
+import {
+  SyncConfigWithConnections,
+  escapeIdentifierPG,
+} from './sync-utils';
 
 interface ChangeLog {
   id: string;
@@ -42,14 +26,19 @@ interface ChangeLog {
 /**
  * PostgreSQLCDCTracker - Change Data Capture tracker for PostgreSQL databases
  * 
- * Implements CDC using two strategies:
- * 1. Logical replication slots (primary method)
- * 2. Trigger-based change capture (fallback)
+ * Implements CDC using trigger-based change capture.
+ * Logical replication is detected but falls back to triggers when WAL
+ * parsing is not implemented.
  * 
  * Requirements: 2.3, 2.4, 2.5
  */
 export class PostgreSQLCDCTracker implements CDCTrackerService {
-  private useTriggerBased: boolean = false;
+  /** Per-config tracking of whether to use trigger-based CDC */
+  private triggerBasedConfigs = new Map<string, boolean>();
+
+  private isTriggerBased(configId: string): boolean {
+    return this.triggerBasedConfigs.get(configId) ?? true;
+  }
 
   /**
    * Create a database connection pool with SSH tunnel support
@@ -129,6 +118,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
 
   /**
    * Get list of tables to track based on include/exclude filters
+   * Uses current_schema() instead of hardcoded 'public'
    */
   private async getTablesToTrack(
     client: PoolClient,
@@ -137,7 +127,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
   ): Promise<string[]> {
     const result = await client.query(
       `SELECT table_name FROM information_schema.tables 
-       WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
+       WHERE table_schema = current_schema() AND table_type = 'BASE TABLE'`
     );
 
     let tables = result.rows.map((r) => r.table_name as string);
@@ -173,6 +163,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
 
   /**
    * Get all columns for a table
+   * Uses current_schema() instead of hardcoded 'public'
    */
   private async getTableColumns(
     client: PoolClient,
@@ -180,7 +171,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
   ): Promise<string[]> {
     const result = await client.query(
       `SELECT column_name FROM information_schema.columns
-       WHERE table_schema = 'public' AND table_name = $1
+       WHERE table_schema = current_schema() AND table_name = $1
        ORDER BY ordinal_position`,
       [tableName]
     );
@@ -188,18 +179,19 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
   }
 
   /**
-   * Build JSON object expression for columns
+   * Build JSON object expression for columns with escaped identifiers
    */
   private buildJsonObject(columns: string[], prefix: string): string {
     if (columns.length === 0) {
       return "'{}'::jsonb";
     }
-    const pairs = columns.map((col) => `'${col}', ${prefix}.${col}`).join(', ');
+    const pairs = columns.map((col) => `'${col.replace(/'/g, "''")}', ${prefix}.${escapeIdentifierPG(col)}`).join(', ');
     return `jsonb_build_object(${pairs})`;
   }
 
   /**
    * Create audit triggers for a table (trigger-based CDC)
+   * Uses escaped identifiers for SQL injection prevention.
    */
   private async createTriggersForTable(
     client: PoolClient,
@@ -212,11 +204,13 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     }
 
     const allColumns = await this.getTableColumns(client, tableName);
-    const triggerPrefix = `cdc_${syncConfigId.replace(/-/g, '_').substring(0, 20)}`;
+    const sanitizedConfigId = syncConfigId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 20);
+    const triggerPrefix = `cdc_${sanitizedConfigId}`;
+    const escapedTable = escapeIdentifierPG(tableName);
 
     // Create changelog table if it doesn't exist
     await client.query(`
-      CREATE TABLE IF NOT EXISTS _cdc_changelog (
+      CREATE TABLE IF NOT EXISTS "_cdc_changelog" (
         id BIGSERIAL PRIMARY KEY,
         sync_config_id VARCHAR(36) NOT NULL,
         table_name VARCHAR(255) NOT NULL,
@@ -232,43 +226,48 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     // Create index if it doesn't exist
     await client.query(`
       CREATE INDEX IF NOT EXISTS idx_cdc_changelog_sync_config 
-      ON _cdc_changelog(sync_config_id, change_timestamp)
+      ON "_cdc_changelog"(sync_config_id, change_timestamp)
     `);
 
-    // Create trigger function for this table
+    // Build JSON object expressions for triggers
     const pkJsonObject = this.buildJsonObject(pkColumns, 'OLD');
     const pkJsonObjectNew = this.buildJsonObject(pkColumns, 'NEW');
     const allColumnsJsonNew = this.buildJsonObject(allColumns, 'NEW');
 
+    const escapedSyncConfigId = syncConfigId.replace(/'/g, "''");
+    const escapedTableName = tableName.replace(/'/g, "''");
+    const funcName = escapeIdentifierPG(`${triggerPrefix}_${tableName}_fn`);
+
+    // Create trigger function for this table
     await client.query(`
-      CREATE OR REPLACE FUNCTION ${triggerPrefix}_${tableName}_fn()
+      CREATE OR REPLACE FUNCTION ${funcName}()
       RETURNS TRIGGER AS $$
       BEGIN
         IF (TG_OP = 'INSERT') THEN
-          INSERT INTO _cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+          INSERT INTO "_cdc_changelog" (sync_config_id, table_name, operation, primary_key_values, change_data)
           VALUES (
-            '${syncConfigId}',
-            '${tableName}',
+            '${escapedSyncConfigId}',
+            '${escapedTableName}',
             'INSERT',
             ${pkJsonObjectNew},
             ${allColumnsJsonNew}
           );
           RETURN NEW;
         ELSIF (TG_OP = 'UPDATE') THEN
-          INSERT INTO _cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+          INSERT INTO "_cdc_changelog" (sync_config_id, table_name, operation, primary_key_values, change_data)
           VALUES (
-            '${syncConfigId}',
-            '${tableName}',
+            '${escapedSyncConfigId}',
+            '${escapedTableName}',
             'UPDATE',
             ${pkJsonObjectNew},
             ${allColumnsJsonNew}
           );
           RETURN NEW;
         ELSIF (TG_OP = 'DELETE') THEN
-          INSERT INTO _cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+          INSERT INTO "_cdc_changelog" (sync_config_id, table_name, operation, primary_key_values, change_data)
           VALUES (
-            '${syncConfigId}',
-            '${tableName}',
+            '${escapedSyncConfigId}',
+            '${escapedTableName}',
             'DELETE',
             ${pkJsonObject},
             NULL
@@ -281,31 +280,29 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     `);
 
     // Create triggers
+    const insertTrigger = escapeIdentifierPG(`${triggerPrefix}_${tableName}_insert`);
+    const updateTrigger = escapeIdentifierPG(`${triggerPrefix}_${tableName}_update`);
+    const deleteTrigger = escapeIdentifierPG(`${triggerPrefix}_${tableName}_delete`);
+
+    await client.query(`DROP TRIGGER IF EXISTS ${insertTrigger} ON ${escapedTable}`);
     await client.query(`
-      DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_insert ON ${tableName}
-    `);
-    await client.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_insert
-      AFTER INSERT ON ${tableName}
-      FOR EACH ROW EXECUTE FUNCTION ${triggerPrefix}_${tableName}_fn()
+      CREATE TRIGGER ${insertTrigger}
+      AFTER INSERT ON ${escapedTable}
+      FOR EACH ROW EXECUTE FUNCTION ${funcName}()
     `);
 
+    await client.query(`DROP TRIGGER IF EXISTS ${updateTrigger} ON ${escapedTable}`);
     await client.query(`
-      DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_update ON ${tableName}
-    `);
-    await client.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_update
-      AFTER UPDATE ON ${tableName}
-      FOR EACH ROW EXECUTE FUNCTION ${triggerPrefix}_${tableName}_fn()
+      CREATE TRIGGER ${updateTrigger}
+      AFTER UPDATE ON ${escapedTable}
+      FOR EACH ROW EXECUTE FUNCTION ${funcName}()
     `);
 
+    await client.query(`DROP TRIGGER IF EXISTS ${deleteTrigger} ON ${escapedTable}`);
     await client.query(`
-      DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_delete ON ${tableName}
-    `);
-    await client.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_delete
-      AFTER DELETE ON ${tableName}
-      FOR EACH ROW EXECUTE FUNCTION ${triggerPrefix}_${tableName}_fn()
+      CREATE TRIGGER ${deleteTrigger}
+      AFTER DELETE ON ${escapedTable}
+      FOR EACH ROW EXECUTE FUNCTION ${funcName}()
     `);
   }
 
@@ -317,82 +314,25 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     tableName: string,
     syncConfigId: string
   ): Promise<void> {
-    const triggerPrefix = `cdc_${syncConfigId.replace(/-/g, '_').substring(0, 20)}`;
+    const sanitizedConfigId = syncConfigId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 20);
+    const triggerPrefix = `cdc_${sanitizedConfigId}`;
+    const escapedTable = escapeIdentifierPG(tableName);
 
     try {
-      await client.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_insert ON ${tableName}`);
-      await client.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_update ON ${tableName}`);
-      await client.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_delete ON ${tableName}`);
-      await client.query(`DROP FUNCTION IF EXISTS ${triggerPrefix}_${tableName}_fn()`);
+      await client.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierPG(`${triggerPrefix}_${tableName}_insert`)} ON ${escapedTable}`);
+      await client.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierPG(`${triggerPrefix}_${tableName}_update`)} ON ${escapedTable}`);
+      await client.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierPG(`${triggerPrefix}_${tableName}_delete`)} ON ${escapedTable}`);
+      await client.query(`DROP FUNCTION IF EXISTS ${escapeIdentifierPG(`${triggerPrefix}_${tableName}_fn`)}()`);
     } catch (error) {
       // Ignore errors if triggers don't exist
     }
   }
 
   /**
-   * Create a logical replication slot
-   */
-  private async createReplicationSlot(
-    client: PoolClient,
-    slotName: string
-  ): Promise<void> {
-    try {
-      // Check if slot already exists
-      const checkResult = await client.query(
-        "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
-        [slotName]
-      );
-
-      if (checkResult.rows.length === 0) {
-        // Create the replication slot using pgoutput plugin
-        await client.query(
-          "SELECT pg_create_logical_replication_slot($1, 'pgoutput')",
-          [slotName]
-        );
-      }
-    } catch (error: any) {
-      throw new Error(`Failed to create replication slot: ${error.message}`);
-    }
-  }
-
-  /**
-   * Drop a logical replication slot
-   */
-  private async dropReplicationSlot(
-    client: PoolClient,
-    slotName: string
-  ): Promise<void> {
-    try {
-      // Check if slot exists
-      const checkResult = await client.query(
-        "SELECT slot_name FROM pg_replication_slots WHERE slot_name = $1",
-        [slotName]
-      );
-
-      if (checkResult.rows.length > 0) {
-        await client.query(
-          "SELECT pg_drop_replication_slot($1)",
-          [slotName]
-        );
-      }
-    } catch (error) {
-      // Ignore errors if slot doesn't exist
-    }
-  }
-
-  /**
-   * Get replication slot name for a sync configuration
-   */
-  private getSlotName(syncConfigId: string): string {
-    // Slot names must be valid PostgreSQL identifiers (lowercase, no hyphens)
-    return `cdc_slot_${syncConfigId.replace(/-/g, '_')}`.toLowerCase();
-  }
-
-  /**
    * Initialize change tracking for a sync configuration
    * Requirements: 2.1
    */
-  async initializeTracking(config: SyncConfiguration): Promise<void> {
+  async initializeTracking(config: SyncConfigWithConnections): Promise<void> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -408,25 +348,23 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       const logicalReplicationAvailable = await this.isLogicalReplicationAvailable(client);
       
       if (!logicalReplicationAvailable) {
-        console.log(`Logical replication not available for ${sourceConnection.database}, using trigger-based CDC`);
-        this.useTriggerBased = true;
+        logger.info(`Logical replication not available for ${sourceConnection.database}, using trigger-based CDC`);
+      } else {
+        // Logical replication slot parsing is not implemented — fall back
+        logger.info(`Logical replication available for ${sourceConnection.database} but WAL parsing not implemented, using trigger-based CDC`);
       }
 
-      if (this.useTriggerBased) {
-        // Set up trigger-based CDC
-        const tables = await this.getTablesToTrack(
-          client,
-          config.includeTables,
-          config.excludeTables
-        );
+      // Always use trigger-based CDC (WAL parsing not implemented)
+      this.triggerBasedConfigs.set(config.id, true);
 
-        for (const table of tables) {
-          await this.createTriggersForTable(client, table, config.id);
-        }
-      } else {
-        // Set up logical replication slot
-        const slotName = this.getSlotName(config.id);
-        await this.createReplicationSlot(client, slotName);
+      const tables = await this.getTablesToTrack(
+        client,
+        config.includeTables,
+        config.excludeTables
+      );
+
+      for (const table of tables) {
+        await this.createTriggersForTable(client, table, config.id);
       }
     } finally {
       client.release();
@@ -439,7 +377,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
    * Teardown change tracking for a sync configuration
    * Requirements: 2.1
    */
-  async teardownTracking(config: SyncConfiguration): Promise<void> {
+  async teardownTracking(config: SyncConfigWithConnections): Promise<void> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -451,36 +389,33 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     const client = await pool.connect();
 
     try {
-      if (this.useTriggerBased) {
-        const tables = await this.getTablesToTrack(
-          client,
-          config.includeTables,
-          config.excludeTables
-        );
+      const tables = await this.getTablesToTrack(
+        client,
+        config.includeTables,
+        config.excludeTables
+      );
 
-        for (const table of tables) {
-          await this.dropTriggersForTable(client, table, config.id);
-        }
-
-        // Optionally clean up the changelog table
-        await client.query(`DROP TABLE IF EXISTS _cdc_changelog`);
-      } else {
-        // Drop logical replication slot
-        const slotName = this.getSlotName(config.id);
-        await this.dropReplicationSlot(client, slotName);
+      for (const table of tables) {
+        await this.dropTriggersForTable(client, table, config.id);
       }
+
+      // Optionally clean up the changelog table
+      await client.query(`DROP TABLE IF EXISTS "_cdc_changelog"`);
     } finally {
       client.release();
       await pool.end();
       tunnel?.close();
     }
+
+    // Clean up per-config tracking
+    this.triggerBasedConfigs.delete(config.id);
   }
 
   /**
    * Capture changes from the database since the specified checkpoint
    * Requirements: 2.4, 2.6
    */
-  async captureChanges(config: SyncConfiguration, since: string): Promise<ChangeLog[]> {
+  async captureChanges(config: SyncConfigWithConnections, since: string): Promise<ChangeLog[]> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -488,18 +423,15 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       throw new Error('Source connection not found');
     }
 
-    if (this.useTriggerBased) {
-      return this.captureChangesFromTriggers(config, sourceConnection, since);
-    } else {
-      return this.captureChangesFromReplicationSlot(config, sourceConnection, since);
-    }
+    // Always use trigger-based capture (WAL parsing not implemented)
+    return this.captureChangesFromTriggers(config, sourceConnection, since);
   }
 
   /**
    * Capture changes from trigger-based changelog table
    */
   private async captureChangesFromTriggers(
-    config: SyncConfiguration,
+    config: SyncConfigWithConnections,
     sourceConnection: any,
     since: string
   ): Promise<ChangeLog[]> {
@@ -514,7 +446,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
 
       const result = await client.query(
         `SELECT id, table_name, operation, primary_key_values, change_data, change_timestamp
-         FROM _cdc_changelog
+         FROM "_cdc_changelog"
          WHERE sync_config_id = $1 
            AND (change_timestamp > $2 OR (change_timestamp = $2 AND id > $3))
          ORDER BY change_timestamp, id
@@ -551,31 +483,10 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
   }
 
   /**
-   * Capture changes from logical replication slot
-   * Note: This is a simplified implementation. Production would parse WAL changes
-   */
-  private async captureChangesFromReplicationSlot(
-    config: SyncConfiguration,
-    sourceConnection: any,
-    since: string
-  ): Promise<ChangeLog[]> {
-    // Logical replication slot parsing is complex and requires decoding WAL changes
-    // For this implementation, we'll return an empty array and log a warning
-    // In production, you would use:
-    // 1. pg_logical_slot_get_changes() to retrieve changes
-    // 2. Parse the pgoutput plugin format
-    // 3. Decode the binary WAL data
-    // 4. Extract table names, operations, and data
-    
-    console.warn('Logical replication slot CDC not fully implemented. Use trigger-based CDC instead.');
-    return [];
-  }
-
-  /**
    * Get the current checkpoint for a sync configuration
    * Requirements: 2.5
    */
-  async getCheckpoint(config: SyncConfiguration, origin: 'source' | 'target'): Promise<string> {
+  async getCheckpoint(config: SyncConfigWithConnections, origin: 'source' | 'target'): Promise<string> {
     const connectionId = origin === 'source' ? config.sourceConnectionId : config.targetConnectionId;
     const connection = await prisma.connection.findUnique({ where: { id: connectionId } });
     
@@ -587,15 +498,9 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     const client = await pool.connect();
 
     try {
-      if (this.useTriggerBased) {
-        // For trigger-based, return current timestamp
-        const result = await client.query('SELECT CURRENT_TIMESTAMP(6) as now');
-        return `${new Date(result.rows[0].now).toISOString()}:0`;
-      } else {
-        // For replication slot-based, return current LSN
-        const result = await client.query("SELECT pg_current_wal_lsn() as lsn");
-        return result.rows[0].lsn;
-      }
+      // For trigger-based, return current timestamp
+      const result = await client.query('SELECT CURRENT_TIMESTAMP(6) as now');
+      return `${new Date(result.rows[0].now).toISOString()}:0`;
     } finally {
       client.release();
       await pool.end();
@@ -608,7 +513,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
    * Requirements: 2.5, 7.4
    */
   async updateCheckpoint(
-    config: SyncConfiguration,
+    config: SyncConfigWithConnections,
     checkpoint: string,
     origin: 'source' | 'target'
   ): Promise<void> {
@@ -624,7 +529,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
    * Clean up old change log entries
    * Requirements: 2.7
    */
-  async cleanupChangeLogs(config: SyncConfiguration, before: Date): Promise<number> {
+  async cleanupChangeLogs(config: SyncConfigWithConnections, before: Date): Promise<number> {
     const result = await prisma.changeLog.deleteMany({
       where: {
         syncConfigId: config.id,

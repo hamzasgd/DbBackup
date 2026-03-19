@@ -3,27 +3,11 @@ import { CDCTrackerService } from './cdc-tracker.service';
 import { SSHTunnel } from '../ssh.service';
 import { prisma } from '../../config/database';
 import { decrypt, decryptIfPresent } from '../crypto.service';
-
-interface SyncConfiguration {
-  id: string;
-  userId: string;
-  name: string;
-  sourceConnectionId: string;
-  targetConnectionId: string;
-  direction: string;
-  mode: string;
-  conflictStrategy: string;
-  includeTables: string[];
-  excludeTables: string[];
-  cronExpression: string | null;
-  batchSize: number;
-  parallelTables: number;
-  isActive: boolean;
-  createdAt: Date;
-  updatedAt: Date;
-  sourceConnection?: any;
-  targetConnection?: any;
-}
+import { logger } from '../../config/logger';
+import {
+  SyncConfigWithConnections,
+  escapeIdentifierMySQL,
+} from './sync-utils';
 
 interface ChangeLog {
   id: string;
@@ -47,14 +31,19 @@ interface BinlogPosition {
 /**
  * MySQLCDCTracker - Change Data Capture tracker for MySQL/MariaDB databases
  * 
- * Implements CDC using two strategies:
- * 1. Binary log position tracking (primary method)
- * 2. Trigger-based change capture (fallback)
+ * Implements CDC using trigger-based change capture.
+ * Binary log support is detected but falls back to triggers when binlog
+ * parsing is not implemented.
  * 
  * Requirements: 2.2, 2.4, 2.5
  */
 export class MySQLCDCTracker implements CDCTrackerService {
-  private useTriggerBased: boolean = false;
+  /** Per-config tracking of whether to use trigger-based CDC */
+  private triggerBasedConfigs = new Map<string, boolean>();
+
+  private isTriggerBased(configId: string): boolean {
+    return this.triggerBasedConfigs.get(configId) ?? true; // default to trigger-based (safe)
+  }
 
   /**
    * Create a database connection with SSH tunnel support
@@ -186,6 +175,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
 
   /**
    * Create audit triggers for a table (trigger-based CDC)
+   * Uses escaped identifiers to prevent SQL injection.
    */
   private async createTriggersForTable(
     conn: mysql2.Connection,
@@ -199,11 +189,16 @@ export class MySQLCDCTracker implements CDCTrackerService {
     }
 
     const allColumns = await this.getTableColumns(conn, database, tableName);
-    const triggerPrefix = `cdc_${syncConfigId.replace(/-/g, '_').substring(0, 20)}`;
+    // UUID only — safe for use in trigger names
+    const sanitizedConfigId = syncConfigId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 20);
+    const triggerPrefix = `cdc_${sanitizedConfigId}`;
+
+    const escapedDb = escapeIdentifierMySQL(database);
+    const escapedTable = escapeIdentifierMySQL(tableName);
 
     // Create changelog table if it doesn't exist (in the source database)
     await conn.query(`
-      CREATE TABLE IF NOT EXISTS ${database}._cdc_changelog (
+      CREATE TABLE IF NOT EXISTS ${escapedDb}.\`_cdc_changelog\` (
         id BIGINT AUTO_INCREMENT PRIMARY KEY,
         sync_config_id VARCHAR(36) NOT NULL,
         table_name VARCHAR(255) NOT NULL,
@@ -215,22 +210,26 @@ export class MySQLCDCTracker implements CDCTrackerService {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
     `);
 
-    // Build primary key JSON object for triggers
-    const pkJsonParts = pkColumns.map((col) => `'${col}', OLD.${col}`).join(', ');
-    const pkJsonPartsNew = pkColumns.map((col) => `'${col}', NEW.${col}`).join(', ');
+    // Build primary key JSON object for triggers using escaped column refs
+    const pkJsonParts = pkColumns.map((col) => `'${col.replace(/'/g, "''")}', OLD.${escapeIdentifierMySQL(col)}`).join(', ');
+    const pkJsonPartsNew = pkColumns.map((col) => `'${col.replace(/'/g, "''")}', NEW.${escapeIdentifierMySQL(col)}`).join(', ');
     const allColumnsJsonNew = this.buildAllColumnsJson(allColumns, 'NEW');
     const allColumnsJsonOld = this.buildAllColumnsJson(allColumns, 'OLD');
 
+    const escapedSyncConfigId = syncConfigId.replace(/'/g, "''");
+
     // INSERT trigger
+    const insertTriggerName = `${triggerPrefix}_${sanitizedConfigId}_insert`;
+    await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(insertTriggerName)}`);
     await conn.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_insert
-      AFTER INSERT ON ${database}.${tableName}
+      CREATE TRIGGER ${escapeIdentifierMySQL(insertTriggerName)}
+      AFTER INSERT ON ${escapedDb}.${escapedTable}
       FOR EACH ROW
       BEGIN
-        INSERT INTO ${database}._cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+        INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${syncConfigId}',
-          '${tableName}',
+          '${escapedSyncConfigId}',
+          '${tableName.replace(/'/g, "''")}',
           'INSERT',
           JSON_OBJECT(${pkJsonPartsNew}),
           JSON_OBJECT(${allColumnsJsonNew})
@@ -239,15 +238,17 @@ export class MySQLCDCTracker implements CDCTrackerService {
     `);
 
     // UPDATE trigger
+    const updateTriggerName = `${triggerPrefix}_${sanitizedConfigId}_update`;
+    await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(updateTriggerName)}`);
     await conn.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_update
-      AFTER UPDATE ON ${database}.${tableName}
+      CREATE TRIGGER ${escapeIdentifierMySQL(updateTriggerName)}
+      AFTER UPDATE ON ${escapedDb}.${escapedTable}
       FOR EACH ROW
       BEGIN
-        INSERT INTO ${database}._cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+        INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${syncConfigId}',
-          '${tableName}',
+          '${escapedSyncConfigId}',
+          '${tableName.replace(/'/g, "''")}',
           'UPDATE',
           JSON_OBJECT(${pkJsonPartsNew}),
           JSON_OBJECT(${allColumnsJsonNew})
@@ -256,15 +257,17 @@ export class MySQLCDCTracker implements CDCTrackerService {
     `);
 
     // DELETE trigger
+    const deleteTriggerName = `${triggerPrefix}_${sanitizedConfigId}_delete`;
+    await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(deleteTriggerName)}`);
     await conn.query(`
-      CREATE TRIGGER ${triggerPrefix}_${tableName}_delete
-      AFTER DELETE ON ${database}.${tableName}
+      CREATE TRIGGER ${escapeIdentifierMySQL(deleteTriggerName)}
+      AFTER DELETE ON ${escapedDb}.${escapedTable}
       FOR EACH ROW
       BEGIN
-        INSERT INTO ${database}._cdc_changelog (sync_config_id, table_name, operation, primary_key_values, change_data)
+        INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${syncConfigId}',
-          '${tableName}',
+          '${escapedSyncConfigId}',
+          '${tableName.replace(/'/g, "''")}',
           'DELETE',
           JSON_OBJECT(${pkJsonParts}),
           NULL
@@ -292,12 +295,13 @@ export class MySQLCDCTracker implements CDCTrackerService {
 
   /**
    * Build JSON_OBJECT expression for all columns in a table
+   * Uses escaped identifiers for column references
    */
   private buildAllColumnsJson(columns: string[], prefix: string): string {
     if (columns.length === 0) {
       return "'{}'";
     }
-    const parts = columns.map((col) => `'${col}', ${prefix}.${col}`).join(', ');
+    const parts = columns.map((col) => `'${col.replace(/'/g, "''")}', ${prefix}.${escapeIdentifierMySQL(col)}`).join(', ');
     return parts;
   }
 
@@ -310,12 +314,13 @@ export class MySQLCDCTracker implements CDCTrackerService {
     tableName: string,
     syncConfigId: string
   ): Promise<void> {
-    const triggerPrefix = `cdc_${syncConfigId.replace(/-/g, '_').substring(0, 20)}`;
+    const sanitizedConfigId = syncConfigId.replace(/[^a-zA-Z0-9_]/g, '_').substring(0, 20);
+    const triggerPrefix = `cdc_${sanitizedConfigId}`;
 
     try {
-      await conn.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_insert`);
-      await conn.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_update`);
-      await conn.query(`DROP TRIGGER IF EXISTS ${triggerPrefix}_${tableName}_delete`);
+      await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(`${triggerPrefix}_${sanitizedConfigId}_insert`)}`);
+      await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(`${triggerPrefix}_${sanitizedConfigId}_update`)}`);
+      await conn.query(`DROP TRIGGER IF EXISTS ${escapeIdentifierMySQL(`${triggerPrefix}_${sanitizedConfigId}_delete`)}`);
     } catch (error) {
       // Ignore errors if triggers don't exist
     }
@@ -325,7 +330,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
    * Initialize change tracking for a sync configuration
    * Requirements: 2.1
    */
-  async initializeTracking(config: SyncConfiguration): Promise<void> {
+  async initializeTracking(config: SyncConfigWithConnections): Promise<void> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -340,33 +345,29 @@ export class MySQLCDCTracker implements CDCTrackerService {
       const binlogEnabled = await this.isBinlogEnabled(conn);
       
       if (!binlogEnabled) {
-        console.log(`Binary log not enabled for ${sourceConnection.database}, using trigger-based CDC`);
-        this.useTriggerBased = true;
+        logger.info(`Binary log not enabled for ${sourceConnection.database}, using trigger-based CDC`);
+        this.triggerBasedConfigs.set(config.id, true);
+      } else {
+        // Binlog parsing is not implemented — fall back to trigger-based CDC
+        logger.info(`Binary log enabled for ${sourceConnection.database} but parsing not implemented, using trigger-based CDC`);
+        this.triggerBasedConfigs.set(config.id, true);
       }
 
-      if (this.useTriggerBased) {
-        // Set up trigger-based CDC
-        const tables = await this.getTablesToTrack(
+      // Always use trigger-based for now (binlog parsing is not implemented)
+      const tables = await this.getTablesToTrack(
+        conn,
+        sourceConnection.database,
+        config.includeTables,
+        config.excludeTables
+      );
+
+      for (const table of tables) {
+        await this.createTriggersForTable(
           conn,
           sourceConnection.database,
-          config.includeTables,
-          config.excludeTables
+          table,
+          config.id
         );
-
-        for (const table of tables) {
-          await this.createTriggersForTable(
-            conn,
-            sourceConnection.database,
-            table,
-            config.id
-          );
-        }
-      } else {
-        // For binlog-based CDC, just verify we can read the position
-        const position = await this.getBinlogPosition(conn);
-        if (!position) {
-          throw new Error('Unable to read binary log position');
-        }
       }
     } finally {
       await conn.end();
@@ -378,7 +379,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
    * Teardown change tracking for a sync configuration
    * Requirements: 2.1
    */
-  async teardownTracking(config: SyncConfiguration): Promise<void> {
+  async teardownTracking(config: SyncConfigWithConnections): Promise<void> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -389,37 +390,39 @@ export class MySQLCDCTracker implements CDCTrackerService {
     const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
 
     try {
-      if (this.useTriggerBased) {
-        const tables = await this.getTablesToTrack(
+      const tables = await this.getTablesToTrack(
+        conn,
+        sourceConnection.database,
+        config.includeTables,
+        config.excludeTables
+      );
+
+      for (const table of tables) {
+        await this.dropTriggersForTable(
           conn,
           sourceConnection.database,
-          config.includeTables,
-          config.excludeTables
+          table,
+          config.id
         );
-
-        for (const table of tables) {
-          await this.dropTriggersForTable(
-            conn,
-            sourceConnection.database,
-            table,
-            config.id
-          );
-        }
-
-        // Optionally clean up the changelog table
-        await conn.query(`DROP TABLE IF EXISTS ${sourceConnection.database}._cdc_changelog`);
       }
+
+      // Optionally clean up the changelog table
+      const escapedDb = escapeIdentifierMySQL(sourceConnection.database);
+      await conn.query(`DROP TABLE IF EXISTS ${escapedDb}.\`_cdc_changelog\``);
     } finally {
       await conn.end();
       tunnel?.close();
     }
+
+    // Clean up per-config tracking
+    this.triggerBasedConfigs.delete(config.id);
   }
 
   /**
    * Capture changes from the database since the specified checkpoint
    * Requirements: 2.4, 2.6
    */
-  async captureChanges(config: SyncConfiguration, since: string): Promise<ChangeLog[]> {
+  async captureChanges(config: SyncConfigWithConnections, since: string): Promise<ChangeLog[]> {
     const sourceConnection = config.sourceConnection || 
       await prisma.connection.findUnique({ where: { id: config.sourceConnectionId } });
     
@@ -427,18 +430,15 @@ export class MySQLCDCTracker implements CDCTrackerService {
       throw new Error('Source connection not found');
     }
 
-    if (this.useTriggerBased) {
-      return this.captureChangesFromTriggers(config, sourceConnection, since);
-    } else {
-      return this.captureChangesFromBinlog(config, sourceConnection, since);
-    }
+    // Always use trigger-based capture (binlog parsing not implemented)
+    return this.captureChangesFromTriggers(config, sourceConnection, since);
   }
 
   /**
    * Capture changes from trigger-based changelog table
    */
   private async captureChangesFromTriggers(
-    config: SyncConfiguration,
+    config: SyncConfigWithConnections,
     sourceConnection: any,
     since: string
   ): Promise<ChangeLog[]> {
@@ -450,9 +450,10 @@ export class MySQLCDCTracker implements CDCTrackerService {
       const sinceTimestamp = timestampStr || new Date(0).toISOString();
       const sinceId = lastIdStr ? parseInt(lastIdStr, 10) : 0;
 
+      const escapedDb = escapeIdentifierMySQL(sourceConnection.database);
       const [rows] = await conn.query<mysql2.RowDataPacket[]>(
         `SELECT id, table_name, operation, primary_key_values, change_data, change_timestamp
-         FROM ${sourceConnection.database}._cdc_changelog
+         FROM ${escapedDb}.\`_cdc_changelog\`
          WHERE sync_config_id = ? AND (change_timestamp > ? OR (change_timestamp = ? AND id > ?))
          ORDER BY change_timestamp, id
          LIMIT 10000`,
@@ -487,30 +488,10 @@ export class MySQLCDCTracker implements CDCTrackerService {
   }
 
   /**
-   * Capture changes from binary log
-   * Note: This is a simplified implementation. Production would use mysqlbinlog or a library
-   */
-  private async captureChangesFromBinlog(
-    config: SyncConfiguration,
-    sourceConnection: any,
-    since: string
-  ): Promise<ChangeLog[]> {
-    // Binary log parsing is complex and typically requires external tools or libraries
-    // For this implementation, we'll return an empty array and log a warning
-    // In production, you would use:
-    // 1. mysqlbinlog command-line tool
-    // 2. A library like mysql-binlog-connector-java (for Java) or zongji (for Node.js)
-    // 3. MySQL's binlog API
-    
-    console.warn('Binary log CDC not fully implemented. Use trigger-based CDC instead.');
-    return [];
-  }
-
-  /**
    * Get the current checkpoint for a sync configuration
    * Requirements: 2.5
    */
-  async getCheckpoint(config: SyncConfiguration, origin: 'source' | 'target'): Promise<string> {
+  async getCheckpoint(config: SyncConfigWithConnections, origin: 'source' | 'target'): Promise<string> {
     const connectionId = origin === 'source' ? config.sourceConnectionId : config.targetConnectionId;
     const connection = await prisma.connection.findUnique({ where: { id: connectionId } });
     
@@ -521,18 +502,9 @@ export class MySQLCDCTracker implements CDCTrackerService {
     const { conn, tunnel } = await this.createConnection(connection, origin);
 
     try {
-      if (this.useTriggerBased) {
-        // For trigger-based, return current timestamp
-        const [[row]] = await conn.query<mysql2.RowDataPacket[]>('SELECT NOW(6) as now');
-        return `${new Date(row.now).toISOString()}:0`;
-      } else {
-        // For binlog-based, return binlog position
-        const position = await this.getBinlogPosition(conn);
-        if (!position) {
-          throw new Error('Unable to read binary log position');
-        }
-        return `${position.file}:${position.position}`;
-      }
+      // For trigger-based, return current timestamp
+      const [[row]] = await conn.query<mysql2.RowDataPacket[]>('SELECT NOW(6) as now');
+      return `${new Date(row.now).toISOString()}:0`;
     } finally {
       await conn.end();
       tunnel?.close();
@@ -544,7 +516,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
    * Requirements: 2.5, 7.4
    */
   async updateCheckpoint(
-    config: SyncConfiguration,
+    config: SyncConfigWithConnections,
     checkpoint: string,
     origin: 'source' | 'target'
   ): Promise<void> {
@@ -560,7 +532,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
    * Clean up old change log entries
    * Requirements: 2.7
    */
-  async cleanupChangeLogs(config: SyncConfiguration, before: Date): Promise<number> {
+  async cleanupChangeLogs(config: SyncConfigWithConnections, before: Date): Promise<number> {
     const result = await prisma.changeLog.deleteMany({
       where: {
         syncConfigId: config.id,

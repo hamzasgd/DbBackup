@@ -751,10 +751,10 @@ describe('SyncEngineService', () => {
       const state = await service.getSyncState(config.id);
 
       expect(state).toBeDefined();
-      expect(state.id).toBe(syncState.id);
-      expect(state.status).toBe('ACTIVE');
-      expect(state.sourceCheckpoint).toBe('checkpoint-123');
-      expect(state.totalRowsSynced).toBe(BigInt(1000));
+      expect(state!.id).toBe(syncState.id);
+      expect(state!.status).toBe('ACTIVE');
+      expect(state!.sourceCheckpoint).toBe('checkpoint-123');
+      expect(state!.totalRowsSynced).toBe(BigInt(1000));
 
       service['validateConnectionAccessibility'] = originalValidate;
     });

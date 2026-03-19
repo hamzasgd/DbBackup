@@ -2,6 +2,8 @@ import { prisma } from '../../config/database';
 import { logger } from '../../config/logger';
 import { 
   SyncConfiguration, 
+  SyncState,
+  SyncHistory,
   SyncDirection, 
   SyncMode, 
   ConflictStrategy,
@@ -13,7 +15,7 @@ import { ConnectionConfig } from '../engines/base.engine';
 import { CDCTrackerService } from './cdc-tracker.service';
 import { MySQLCDCTracker } from './mysql-cdc-tracker.service';
 import { PostgreSQLCDCTracker } from './postgresql-cdc-tracker.service';
-import { decrypt, decryptIfPresent } from '../crypto.service';
+import { connectionToConfig } from './sync-utils';
 
 /**
  * DTO for creating a sync configuration
@@ -158,26 +160,7 @@ export class SyncEngineService {
     // Import engine factory dynamically to avoid circular dependencies
     const { engineFactory } = await import('../engines/engine.factory');
     
-    const config: ConnectionConfig = {
-      type: connection.type,
-      host: decrypt(connection.host),
-      port: connection.port,
-      username: decrypt(connection.username),
-      password: decrypt(connection.password),
-      database: decrypt(connection.database),
-      sslEnabled: connection.sslEnabled,
-      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
-      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
-      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
-      sshEnabled: connection.sshEnabled,
-      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
-      sshPort: connection.sshPort ?? undefined,
-      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
-      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
-      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
-      connectionTimeout: connection.connectionTimeout ?? 30000,
-    };
-
+    const config = connectionToConfig(connection);
     const engine = engineFactory(config);
     
     try {
@@ -342,8 +325,8 @@ export class SyncEngineService {
     }
 
     // Validate schema compatibility
-    const sourceConfig = this.connectionToConfig(config.sourceConnection);
-    const targetConfig = this.connectionToConfig(config.targetConnection);
+    const sourceConfig = connectionToConfig(config.sourceConnection);
+    const targetConfig = connectionToConfig(config.targetConnection);
 
     const schemaComparison = await this.schemaValidator.compareSchemas(
       sourceConfig,
@@ -452,9 +435,12 @@ export class SyncEngineService {
       },
     });
 
-    // TODO: Cancel pending sync jobs from queue
-    // This will be implemented when sync queue is created in task 10.1
-    // For now, the PAUSED status will prevent new jobs from being queued
+    // Cancel real-time intervals or scheduled jobs
+    if (config.mode === SyncMode.REALTIME) {
+      await this.cancelRealtimeMode(id);
+    } else if (config.mode === SyncMode.SCHEDULED) {
+      await this.cancelScheduledMode(id);
+    }
   }
 
   /**
@@ -495,8 +481,12 @@ export class SyncEngineService {
       },
     });
 
-    // TODO: Restart scheduling for scheduled mode
-    // This will be implemented when scheduling logic is added in task 15.1
+    // Restart real-time or scheduled mode
+    if (config.mode === SyncMode.REALTIME) {
+      await this.setupRealtimeMode(id);
+    } else if (config.mode === SyncMode.SCHEDULED && config.cronExpression) {
+      await this.setupScheduledMode(id);
+    }
   }
 
   /**
@@ -712,7 +702,7 @@ export class SyncEngineService {
       throw new Error('Sync state not found for active configuration');
     }
 
-    // Check if a sync job is already running
+    // Check if a sync job is already running (with atomic update to prevent race conditions)
     if (config.syncState.currentJobId) {
       // Check if the job actually exists in the queue
       const { getSyncQueue } = await import('../../queue/sync.queue');
@@ -721,13 +711,21 @@ export class SyncEngineService {
       try {
         const job = await queue.getJob(config.syncState.currentJobId);
         
-        // If job doesn't exist or is completed/failed, clear the stale job ID
+        // If job doesn't exist or is completed/failed, atomically clear the stale job ID
         if (!job || await job.isCompleted() || await job.isFailed()) {
           logger.warn(`Clearing stale job ID ${config.syncState.currentJobId} for sync ${id}`);
-          await prisma.syncState.update({
-            where: { id: config.syncState.id },
+          // Atomic conditional update: only clear if the job ID hasn't changed
+          const updated = await prisma.syncState.updateMany({
+            where: {
+              syncConfigId: id,
+              currentJobId: config.syncState.currentJobId, // only if still the same stale ID
+            },
             data: { currentJobId: null },
           });
+          if (updated.count === 0) {
+            // Another process already cleared/replaced it — re-check
+            throw new Error('A sync job is already running for this configuration');
+          }
         } else {
           // Job is actually running
           throw new Error('A sync job is already running for this configuration');
@@ -736,8 +734,11 @@ export class SyncEngineService {
         // If we can't get the job, it probably doesn't exist - clear the stale ID
         if (error instanceof Error && error.message !== 'A sync job is already running for this configuration') {
           logger.warn(`Error checking job status, clearing stale job ID: ${error.message}`);
-          await prisma.syncState.update({
-            where: { id: config.syncState.id },
+          await prisma.syncState.updateMany({
+            where: {
+              syncConfigId: id,
+              currentJobId: config.syncState.currentJobId,
+            },
             data: { currentJobId: null },
           });
         } else {
@@ -798,7 +799,7 @@ export class SyncEngineService {
    * 
    * Requirements: 10.5, 10.6
    */
-  async getSyncState(id: string): Promise<any> {
+  async getSyncState(id: string): Promise<SyncState | null> {
     const config = await prisma.syncConfiguration.findUnique({
       where: { id },
       include: {
@@ -825,7 +826,7 @@ export class SyncEngineService {
    * 
    * Requirements: 10.5, 10.6
    */
-  async getSyncHistory(id: string, limit: number = 10): Promise<any[]> {
+  async getSyncHistory(id: string, limit: number = 10): Promise<SyncHistory[]> {
     const config = await prisma.syncConfiguration.findUnique({
       where: { id },
     });
@@ -848,27 +849,38 @@ export class SyncEngineService {
   }
 
   /**
-   * Helper method to convert Connection to ConnectionConfig
+   * Recover real-time sync configurations after server restart.
+   *
+   * Queries all active real-time sync configurations and re-establishes
+   * their polling intervals. Should be called during server startup.
    */
-  private connectionToConfig(connection: Connection): ConnectionConfig {
-    return {
-      type: connection.type,
-      host: decrypt(connection.host),
-      port: connection.port,
-      username: decrypt(connection.username),
-      password: decrypt(connection.password),
-      database: decrypt(connection.database),
-      sslEnabled: connection.sslEnabled,
-      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
-      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
-      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
-      sshEnabled: connection.sshEnabled,
-      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
-      sshPort: connection.sshPort ?? undefined,
-      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
-      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
-      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
-      connectionTimeout: 30000,
-    };
+  async recoverRealtimeConfigs(): Promise<void> {
+    const activeRealtimeConfigs = await prisma.syncConfiguration.findMany({
+      where: {
+        isActive: true,
+        mode: SyncMode.REALTIME,
+      },
+      include: {
+        syncState: true,
+      },
+    });
+
+    if (activeRealtimeConfigs.length === 0) {
+      return;
+    }
+
+    logger.info(`Recovering ${activeRealtimeConfigs.length} active real-time sync configurations`);
+
+    for (const config of activeRealtimeConfigs) {
+      try {
+        // Only recover configs that are ACTIVE or PAUSED (not FAILED)
+        if (config.syncState?.status === SyncStatus.ACTIVE) {
+          await this.setupRealtimeMode(config.id);
+          logger.info(`Recovered real-time sync for ${config.name} (${config.id})`);
+        }
+      } catch (error) {
+        logger.error(`Failed to recover real-time sync for ${config.name} (${config.id}):`, error);
+      }
+    }
   }
 }

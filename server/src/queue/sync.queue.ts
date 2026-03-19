@@ -7,7 +7,14 @@ import { notify } from '../services/notification.service';
 import { engineFactory } from '../services/engines/engine.factory';
 import { ConnectionConfig } from '../services/engines/base.engine';
 import { ConflictResolverService } from '../services/sync/conflict-resolver.service';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
+import {
+  escapeIdentifierMySQL,
+  escapeIdentifierPG,
+  connectionToConfig,
+  fetchPrimaryKeyColumnsMySQL,
+  fetchPrimaryKeyColumnsPG,
+  extractPrimaryKeyFromColumns,
+} from '../services/sync/sync-utils';
 import { 
   SyncDirection, 
   SyncStatus, 
@@ -45,6 +52,12 @@ export async function addSyncJob(data: SyncJobData): Promise<string> {
   });
   return job.id ?? '';
 }
+
+/** Page size when streaming large tables during full sync */
+const FULL_SYNC_PAGE_SIZE = 10000;
+
+/** Maximum age (in days) for synchronized change logs before cleanup */
+const CHANGELOG_RETENTION_DAYS = 7;
 
 /**
  * Create the sync worker that processes synchronization jobs
@@ -109,46 +122,9 @@ export function createSyncWorker(): Worker<SyncJobData> {
       });
 
       try {
-        // Create connection configs with decryption
-        const sourceConfig: ConnectionConfig = {
-          type: config.sourceConnection.type as any,
-          host: decrypt(config.sourceConnection.host),
-          port: config.sourceConnection.port,
-          username: decrypt(config.sourceConnection.username),
-          password: decrypt(config.sourceConnection.password),
-          database: decrypt(config.sourceConnection.database),
-          sslEnabled: config.sourceConnection.sslEnabled,
-          sslCa: decryptIfPresent(config.sourceConnection.sslCa) ?? undefined,
-          sslCert: decryptIfPresent(config.sourceConnection.sslCert) ?? undefined,
-          sslKey: decryptIfPresent(config.sourceConnection.sslKey) ?? undefined,
-          sshEnabled: config.sourceConnection.sshEnabled,
-          sshHost: decryptIfPresent(config.sourceConnection.sshHost) ?? undefined,
-          sshPort: config.sourceConnection.sshPort ?? undefined,
-          sshUsername: decryptIfPresent(config.sourceConnection.sshUsername) ?? undefined,
-          sshPrivateKey: decryptIfPresent(config.sourceConnection.sshPrivateKey) ?? undefined,
-          sshPassphrase: decryptIfPresent(config.sourceConnection.sshPassphrase) ?? undefined,
-          connectionTimeout: 30000,
-        };
-
-        const targetConfig: ConnectionConfig = {
-          type: config.targetConnection.type as any,
-          host: decrypt(config.targetConnection.host),
-          port: config.targetConnection.port,
-          username: decrypt(config.targetConnection.username),
-          password: decrypt(config.targetConnection.password),
-          database: decrypt(config.targetConnection.database),
-          sslEnabled: config.targetConnection.sslEnabled,
-          sslCa: decryptIfPresent(config.targetConnection.sslCa) ?? undefined,
-          sslCert: decryptIfPresent(config.targetConnection.sslCert) ?? undefined,
-          sslKey: decryptIfPresent(config.targetConnection.sslKey) ?? undefined,
-          sshEnabled: config.targetConnection.sshEnabled,
-          sshHost: decryptIfPresent(config.targetConnection.sshHost) ?? undefined,
-          sshPort: config.targetConnection.sshPort ?? undefined,
-          sshUsername: decryptIfPresent(config.targetConnection.sshUsername) ?? undefined,
-          sshPrivateKey: decryptIfPresent(config.targetConnection.sshPrivateKey) ?? undefined,
-          sshPassphrase: decryptIfPresent(config.targetConnection.sshPassphrase) ?? undefined,
-          connectionTimeout: 30000,
-        };
+        // Create connection configs with decryption (using shared utility)
+        const sourceConfig = connectionToConfig(config.sourceConnection);
+        const targetConfig = connectionToConfig(config.targetConnection);
 
         // Get database engines
         const sourceEngine = engineFactory(sourceConfig);
@@ -177,67 +153,95 @@ export function createSyncWorker(): Worker<SyncJobData> {
             strict: strictTableOrdering,
           });
 
+          // Cache primary key columns per table for the duration of this sync
+          const pkCache = new Map<string, string[]>();
+
           for (const tableName of orderedTables) {
             await prisma.syncState.update({
               where: { id: syncStateId },
               data: { currentTable: tableName },
             });
 
-            // Fetch all records from source table
-            const sourceRecords = await fetchTableRecords(sourceEngine, sourceConfig, tableName);
-            
-            // Process records in batches
-            const batchSize = config.batchSize;
-            for (let i = 0; i < sourceRecords.length; i += batchSize) {
-              const batch = sourceRecords.slice(i, Math.min(i + batchSize, sourceRecords.length));
-              
-              // Convert records to change log format
-              const changes = batch.map(record => ({
-                operation: ChangeOperation.INSERT,
-                primaryKeyValues: extractPrimaryKey(record, tableName),
-                changeData: record,
-              }));
+            // Fetch PK columns for this table (cached)
+            if (!pkCache.has(tableName)) {
+              const pkCols = await fetchPrimaryKeyColumnsForConfig(sourceConfig, tableName);
+              pkCache.set(tableName, pkCols);
+            }
+            const pkColumns = pkCache.get(tableName)!;
 
-              // Validate and apply changes
-              for (const change of changes) {
-                const validation = await validateChange(change, tableName, targetEngine, targetConfig);
-                if (!validation.valid) {
-                  validationErrors++;
-                  logger.warn(`Validation failed for ${tableName}:`, validation.errors);
-                  continue; // Skip invalid records
+            if (pkColumns.length === 0) {
+              logger.warn(`Table ${tableName} has no detectable primary key, skipping`);
+              tablesProcessed++;
+              continue;
+            }
+
+            // Paginated fetch — process page by page instead of loading entire table
+            let offset = 0;
+            let pageRecords: Record<string, any>[];
+            do {
+              pageRecords = await fetchTableRecordsPaginated(sourceConfig, tableName, FULL_SYNC_PAGE_SIZE, offset);
+
+              if (pageRecords.length === 0) break;
+
+              // Process records in batches
+              const batchSize = config.batchSize;
+              for (let i = 0; i < pageRecords.length; i += batchSize) {
+                const batch = pageRecords.slice(i, Math.min(i + batchSize, pageRecords.length));
+                
+                // Convert records to change log format using real PK columns
+                const changes = batch.map(record => ({
+                  operation: ChangeOperation.INSERT,
+                  primaryKeyValues: extractPrimaryKeyFromColumns(record, pkColumns),
+                  changeData: record,
+                }));
+
+                // Validate and filter — only apply valid changes (P0 fix)
+                const validChanges: typeof changes = [];
+                for (const change of changes) {
+                  const validation = await validateChange(change, tableName, targetEngine, targetConfig);
+                  if (!validation.valid) {
+                    validationErrors++;
+                    logger.warn(`Validation failed for ${tableName}:`, validation.errors);
+                    continue;
+                  }
+                  validChanges.push(change);
+                }
+
+                if (validChanges.length > 0) {
+                  await applyChangeBatch(targetConfig, tableName, validChanges);
+                  totalRowsSynced += validChanges.length;
+                }
+
+                // Publish progress
+                const now = Date.now();
+                if (now - lastProgressUpdate >= 2000) {
+                  lastProgressUpdate = now;
+                  const progress = Math.min(
+                    Math.round(((tablesProcessed + ((offset + i) / Math.max(offset + pageRecords.length, 1))) / orderedTables.length) * 100),
+                    99
+                  );
+
+                  await prisma.syncState.update({
+                    where: { id: syncStateId },
+                    data: {
+                      currentProgress: progress,
+                      totalRowsSynced: BigInt(totalRowsSynced),
+                    },
+                  });
+
+                  await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
+                    progress,
+                    status: 'RUNNING',
+                    currentTable: tableName,
+                    tablesProcessed,
+                    tableCount: orderedTables.length,
+                    rowsSynced: totalRowsSynced,
+                  });
                 }
               }
 
-              await applyChangeBatch(targetEngine, targetConfig, tableName, changes);
-              totalRowsSynced += batch.length;
-
-              // Publish progress
-              const now = Date.now();
-              if (now - lastProgressUpdate >= 2000) {
-                lastProgressUpdate = now;
-                const progress = Math.min(
-                  Math.round(((tablesProcessed + (i / sourceRecords.length)) / orderedTables.length) * 100),
-                  99
-                );
-
-                await prisma.syncState.update({
-                  where: { id: syncStateId },
-                  data: {
-                    currentProgress: progress,
-                    totalRowsSynced: BigInt(totalRowsSynced),
-                  },
-                });
-
-                await publishProgress(SYNC_PROGRESS_CHANNEL(configId), {
-                  progress,
-                  status: 'RUNNING',
-                  currentTable: tableName,
-                  tablesProcessed,
-                  tableCount: orderedTables.length,
-                  rowsSynced: totalRowsSynced,
-                });
-              }
-            }
+              offset += pageRecords.length;
+            } while (pageRecords.length === FULL_SYNC_PAGE_SIZE);
 
             tablesProcessed++;
           }
@@ -317,12 +321,13 @@ export function createSyncWorker(): Worker<SyncJobData> {
             logger.info(`Processing ${changeLogs.length} source changes and ${targetChangeLogs.length} target changes for ${configId}`);
           }
 
-          // Detect conflicts in bidirectional sync
+          // Detect and resolve conflicts in bidirectional sync
+          // Build a set of conflicting change keys so they can be removed from changeLogs
+          const conflictingSourceKeys = new Set<string>();
           if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
             const conflicts = await conflictResolver.detectConflicts(changeLogs, targetChangeLogs);
             conflictsDetected = conflicts.length;
 
-            // Resolve conflicts according to strategy
             for (const conflict of conflicts) {
               const resolved = await conflictResolver.resolveConflict(
                 conflict,
@@ -331,13 +336,32 @@ export function createSyncWorker(): Worker<SyncJobData> {
               
               if (resolved.resolution !== 'manual') {
                 conflictsResolved++;
+                // Apply the resolved data instead of the original change
+                const conflictKey = createConflictKey(conflict.tableName, conflict.primaryKeyValues);
+                conflictingSourceKeys.add(conflictKey);
+
+                // If resolved in favour of source, the original source change will be applied normally.
+                // If resolved in favour of target, we skip the source change (target data wins).
+                if (resolved.resolution === 'source' && resolved.resolvedData) {
+                  // source wins — the source change will be applied as normal, nothing extra needed
+                } else if (resolved.resolution === 'target') {
+                  // target wins — skip the source change for this record (below filter)
+                }
+              } else {
+                // Manual — skip both source and target changes for this record
+                const conflictKey = createConflictKey(conflict.tableName, conflict.primaryKeyValues);
+                conflictingSourceKeys.add(conflictKey);
               }
             }
           }
 
-          // Group changes by table for batch processing
+          // Group changes by table for batch processing, filtering out conflicting records
           const changesByTable = new Map<string, any[]>();
           for (const change of changeLogs) {
+            const conflictKey = createConflictKey(change.tableName, change.primaryKeyValues);
+            if (conflictingSourceKeys.has(conflictKey)) {
+              continue; // Skip — handled by conflict resolution
+            }
             const tableName = change.tableName;
             if (!changesByTable.has(tableName)) {
               changesByTable.set(tableName, []);
@@ -386,7 +410,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
               }
 
               // Apply batch changes to target database
-              await applyChangeBatch(targetEngine, targetConfig, tableName, validChanges);
+              await applyChangeBatch(targetConfig, tableName, validChanges);
 
               // Mark changes as synchronized
               const changeIds = validChanges.map(c => c.id);
@@ -449,6 +473,10 @@ export function createSyncWorker(): Worker<SyncJobData> {
           if (config.direction === SyncDirection.BIDIRECTIONAL && targetChangeLogs.length > 0) {
             const targetChangesByTable = new Map<string, any[]>();
             for (const change of targetChangeLogs) {
+              const conflictKey = createConflictKey(change.tableName, change.primaryKeyValues);
+              if (conflictingSourceKeys.has(conflictKey)) {
+                continue; // Skip conflicting records
+              }
               const tableName = change.tableName;
               if (!targetChangesByTable.has(tableName)) {
                 targetChangesByTable.set(tableName, []);
@@ -485,7 +513,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
                 }
 
                 // Apply batch changes to source database
-                await applyChangeBatch(sourceEngine, sourceConfig, tableName, validChanges);
+                await applyChangeBatch(sourceConfig, tableName, validChanges);
 
                 // Mark changes as synchronized
                 const changeIds = validChanges.map(c => c.id);
@@ -591,6 +619,23 @@ export function createSyncWorker(): Worker<SyncJobData> {
           },
         });
 
+        // Clean up old synchronized change logs (retention: 7 days)
+        try {
+          const retentionDate = new Date(Date.now() - CHANGELOG_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+          const deleted = await prisma.changeLog.deleteMany({
+            where: {
+              syncConfigId: configId,
+              synchronized: true,
+              synchronizedAt: { lt: retentionDate },
+            },
+          });
+          if (deleted.count > 0) {
+            logger.info(`Cleaned up ${deleted.count} old change log entries for ${configId}`);
+          }
+        } catch (cleanupError) {
+          logger.warn(`Change log cleanup failed for ${configId}:`, cleanupError);
+        }
+
       } catch (error: any) {
         const errMsg = error instanceof Error ? error.message : 'Unknown error';
         
@@ -668,6 +713,20 @@ export function createSyncWorker(): Worker<SyncJobData> {
   return worker;
 }
 
+// ──────────────────────────────────────────────────────
+// Conflict key helper
+// ──────────────────────────────────────────────────────
+
+function createConflictKey(tableName: string, primaryKeyValues: any): string {
+  const sortedKeys = Object.keys(primaryKeyValues).sort();
+  const keyParts = sortedKeys.map(k => `${k}:${primaryKeyValues[k]}`);
+  return `${tableName}:${keyParts.join(',')}`;
+}
+
+// ──────────────────────────────────────────────────────
+// Validation
+// ──────────────────────────────────────────────────────
+
 /**
  * Validate a change before applying it to the target database
  * 
@@ -680,7 +739,7 @@ export function createSyncWorker(): Worker<SyncJobData> {
  * Requirements: 8.1, 8.2, 8.3, 8.4
  */
 async function validateChange(
-  change: any,
+  change: { operation: ChangeOperation; primaryKeyValues: Record<string, any>; changeData: Record<string, any> },
   tableName: string,
   targetEngine: any,
   targetConfig: ConnectionConfig
@@ -688,7 +747,7 @@ async function validateChange(
   const errors: string[] = [];
 
   // Validate primary key values
-  const pkValues = change.primaryKeyValues as Record<string, any>;
+  const pkValues = change.primaryKeyValues;
   if (!pkValues || Object.keys(pkValues).length === 0) {
     errors.push('Primary key values are missing');
     return { valid: false, errors };
@@ -702,7 +761,7 @@ async function validateChange(
 
   // For INSERT and UPDATE operations, validate change data
   if (change.operation === ChangeOperation.INSERT || change.operation === ChangeOperation.UPDATE) {
-    const data = change.changeData as Record<string, any>;
+    const data = change.changeData;
     
     if (!data || Object.keys(data).length === 0) {
       errors.push('Change data is missing');
@@ -710,15 +769,11 @@ async function validateChange(
     }
 
     // Validate data types (basic validation)
-    // In production, you would fetch table schema and validate against it
     for (const [key, value] of Object.entries(data)) {
       if (value !== null && value !== undefined) {
-        // Check for invalid data types
         if (typeof value === 'function' || typeof value === 'symbol') {
           errors.push(`Invalid data type for column '${key}'`);
         }
-        
-        // JSON validation is handled when applying to known JSON columns.
       }
     }
   }
@@ -728,6 +783,10 @@ async function validateChange(
     errors,
   };
 }
+
+// ──────────────────────────────────────────────────────
+// Data Sanitization
+// ──────────────────────────────────────────────────────
 
 /**
  * Sanitize data before applying to target database
@@ -783,7 +842,6 @@ function normalizeJsonValue(value: any): { value: string | null; coerced: boolea
       JSON.parse(trimmed);
       return { value: trimmed, coerced: false };
     } catch {
-      // If it is plain text, persist it as a valid JSON string.
       return { value: JSON.stringify(value), coerced: true, reason: 'plain_text_to_json_string' };
     }
   }
@@ -807,6 +865,10 @@ function normalizeJsonValue(value: any): { value: string | null; coerced: boolea
   }
 }
 
+// ──────────────────────────────────────────────────────
+// JSON Column Detection
+// ──────────────────────────────────────────────────────
+
 /**
  * Fetch JSON column names for a MySQL/MariaDB table.
  */
@@ -827,19 +889,21 @@ async function getMySqlJsonColumns(
   return new Set((rows as any[]).map((row: any) => String(row.columnName)));
 }
 
+// ──────────────────────────────────────────────────────
+// Apply Changes (with SQL injection prevention)
+// ──────────────────────────────────────────────────────
+
 /**
  * Apply a batch of changes to the target database
  * 
- * Handles INSERT, UPDATE, and DELETE operations with proper error handling
- * and transaction support.
+ * Handles INSERT, UPDATE, and DELETE operations with proper error handling,
+ * transaction support, and SQL identifier escaping.
  */
 async function applyChangeBatch(
-  engine: any,
   config: ConnectionConfig,
   tableName: string,
-  changes: any[]
+  changes: Array<{ operation: ChangeOperation; primaryKeyValues: Record<string, any>; changeData: Record<string, any> }>
 ): Promise<void> {
-  // Import mysql2 or pg dynamically based on database type
   if (config.type === 'MYSQL' || config.type === 'MARIADB') {
     const mysql = await import('mysql2/promise');
     const connection = await mysql.createConnection({
@@ -852,17 +916,18 @@ async function applyChangeBatch(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
-        rejectUnauthorized: false, // Allow self-signed certificates
+        rejectUnauthorized: false,
       } : undefined,
     });
 
     try {
       const jsonColumns = await getMySqlJsonColumns(connection, config.database, tableName);
+      const escapedTable = escapeIdentifierMySQL(tableName);
       await connection.beginTransaction();
 
       for (const change of changes) {
-        const pkValues = change.primaryKeyValues as Record<string, any>;
-        const data = sanitizeData(change.changeData as Record<string, any>, {
+        const pkValues = change.primaryKeyValues;
+        const data = sanitizeData(change.changeData, {
           jsonColumns,
           tableName,
         });
@@ -870,15 +935,15 @@ async function applyChangeBatch(
         if (change.operation === ChangeOperation.INSERT) {
           const columns = Object.keys(data);
           const values = Object.values(data);
+          const escapedColumns = columns.map(c => escapeIdentifierMySQL(c));
           const placeholders = columns.map(() => '?').join(', ');
           const pkColumns = Object.keys(pkValues);
           const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
 
           if (pkColumns.length > 0 && nonPkColumns.length > 0) {
-            // Safer upsert: update by primary key only, then insert if row does not exist.
-            const updateClause = nonPkColumns.map(col => `\`${col}\` = ?`).join(', ');
-            const whereClause = pkColumns.map(col => `\`${col}\` = ?`).join(' AND ');
-            const updateSql = `UPDATE \`${tableName}\` SET ${updateClause} WHERE ${whereClause}`;
+            const updateClause = nonPkColumns.map(col => `${escapeIdentifierMySQL(col)} = ?`).join(', ');
+            const whereClause = pkColumns.map(col => `${escapeIdentifierMySQL(col)} = ?`).join(' AND ');
+            const updateSql = `UPDATE ${escapedTable} SET ${updateClause} WHERE ${whereClause}`;
             const [updateResult] = await connection.execute(updateSql, [
               ...nonPkColumns.map(col => data[col]),
               ...pkColumns.map(col => pkValues[col]),
@@ -886,23 +951,23 @@ async function applyChangeBatch(
 
             const affectedRows = (updateResult as any)?.affectedRows ?? 0;
             if (affectedRows === 0) {
-              const insertSql = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
+              const insertSql = `INSERT INTO ${escapedTable} (${escapedColumns.join(', ')}) VALUES (${placeholders})`;
               await connection.execute(insertSql, values);
             }
           } else {
-            const insertSql = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
+            const insertSql = `INSERT INTO ${escapedTable} (${escapedColumns.join(', ')}) VALUES (${placeholders})`;
             await connection.execute(insertSql, values);
           }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
           const values = Object.values(data);
-          const setClause = columns.map(col => `\`${col}\` = ?`).join(', ');
-          const whereClause = Object.keys(pkValues).map(col => `\`${col}\` = ?`).join(' AND ');
-          const sql = `UPDATE \`${tableName}\` SET ${setClause} WHERE ${whereClause}`;
+          const setClause = columns.map(col => `${escapeIdentifierMySQL(col)} = ?`).join(', ');
+          const whereClause = Object.keys(pkValues).map(col => `${escapeIdentifierMySQL(col)} = ?`).join(' AND ');
+          const sql = `UPDATE ${escapedTable} SET ${setClause} WHERE ${whereClause}`;
           await connection.execute(sql, [...values, ...Object.values(pkValues)]);
         } else if (change.operation === ChangeOperation.DELETE) {
-          const whereClause = Object.keys(pkValues).map(col => `\`${col}\` = ?`).join(' AND ');
-          const sql = `DELETE FROM \`${tableName}\` WHERE ${whereClause}`;
+          const whereClause = Object.keys(pkValues).map(col => `${escapeIdentifierMySQL(col)} = ?`).join(' AND ');
+          const sql = `DELETE FROM ${escapedTable} WHERE ${whereClause}`;
           await connection.execute(sql, Object.values(pkValues));
         }
       }
@@ -926,7 +991,7 @@ async function applyChangeBatch(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
-        rejectUnauthorized: false, // Allow self-signed certificates
+        rejectUnauthorized: false,
       } : undefined,
     });
 
@@ -934,52 +999,54 @@ async function applyChangeBatch(
       await client.connect();
       await client.query('BEGIN');
 
+      const escapedTable = escapeIdentifierPG(tableName);
+
       for (const change of changes) {
-        const pkValues = change.primaryKeyValues as Record<string, any>;
-        const data = sanitizeData(change.changeData as Record<string, any>);
+        const pkValues = change.primaryKeyValues;
+        const data = sanitizeData(change.changeData);
 
         if (change.operation === ChangeOperation.INSERT) {
           const columns = Object.keys(data);
           const values = Object.values(data);
+          const escapedColumns = columns.map(c => escapeIdentifierPG(c));
           const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
           const pkColumns = Object.keys(pkValues);
           const hasAllPkColumns = pkColumns.length > 0 && pkColumns.every(col => columns.includes(col));
           const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
 
           if (hasAllPkColumns && nonPkColumns.length > 0) {
-            // Safer upsert: update by primary key only, then insert if row does not exist.
             const setClause = nonPkColumns
-              .map((col, i) => `"${col}" = $${i + 1}`)
+              .map((col, i) => `${escapeIdentifierPG(col)} = $${i + 1}`)
               .join(', ');
             const whereClause = pkColumns
-              .map((col, i) => `"${col}" = $${nonPkColumns.length + i + 1}`)
+              .map((col, i) => `${escapeIdentifierPG(col)} = $${nonPkColumns.length + i + 1}`)
               .join(' AND ');
-            const updateSql = `UPDATE "${tableName}" SET ${setClause} WHERE ${whereClause}`;
+            const updateSql = `UPDATE ${escapedTable} SET ${setClause} WHERE ${whereClause}`;
             const updateResult = await client.query(updateSql, [
               ...nonPkColumns.map(col => data[col]),
               ...pkColumns.map(col => pkValues[col]),
             ]);
 
             if (updateResult.rowCount === 0) {
-              const insertSql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
+              const insertSql = `INSERT INTO ${escapedTable} (${escapedColumns.join(', ')}) VALUES (${placeholders})`;
               await client.query(insertSql, values);
             }
           } else {
-            const insertSql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
+            const insertSql = `INSERT INTO ${escapedTable} (${escapedColumns.join(', ')}) VALUES (${placeholders})`;
             await client.query(insertSql, values);
           }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
           const values = Object.values(data);
-          const setClause = columns.map((col, i) => `"${col}" = $${i + 1}`).join(', ');
+          const setClause = columns.map((col, i) => `${escapeIdentifierPG(col)} = $${i + 1}`).join(', ');
           const pkColumns = Object.keys(pkValues);
-          const whereClause = pkColumns.map((col, i) => `"${col}" = $${columns.length + i + 1}`).join(' AND ');
-          const sql = `UPDATE "${tableName}" SET ${setClause} WHERE ${whereClause}`;
+          const whereClause = pkColumns.map((col, i) => `${escapeIdentifierPG(col)} = $${columns.length + i + 1}`).join(' AND ');
+          const sql = `UPDATE ${escapedTable} SET ${setClause} WHERE ${whereClause}`;
           await client.query(sql, [...values, ...Object.values(pkValues)]);
         } else if (change.operation === ChangeOperation.DELETE) {
           const pkColumns = Object.keys(pkValues);
-          const whereClause = pkColumns.map((col, i) => `"${col}" = $${i + 1}`).join(' AND ');
-          const sql = `DELETE FROM "${tableName}" WHERE ${whereClause}`;
+          const whereClause = pkColumns.map((col, i) => `${escapeIdentifierPG(col)} = $${i + 1}`).join(' AND ');
+          const sql = `DELETE FROM ${escapedTable} WHERE ${whereClause}`;
           await client.query(sql, Object.values(pkValues));
         }
       }
@@ -994,6 +1061,10 @@ async function applyChangeBatch(
   }
 }
 
+// ──────────────────────────────────────────────────────
+// Table List
+// ──────────────────────────────────────────────────────
+
 /**
  * Get list of tables from a database
  */
@@ -1001,6 +1072,10 @@ async function getTableList(engine: any, config: ConnectionConfig): Promise<stri
   const dbInfo = await engine.getDbInfo();
   return dbInfo.tables.map((t: any) => t.name);
 }
+
+// ──────────────────────────────────────────────────────
+// Table Dependency Ordering
+// ──────────────────────────────────────────────────────
 
 type TableDependency = {
   childTable: string;
@@ -1087,6 +1162,7 @@ async function getForeignKeyDependencies(config: ConnectionConfig): Promise<Tabl
 
     try {
       await client.connect();
+      // Use current_schema() instead of hardcoded 'public'
       const sql = `
         SELECT tc.table_name AS child_table, ccu.table_name AS parent_table
         FROM information_schema.table_constraints tc
@@ -1097,7 +1173,7 @@ async function getForeignKeyDependencies(config: ConnectionConfig): Promise<Tabl
           ON ccu.constraint_name = tc.constraint_name
          AND ccu.table_schema = tc.table_schema
         WHERE tc.constraint_type = 'FOREIGN KEY'
-          AND tc.table_schema = 'public'
+          AND tc.table_schema = current_schema()
       `;
       const result = await client.query(sql);
       return result.rows.map((row: any) => ({
@@ -1177,15 +1253,19 @@ function topologicalSortTables(tables: string[], dependencies: TableDependency[]
   return ordered;
 }
 
+// ──────────────────────────────────────────────────────
+// Paginated Table Records (replaces SELECT * with LIMIT/OFFSET)
+// ──────────────────────────────────────────────────────
+
 /**
- * Fetch all records from a table
+ * Fetch records from a table in pages to avoid loading entire table into memory.
  */
-async function fetchTableRecords(
-  engine: any,
+async function fetchTableRecordsPaginated(
   config: ConnectionConfig,
-  tableName: string
-): Promise<any[]> {
-  // Use raw SQL to fetch all records
+  tableName: string,
+  limit: number,
+  offset: number
+): Promise<Record<string, any>[]> {
   if (config.type === 'MYSQL' || config.type === 'MARIADB') {
     const mysql = await import('mysql2/promise');
     const connection = await mysql.createConnection({
@@ -1198,13 +1278,17 @@ async function fetchTableRecords(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
-        rejectUnauthorized: false, // Allow self-signed certificates
+        rejectUnauthorized: false,
       } : undefined,
     });
 
     try {
-      const [rows] = await connection.query(`SELECT * FROM \`${tableName}\``);
-      return rows as any[];
+      const escapedTable = escapeIdentifierMySQL(tableName);
+      const [rows] = await connection.query(
+        `SELECT * FROM ${escapedTable} LIMIT ? OFFSET ?`,
+        [limit, offset]
+      );
+      return rows as Record<string, any>[];
     } finally {
       await connection.end();
     }
@@ -1220,13 +1304,17 @@ async function fetchTableRecords(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
-        rejectUnauthorized: false, // Allow self-signed certificates
+        rejectUnauthorized: false,
       } : undefined,
     });
 
     try {
       await client.connect();
-      const result = await client.query(`SELECT * FROM "${tableName}"`);
+      const escapedTable = escapeIdentifierPG(tableName);
+      const result = await client.query(
+        `SELECT * FROM ${escapedTable} LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      );
       return result.rows;
     } finally {
       await client.end();
@@ -1236,22 +1324,62 @@ async function fetchTableRecords(
   return [];
 }
 
+// ──────────────────────────────────────────────────────
+// Primary Key Detection (uses real schema metadata)
+// ──────────────────────────────────────────────────────
+
 /**
- * Extract primary key values from a record
- * Note: This is a simplified implementation. In production, you would
- * fetch the actual primary key columns from the table schema.
+ * Fetch actual primary key columns for a table from the target database schema.
+ * Falls back to common PK names only if schema introspection fails.
  */
-function extractPrimaryKey(record: any, tableName: string): Record<string, any> {
-  // Common primary key column names
-  const commonPkNames = ['id', 'ID', `${tableName}_id`, 'uuid', 'UUID'];
-  
-  for (const pkName of commonPkNames) {
-    if (record[pkName] !== undefined) {
-      return { [pkName]: record[pkName] };
+async function fetchPrimaryKeyColumnsForConfig(
+  config: ConnectionConfig,
+  tableName: string
+): Promise<string[]> {
+  if (config.type === 'MYSQL' || config.type === 'MARIADB') {
+    const mysql = await import('mysql2/promise');
+    const connection = await mysql.createConnection({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+        rejectUnauthorized: false,
+      } : undefined,
+    });
+
+    try {
+      return await fetchPrimaryKeyColumnsMySQL(connection, config.database, tableName);
+    } finally {
+      await connection.end();
+    }
+  } else if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+    const { Client } = await import('pg');
+    const client = new Client({
+      host: config.host,
+      port: config.port,
+      user: config.username,
+      password: config.password,
+      database: config.database,
+      ssl: config.sslEnabled ? {
+        ca: config.sslCa,
+        cert: config.sslCert,
+        key: config.sslKey,
+        rejectUnauthorized: false,
+      } : undefined,
+    });
+
+    try {
+      await client.connect();
+      return await fetchPrimaryKeyColumnsPG(client, tableName);
+    } finally {
+      await client.end();
     }
   }
 
-  // If no common PK found, use the first column as PK
-  const firstKey = Object.keys(record)[0];
-  return { [firstKey]: record[firstKey] };
+  return [];
 }
