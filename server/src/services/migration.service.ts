@@ -58,8 +58,8 @@ const PG_TO_MYSQL: Record<string, string> = {
   real: 'float',
   'double precision': 'double',
   numeric: 'decimal',
-  varchar: 'varchar(255)',
-  char: 'char(1)',
+  varchar: 'varchar',
+  char: 'char',
   text: 'text',
   bytea: 'blob',
   date: 'date',
@@ -72,18 +72,30 @@ const PG_TO_MYSQL: Record<string, string> = {
   uuid: 'varchar(36)',
 };
 
-function mapType(srcType: string, srcEngine: string, dstEngine: string): string {
-  const normalised = srcType.toLowerCase().split('(')[0].trim();
+function mapType(srcType: string, srcEngine: string, dstEngine: string, columnLength?: number): string {
+  const normalized = srcType.toLowerCase();
+  const baseType = normalized.split('(')[0].trim();
+  const precisionMatch = normalized.match(/\(([^)]+)\)$/);
+  const preservedPrecision = precisionMatch ? `(${precisionMatch[1]})` : '';
+
   if (srcEngine !== dstEngine) {
-    if (dstEngine === 'POSTGRESQL') return MYSQL_TO_PG[normalised] ?? 'text';
-    return PG_TO_MYSQL[normalised] ?? 'text';
+    if (dstEngine === 'POSTGRESQL') {
+      const pgType = MYSQL_TO_PG[baseType] ?? 'text';
+      return pgType === 'text' ? pgType : pgType + preservedPrecision;
+    }
+    const mysqlType = PG_TO_MYSQL[baseType] ?? 'text';
+    // For varchar/char, use actual column length if available, otherwise preserve source precision
+    if ((baseType === 'varchar' || baseType === 'char') && columnLength) {
+      return `${mysqlType}(${columnLength})`;
+    }
+    return mysqlType === 'text' ? mysqlType : mysqlType + preservedPrecision;
   }
   return srcType;
 }
 
 // ─── Schema introspection helpers ────────────────────────────────────────────
 
-interface ColMeta { name: string; type: string; nullable: boolean; isPrimaryKey: boolean; extra: string; }
+interface ColMeta { name: string; type: string; nullable: boolean; isPrimaryKey: boolean; extra: string; length?: number; }
 interface TableMeta { name: string; columns: ColMeta[]; }
 
 async function getMySQLTableMeta(conn: mysql2.Connection, database: string, tables: string[]): Promise<TableMeta[]> {
@@ -128,7 +140,7 @@ async function getPGTableMeta(pool: Pool, tables: string[]): Promise<TableMeta[]
     const pkSet = new Set(pkRows.map((r) => r.column_name as string));
 
     const { rows: colRows } = await pool.query(
-      `SELECT column_name, data_type, udt_name, character_maximum_length, is_nullable
+      `SELECT column_name, data_type, udt_name, character_maximum_length, numeric_precision, numeric_scale, is_nullable
        FROM information_schema.columns
        WHERE table_schema = 'public' AND table_name = $1 ORDER BY ordinal_position`,
       [table]
@@ -137,9 +149,22 @@ async function getPGTableMeta(pool: Pool, tables: string[]): Promise<TableMeta[]
       name: table,
       columns: colRows.map((c) => {
         let type = c.data_type as string;
-        if (type === 'character varying' && c.character_maximum_length) type = `varchar(${c.character_maximum_length})`;
+        let length: number | undefined;
+        if (type === 'character varying' && c.character_maximum_length) {
+          type = `varchar(${c.character_maximum_length})`;
+          length = c.character_maximum_length as number;
+        } else if (type === 'character' && c.character_maximum_length) {
+          type = `char(${c.character_maximum_length})`;
+          length = c.character_maximum_length as number;
+        } else if (type === 'numeric' || type === 'decimal') {
+          const precision = c.numeric_precision as number | null;
+          const scale = c.numeric_scale as number | null;
+          if (precision !== null) {
+            type = scale !== null ? `decimal(${precision},${scale})` : `decimal(${precision})`;
+          }
+        }
         if (type === 'USER-DEFINED') type = c.udt_name as string;
-        return { name: c.column_name as string, type, nullable: c.is_nullable === 'YES', isPrimaryKey: pkSet.has(c.column_name as string), extra: '' };
+        return { name: c.column_name as string, type, nullable: c.is_nullable === 'YES', isPrimaryKey: pkSet.has(c.column_name as string), extra: '', length };
       }),
     });
   }
@@ -164,7 +189,7 @@ function buildPGCreateTable(meta: TableMeta, srcEngine: string): string {
 
 function buildMySQLCreateTable(meta: TableMeta, srcEngine: string): string {
   const cols = meta.columns.map((c) => {
-    const myType = mapType(c.type, srcEngine, 'MYSQL');
+    const myType = mapType(c.type, srcEngine, 'MYSQL', c.length);
     const nullable = c.nullable ? '' : ' NOT NULL';
     const ai = c.isPrimaryKey && c.extra.toLowerCase().includes('auto_increment') ? ' AUTO_INCREMENT' : '';
     return `  \`${c.name}\` ${myType}${nullable}${ai}`;
@@ -178,11 +203,15 @@ function buildMySQLCreateTable(meta: TableMeta, srcEngine: string): string {
 
 function escapeValue(val: unknown): string {
   if (val === null || val === undefined) return 'NULL';
+  if (Buffer.isBuffer(val)) return "X'" + val.toString('hex') + "'";
   if (typeof val === 'number' || typeof val === 'bigint') return String(val);
-  if (typeof val === 'boolean') return val ? 'true' : 'false';
-  if (val instanceof Date) return `'${val.toISOString()}'`;
-  if (typeof val === 'object') return `'${JSON.stringify(val).replace(/'/g, "''")}'`;
-  return `'${String(val).replace(/'/g, "''")}'`;
+  if (typeof val === 'boolean') return val ? '1' : '0';
+  if (val instanceof Date) {
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `'${val.getFullYear()}-${pad(val.getMonth() + 1)}-${pad(val.getDate())} ${pad(val.getHours())}:${pad(val.getMinutes())}:${pad(val.getSeconds())}'`;
+  }
+  if (typeof val === 'object') return `'${JSON.stringify(val).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
+  return `'${String(val).replace(/\\/g, '\\\\').replace(/'/g, "''")}'`;
 }
 
 // ─── Stream helpers ──────────────────────────────────────────────────────────
@@ -219,6 +248,7 @@ export async function migrateMySQL2MySQL(
         '--single-transaction',
         '--routines',
         '--triggers',
+        '--events',
         '--add-drop-table',
         src.database,
       ].filter(Boolean);
@@ -409,6 +439,8 @@ export async function migratePG2MySQL(
     const metas = await getPGTableMeta(srcPool, tables);
     for (let i = 0; i < metas.length; i++) {
       const meta = metas[i];
+      // Drop table first to ensure clean state (fixes stale table issue)
+      await dstConn.query(`DROP TABLE IF EXISTS \`${meta.name}\``);
       const ddl = buildMySQLCreateTable(meta, 'POSTGRESQL');
       await dstConn.query(ddl);
 
@@ -417,8 +449,9 @@ export async function migratePG2MySQL(
         const { rows } = await srcPool.query(`SELECT * FROM "${meta.name}" LIMIT ${batchSize} OFFSET ${offset}`);
         if (rows.length === 0) break;
         const cols = meta.columns.map((c) => `\`${c.name}\``).join(', ');
-        const values = rows.map((r) => `(${Object.values(r).map(escapeValue).join(', ')})`).join(',\n');
-        await dstConn.query(`INSERT IGNORE INTO \`${meta.name}\` (${cols}) VALUES ${values}`);
+        // Use meta.columns to guarantee column ordering matches (fixes column ordering issue)
+        const values = rows.map((r) => `(${meta.columns.map((c) => escapeValue(r[c.name])).join(', ')})`).join(',\n');
+        await dstConn.query(`INSERT INTO \`${meta.name}\` (${cols}) VALUES ${values}`);
         rowsMigrated += rows.length;
         offset += batchSize;
         opts.onProgress?.({ currentTable: meta.name, tablesCompleted: i, tableCount: metas.length, rowsMigrated, progress: Math.round(((i + offset / 1e6) / metas.length) * 100) });
