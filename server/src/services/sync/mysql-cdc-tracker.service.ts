@@ -339,24 +339,25 @@ export class MySQLCDCTracker implements CDCTrackerService {
     }
 
     const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const decryptedDb = decrypt(sourceConnection.database);
 
     try {
       // Check if binary log is enabled
       const binlogEnabled = await this.isBinlogEnabled(conn);
       
       if (!binlogEnabled) {
-        logger.info(`Binary log not enabled for ${sourceConnection.database}, using trigger-based CDC`);
+        logger.info(`Binary log not enabled for ${decryptedDb}, using trigger-based CDC`);
         this.triggerBasedConfigs.set(config.id, true);
       } else {
         // Binlog parsing is not implemented — fall back to trigger-based CDC
-        logger.info(`Binary log enabled for ${sourceConnection.database} but parsing not implemented, using trigger-based CDC`);
+        logger.info(`Binary log enabled for ${decryptedDb} but parsing not implemented, using trigger-based CDC`);
         this.triggerBasedConfigs.set(config.id, true);
       }
 
       // Always use trigger-based for now (binlog parsing is not implemented)
       const tables = await this.getTablesToTrack(
         conn,
-        sourceConnection.database,
+        decryptedDb,
         config.includeTables,
         config.excludeTables
       );
@@ -364,7 +365,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
       for (const table of tables) {
         await this.createTriggersForTable(
           conn,
-          sourceConnection.database,
+          decryptedDb,
           table,
           config.id
         );
@@ -388,11 +389,12 @@ export class MySQLCDCTracker implements CDCTrackerService {
     }
 
     const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const decryptedDb = decrypt(sourceConnection.database);
 
     try {
       const tables = await this.getTablesToTrack(
         conn,
-        sourceConnection.database,
+        decryptedDb,
         config.includeTables,
         config.excludeTables
       );
@@ -400,14 +402,14 @@ export class MySQLCDCTracker implements CDCTrackerService {
       for (const table of tables) {
         await this.dropTriggersForTable(
           conn,
-          sourceConnection.database,
+          decryptedDb,
           table,
           config.id
         );
       }
 
       // Optionally clean up the changelog table
-      const escapedDb = escapeIdentifierMySQL(sourceConnection.database);
+      const escapedDb = escapeIdentifierMySQL(decryptedDb);
       await conn.query(`DROP TABLE IF EXISTS ${escapedDb}.\`_cdc_changelog\``);
     } finally {
       await conn.end();
@@ -443,6 +445,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
     since: string
   ): Promise<ChangeLog[]> {
     const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const decryptedDb = decrypt(sourceConnection.database);
 
     try {
       // Parse checkpoint (format: "timestamp:lastId")
@@ -450,7 +453,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
       const sinceTimestamp = timestampStr || new Date(0).toISOString();
       const sinceId = lastIdStr ? parseInt(lastIdStr, 10) : 0;
 
-      const escapedDb = escapeIdentifierMySQL(sourceConnection.database);
+      const escapedDb = escapeIdentifierMySQL(decryptedDb);
       const [rows] = await conn.query<mysql2.RowDataPacket[]>(
         `SELECT id, table_name, operation, primary_key_values, change_data, change_timestamp
          FROM ${escapedDb}.\`_cdc_changelog\`

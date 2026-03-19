@@ -8,6 +8,7 @@ import {
   SyncConfigWithConnections,
   escapeIdentifierPG,
 } from './sync-utils';
+import { decrypt } from '../crypto.service';
 
 interface ChangeLog {
   id: string;
@@ -347,11 +348,13 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       // Check if logical replication is available
       const logicalReplicationAvailable = await this.isLogicalReplicationAvailable(client);
       
+      const decryptedDb = decrypt(sourceConnection.database);
+
       if (!logicalReplicationAvailable) {
-        logger.info(`Logical replication not available for ${sourceConnection.database}, using trigger-based CDC`);
+        logger.info(`Logical replication not available for ${decryptedDb}, using trigger-based CDC`);
       } else {
         // Logical replication slot parsing is not implemented — fall back
-        logger.info(`Logical replication available for ${sourceConnection.database} but WAL parsing not implemented, using trigger-based CDC`);
+        logger.info(`Logical replication available for ${decryptedDb} but WAL parsing not implemented, using trigger-based CDC`);
       }
 
       // Always use trigger-based CDC (WAL parsing not implemented)
