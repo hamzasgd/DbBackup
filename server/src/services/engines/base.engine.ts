@@ -1,5 +1,5 @@
 export interface ConnectionConfig {
-  type: 'MYSQL' | 'POSTGRES' | 'POSTGRESQL' | 'MARIADB';
+  type: 'MYSQL' | 'POSTGRESQL' | 'MARIADB';
   host: string;
   port: number;
   username: string;

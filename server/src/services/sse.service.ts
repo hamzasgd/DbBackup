@@ -2,6 +2,10 @@ import { Response } from 'express';
 import { Redis } from 'ioredis';
 import { getRedisConfig } from '../config/redis';
 import { logger } from '../config/logger';
+import { AppError } from '../middleware/errorHandler';
+
+const MAX_SSE_CONNECTIONS = 50;
+let activeSseConnections = 0;
 
 // Dedicated Redis publisher client — MUST be separate from any subscriber
 let publisher: Redis | null = null;
@@ -24,6 +28,12 @@ export async function publishProgress(channel: string, payload: object): Promise
 
 /** Stream SSE events to client for a given Redis pub/sub channel */
 export function streamSSE(res: Response, channel: string, timeoutMs = 300_000): void {
+  // Rate limit SSE connections
+  if (activeSseConnections >= MAX_SSE_CONNECTIONS) {
+    throw new AppError('Too many SSE connections, please try again later', 429);
+  }
+  activeSseConnections++;
+
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
@@ -44,6 +54,7 @@ export function streamSSE(res: Response, channel: string, timeoutMs = 300_000): 
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    activeSseConnections--;
     clearInterval(heartbeat);
     sub.unsubscribe(channel).catch(() => {});
     sub.quit().catch(() => {});

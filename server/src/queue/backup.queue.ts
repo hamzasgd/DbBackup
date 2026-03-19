@@ -9,6 +9,8 @@ import { publishProgress, BACKUP_PROGRESS_CHANNEL } from '../services/sse.servic
 import { notify } from '../services/notification.service';
 import { uploadToS3 } from '../services/storage.service';
 import { enforceRetentionForConnection } from '../services/retention.service';
+import { decrypt, decryptIfPresent } from '../services/crypto.service';
+import { sanitizeConfig } from '../utils/sanitize';
 
 export const BACKUP_QUEUE_NAME = 'backups';
 
@@ -16,8 +18,28 @@ export interface BackupJobData {
   backupId: string;
   connectionId: string;
   outputDir: string;
-  config: ConnectionConfig;
   format?: BackupFormat;
+}
+
+// Decrypt connection config at execution time (not stored in Redis)
+async function decryptConn(connectionId: string): Promise<ConnectionConfig> {
+  const conn = await prisma.connection.findUnique({ where: { id: connectionId } });
+  if (!conn) throw new Error(`Connection not found: ${connectionId}`);
+  return {
+    type: conn.type as ConnectionConfig['type'],
+    host: decrypt(conn.host),
+    port: conn.port,
+    username: decrypt(conn.username),
+    password: decrypt(conn.password),
+    database: decrypt(conn.database),
+    sslEnabled: conn.sslEnabled,
+    sshEnabled: conn.sshEnabled,
+    sshHost: decryptIfPresent(conn.sshHost) || undefined,
+    sshPort: conn.sshPort || 22,
+    sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
+    sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+    sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
+  };
 }
 
 let backupQueue: Queue<BackupJobData>;
@@ -31,7 +53,7 @@ export function getBackupQueue(): Queue<BackupJobData> {
   return backupQueue;
 }
 
-export async function addBackupJob(data: BackupJobData): Promise<void> {
+export async function addBackupJob(data: Omit<BackupJobData, 'config'>): Promise<void> {
   const queue = getBackupQueue();
   await queue.add('backup', data, {
     attempts: 3,
@@ -43,8 +65,11 @@ export function createBackupWorker(): Worker<BackupJobData> {
   const worker = new Worker<BackupJobData>(
     BACKUP_QUEUE_NAME,
     async (job: Job<BackupJobData>) => {
-      const { backupId, config, outputDir, format } = job.data;
-      logger.info(`Backup worker picked job ${job.id} (backupId=${backupId}, db=${config.database})`);
+      const { backupId, connectionId: connId, outputDir, format } = job.data;
+      
+      // Decrypt connection config at execution time
+      const config = await decryptConn(connId);
+      logger.info(`Backup worker picked job ${job.id} (backupId=${backupId}, db=${config.database})`, sanitizeConfig(config as unknown as Record<string, unknown>));
 
       // Fetch connection to get userId for notifications/retention
       const backupRecord = await prisma.backup.findUnique({

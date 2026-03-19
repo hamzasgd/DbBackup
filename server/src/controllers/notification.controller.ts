@@ -3,6 +3,7 @@ import { prisma } from '../config/database';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { encrypt, decrypt } from '../services/crypto.service';
 import { testNotification } from '../services/notification.service';
+import { logAudit } from '../services/audit.service';
 
 export async function getNotificationSettings(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -57,6 +58,8 @@ export async function upsertNotificationSettings(req: AuthRequest, res: Response
       create: { userId: req.user!.userId, ...data },
       update: data,
     });
+
+    await logAudit(req.user!.userId, 'UPDATE', 'notification_settings', { emailEnabled, slackEnabled }, req.ip);
 
     res.json({ success: true, data: { ...settings, smtpPass: settings.smtpPass ? '••••••••' : null, slackWebhookUrl: settings.slackWebhookUrl ? '••••••••' : null } });
   } catch (err) { next(err); }

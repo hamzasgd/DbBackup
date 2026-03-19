@@ -2,10 +2,18 @@ import { Response } from 'express';
 import mysql2 from 'mysql2/promise';
 import { Pool } from 'pg';
 import { ConnectionConfig } from './engines/base.engine';
+import { AppError } from '../middleware/errorHandler';
 
 export type ExportFormat = 'json' | 'csv' | 'sql';
 
 const BATCH_SIZE = 5000;
+const TABLE_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_$]*$/;
+
+function validateTableName(table: string): void {
+  if (!TABLE_NAME_REGEX.test(table)) {
+    throw new AppError(`Invalid table name: ${table}`, 400);
+  }
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -34,13 +42,24 @@ export async function exportMySQL(
   format: ExportFormat,
   res: Response,
 ): Promise<void> {
+  // Validate all table names before any query runs
+  for (const table of tables) {
+    validateTableName(table);
+  }
+
+  const getSslOptions = () => {
+    if (!config.sslEnabled) return undefined;
+    if (config.sslCa) return { rejectUnauthorized: true, ca: config.sslCa };
+    return { rejectUnauthorized: false };
+  };
+
   const conn = await mysql2.createConnection({
     host: config.host,
     port: config.port,
     user: config.username,
     password: config.password,
     database: config.database,
-    ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: getSslOptions(),
     connectTimeout: 10000,
   });
 
@@ -129,13 +148,24 @@ export async function exportPostgres(
   format: ExportFormat,
   res: Response,
 ): Promise<void> {
+  // Validate all table names before any query runs
+  for (const table of tables) {
+    validateTableName(table);
+  }
+
+  const getSslOptions = () => {
+    if (!config.sslEnabled) return undefined;
+    if (config.sslCa) return { rejectUnauthorized: true, ca: config.sslCa };
+    return { rejectUnauthorized: false };
+  };
+
   const pool = new Pool({
     host: config.host,
     port: config.port,
     user: config.username,
     password: config.password,
     database: config.database,
-    ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: getSslOptions(),
     connectionTimeoutMillis: 10000,
     max: 2,
   });

@@ -145,8 +145,8 @@ model Connection {
   connectionTimeout Int? @default(30000)
 
   // Relations
-  userId              String?
-  user                User?               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId              String
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
   backups             Backup[]
   schedules           Schedule[]
   migrationsAsSource  Migration[]         @relation("MigrationSource")

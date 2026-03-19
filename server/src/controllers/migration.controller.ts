@@ -7,6 +7,7 @@ import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { addMigrationJob } from '../queue/migration.queue';
 import { ConnectionConfig } from '../services/engines/base.engine';
 import { verifyMigrationConsistency } from '../services/migration-verification.service';
+import { logAudit } from '../services/audit.service';
 
 const decryptConn = (conn: any): ConnectionConfig => {
   return {
@@ -106,6 +107,8 @@ export async function createMigration(req: AuthRequest, res: Response, next: Nex
       tables,
       batchSize: batchSize ?? 500,
     });
+
+    await logAudit(req.user!.userId, 'CREATE', 'migration', { migrationId: migration.id, sourceConnectionId, targetConnectionId }, req.ip);
 
     res.status(202).json({ success: true, data: migration, message: 'Migration job queued' });
   } catch (err) { next(err); }

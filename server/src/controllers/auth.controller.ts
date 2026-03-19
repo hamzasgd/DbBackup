@@ -12,10 +12,15 @@ import {
   revokeAllUserTokens,
 } from '../services/token.service';
 import { AppError } from '../middleware/errorHandler';
+import { logAudit } from '../services/audit.service';
 
 export async function register(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { name, email, password } = req.body;
+
+    // Lock down registration after first user is created
+    const userCount = await prisma.user.count();
+    if (userCount > 0) throw new AppError('Registration is disabled', 403);
 
     const existing = await prisma.user.findUnique({ where: { email } });
     if (existing) throw new AppError('Email already in use', 409);
@@ -29,6 +34,8 @@ export async function register(req: Request, res: Response, next: NextFunction):
     const accessToken = generateAccessToken({ userId: user.id, email: user.email });
     const refreshToken = generateRefreshToken({ userId: user.id, email: user.email });
     await saveRefreshToken(user.id, refreshToken);
+
+    await logAudit(user.id, 'REGISTER', 'user', { email: user.email }, req.ip);
 
     res.status(201).json({ success: true, data: { user, accessToken, refreshToken } });
   } catch (err) {
@@ -49,6 +56,8 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     const accessToken = generateAccessToken({ userId: user.id, email: user.email });
     const refreshToken = generateRefreshToken({ userId: user.id, email: user.email });
     await saveRefreshToken(user.id, refreshToken);
+
+    await logAudit(user.id, 'LOGIN', 'user', { email: user.email }, req.ip);
 
     res.json({
       success: true,

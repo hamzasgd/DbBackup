@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import { Readable } from 'stream';
 import {
   S3Client,
@@ -29,7 +30,9 @@ function buildS3Client(settings: {
   endpoint?: string | null;
 }): S3Client {
   const decryptedKey = decrypt(settings.accessKeyId);
-  const cacheKey = `${settings.region}:${decryptedKey}:${settings.endpoint ?? ''}`;
+  const cacheKey = crypto.createHash('sha256')
+    .update(`${settings.region}:${decryptedKey}:${settings.endpoint ?? ''}`)
+    .digest('hex');
   const cached = s3Cache.get(cacheKey);
   if (cached && Date.now() - cached.createdAt < S3_CLIENT_TTL) {
     return cached.client;
@@ -81,12 +84,12 @@ export async function uploadToS3(
 
   if (stat.isDirectory()) {
     // Tar up the directory for upload
-    const { execSync } = await import('child_process');
+    const { execFileSync } = await import('child_process');
     const tarPath = `${localPath}.tar`;
-    execSync(`tar -cf "${tarPath}" -C "${path.dirname(localPath)}" "${path.basename(localPath)}"`, { stdio: 'pipe' });
+    execFileSync('tar', ['-cf', tarPath, '-C', path.dirname(localPath), path.basename(localPath)], { stdio: 'pipe' });
     body = fs.createReadStream(tarPath);
     // Clean up tar after upload in a callback
-    body.on('end', () => { try { fs.unlinkSync(tarPath); } catch { /* ignore */ } });
+    body.on('end', () => { try { fs.unlinkSync(tarPath); } catch (err) { logger.debug('Failed to delete temp tar:', err); } });
   } else {
     body = fs.createReadStream(localPath);
   }

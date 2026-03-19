@@ -49,8 +49,9 @@ app.use(cookieParser());
 app.use(compression() as unknown as RequestHandler);
 
 // Serialize BigInt fields (e.g. fileSize from Prisma BigInt columns) as numbers
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(BigInt.prototype as any).toJSON = function () { return Number(this); };
+app.set('json replacer', (_key: string, value: unknown) =>
+  typeof value === 'bigint' ? Number(value) : value
+);
 
 // Logging — strip JWT tokens from query strings to prevent leaking secrets into logs
 if (process.env.NODE_ENV !== 'test') {

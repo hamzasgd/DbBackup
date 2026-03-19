@@ -5,10 +5,11 @@ import fs from 'fs';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
+import { decrypt } from '../services/crypto.service';
 import { addBackupJob } from '../queue/backup.queue';
 import { verifyBackup } from '../services/verification.service';
 import { streamFromS3 } from '../services/storage.service';
+import { logAudit } from '../services/audit.service';
 
 const STORAGE_PATH = process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
 
@@ -73,28 +74,15 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
       },
     });
 
-    // Queue the job
+    // Queue the job (only pass connectionId, decrypt at execution time)
     await addBackupJob({
       backupId: backup.id,
       connectionId,
       outputDir: STORAGE_PATH,
       format: resolvedFormat,
-      config: {
-        type: conn.type,
-        host: decrypt(conn.host),
-        port: conn.port,
-        username: decrypt(conn.username),
-        password: decrypt(conn.password),
-        database: decrypt(conn.database),
-        sslEnabled: conn.sslEnabled,
-        sshEnabled: conn.sshEnabled,
-        sshHost: decryptIfPresent(conn.sshHost) || undefined,
-        sshPort: conn.sshPort || 22,
-        sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-        sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-        sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-      },
     });
+
+    await logAudit(req.user!.userId, 'TRIGGER', 'backup', { backupId: backup.id, connectionId }, req.ip);
 
     res.status(202).json({ success: true, data: backup, message: 'Backup job queued' });
   } catch (err) { next(err); }

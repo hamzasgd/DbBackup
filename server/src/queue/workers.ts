@@ -4,12 +4,18 @@ import { createMigrationWorker } from './migration.queue';
 import { createSyncWorker } from './sync.queue';
 import { logger } from '../config/logger';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
+import { PrismaClient } from '@prisma/client';
+
+let backupWorker: ReturnType<typeof createBackupWorker>;
+let scheduleWorker: ReturnType<typeof createScheduleWorker>;
+let migrationWorker: ReturnType<typeof createMigrationWorker>;
+let syncWorker: ReturnType<typeof createSyncWorker>;
 
 export async function startWorkers(): Promise<void> {
-  const backupWorker = createBackupWorker();
-  const scheduleWorker = createScheduleWorker();
-  const migrationWorker = createMigrationWorker();
-  const syncWorker = createSyncWorker();
+  backupWorker = createBackupWorker();
+  scheduleWorker = createScheduleWorker();
+  migrationWorker = createMigrationWorker();
+  syncWorker = createSyncWorker();
 
   logger.info('✅ Queue workers started');
   logger.info(`Backup worker id=${backupWorker.id}`);
@@ -24,12 +30,12 @@ export async function startWorkers(): Promise<void> {
   } catch (error) {
     logger.error('Failed to recover real-time sync configurations:', error);
   }
+}
 
-  process.on('SIGTERM', async () => {
-    await backupWorker.close();
-    await scheduleWorker.close();
-    await migrationWorker.close();
-    await syncWorker.close();
-    logger.info('Workers stopped gracefully');
-  });
+export async function stopWorkers(): Promise<void> {
+  await backupWorker.close();
+  await scheduleWorker.close();
+  await migrationWorker.close();
+  await syncWorker.close();
+  logger.info('Workers stopped gracefully');
 }

@@ -3,6 +3,7 @@ import { prisma } from '../config/database';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { encrypt } from '../services/crypto.service';
 import { testS3Connection } from '../services/storage.service';
+import { logAudit } from '../services/audit.service';
 
 export async function getStorageSettings(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -42,6 +43,8 @@ export async function upsertStorageSettings(req: AuthRequest, res: Response, nex
       create: { userId: req.user!.userId, ...data },
       update: data,
     });
+
+    await logAudit(req.user!.userId, 'UPDATE', 'storage_settings', { provider, bucket, region }, req.ip);
 
     res.json({
       success: true, data: {

@@ -11,16 +11,28 @@ export class MySQLEngine extends BaseEngine {
     return `\`${identifier.replace(/`/g, '``')}\``;
   }
 
-  private getArgs(includePassword = true): string[] {
+  private getArgs(): string[] {
     const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
     const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
-    const args = [
+    return [
       `-h${host}`,
       `-P${port}`,
       `-u${this.config.username}`,
     ];
-    if (includePassword) args.push(`-p${this.config.password}`);
-    return args;
+  }
+
+  private getEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, MYSQL_PWD: this.config.password };
+  }
+
+  private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
+    if (!this.config.sslEnabled) return undefined;
+    if (this.config.sslCa) {
+      return { rejectUnauthorized: true, ca: this.config.sslCa };
+    }
+    // No CA provided - warn and allow self-signed
+    console.warn('SSL enabled but no CA cert provided - using rejectUnauthorized: false');
+    return { rejectUnauthorized: false };
   }
 
   async testConnection(): Promise<TestConnectionResult> {
@@ -39,7 +51,7 @@ export class MySQLEngine extends BaseEngine {
           `--connect-timeout=${timeout}`,
           '-e', 'SELECT VERSION() as version;',
           '--batch', '--skip-column-names',
-        ]);
+        ], { env: this.getEnv() });
 
         let output = '';
         let errorOutput = '';
@@ -90,7 +102,7 @@ export class MySQLEngine extends BaseEngine {
           '--triggers',
           '--add-drop-table',
           this.config.database,
-        ]);
+        ], { env: this.getEnv() });
 
         const fileStream = createWriteStream(filePath);
         const outStream = useGzip ? createGzip() : fileStream;
@@ -134,7 +146,7 @@ export class MySQLEngine extends BaseEngine {
 
       await new Promise<void>((resolve, reject) => {
         const mysqlArgs = [...this.getArgs(), dbName];
-        const mysql = spawn('mysql', mysqlArgs);
+        const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';
         mysql.stderr.on('data', (d) => error += d.toString());
@@ -178,7 +190,7 @@ export class MySQLEngine extends BaseEngine {
         port: port,
         user: this.config.username,
         password: this.config.password,
-        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: this.getSslOptions(),
       });
 
       const [rows] = await conn.query<mysql2.RowDataPacket[]>('SHOW DATABASES;');
@@ -210,7 +222,7 @@ export class MySQLEngine extends BaseEngine {
         user: this.config.username,
         password: this.config.password,
         database: this.config.database,
-        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: this.getSslOptions(),
         connectTimeout: this.config.connectionTimeout || 30000,
       });
 

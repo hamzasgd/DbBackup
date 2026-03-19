@@ -21,6 +21,17 @@ export interface NotificationPayload {
   details?: Record<string, string | number | boolean>;
 }
 
+// HTML escape helper to prevent XSS in email notifications
+function escapeHtml(str: string | number | boolean): string {
+  const s = String(str);
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 // Cache transporters by SMTP config fingerprint to avoid creating new connections per email
 const transporterCache = new Map<string, { transporter: nodemailer.Transporter; createdAt: number }>();
 const TRANSPORTER_TTL = 10 * 60 * 1000; // 10 minutes
@@ -69,9 +80,12 @@ async function sendEmail(
 ): Promise<void> {
   const transporter = getTransporter(settings);
 
+  // Escape all user-controlled content before HTML interpolation
+  const safeTitle = escapeHtml(payload.title);
+  const safeMessage = escapeHtml(payload.message);
   const detailRows = settings && payload.details
     ? Object.entries(payload.details)
-        .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#666;font-size:13px">${k}</td><td style="padding:4px 0;font-size:13px">${v}</td></tr>`)
+        .map(([k, v]) => `<tr><td style="padding:4px 12px 4px 0;color:#666;font-size:13px">${escapeHtml(k)}</td><td style="padding:4px 0;font-size:13px">${escapeHtml(v)}</td></tr>`)
         .join('')
     : '';
 
@@ -80,14 +94,14 @@ async function sendEmail(
   await transporter.sendMail({
     from: `"DbBackup" <${settings.smtpUser || 'noreply@dbbackup.local'}>`,
     to: settings.emailAddress,
-    subject: `[DbBackup] ${payload.title}`,
+    subject: `[DbBackup] ${safeTitle}`,
     html: `
       <div style="font-family:sans-serif;max-width:520px;margin:0 auto">
         <div style="background:${isFailure ? '#dc2626' : '#2563eb'};padding:16px 24px;border-radius:8px 8px 0 0">
-          <h2 style="color:#fff;margin:0;font-size:18px">${payload.title}</h2>
+          <h2 style="color:#fff;margin:0;font-size:18px">${safeTitle}</h2>
         </div>
         <div style="background:#f9fafb;padding:20px 24px;border:1px solid #e5e7eb;border-top:none;border-radius:0 0 8px 8px">
-          <p style="margin:0 0 16px;color:#374151">${payload.message}</p>
+          <p style="margin:0 0 16px;color:#374151">${safeMessage}</p>
           ${detailRows ? `<table style="border-collapse:collapse">${detailRows}</table>` : ''}
           <p style="margin:16px 0 0;font-size:12px;color:#9ca3af">DbBackup · ${new Date().toUTCString()}</p>
         </div>

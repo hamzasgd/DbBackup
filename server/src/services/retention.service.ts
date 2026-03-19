@@ -19,8 +19,8 @@ function deleteBackupFile(filePath: string): void {
     } else {
       fs.unlinkSync(filePath);
     }
-  } catch {
-    // File already gone — fine
+  } catch (err) {
+    logger.debug('Failed to delete backup file:', err);
   }
 }
 

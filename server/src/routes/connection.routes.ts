@@ -1,5 +1,7 @@
 import { Router } from 'express';
 import { authenticate } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validate.middleware';
+import { connectionSchema } from '../middleware/validation.schemas';
 import {
   getConnections,
   getConnection,
@@ -16,8 +18,8 @@ router.use(authenticate);
 
 router.get('/', getConnections);
 router.get('/:id', getConnection);
-router.post('/', createConnection);
-router.put('/:id', updateConnection);
+router.post('/', validate(connectionSchema), createConnection);
+router.put('/:id', validate(connectionSchema), updateConnection);
 router.delete('/:id', deleteConnection);
 router.post('/:id/test', testConnection);
 router.get('/:id/info', getDbInfo);

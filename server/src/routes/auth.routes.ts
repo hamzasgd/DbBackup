@@ -2,6 +2,8 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { register, login, refreshToken, logout, getMe, changePassword } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validate.middleware';
+import { registerSchema, loginSchema, changePasswordSchema, refreshTokenSchema, logoutSchema } from '../middleware/validation.schemas';
 
 const router = Router();
 
@@ -14,11 +16,11 @@ const authLimiter = rateLimit({
   message: { success: false, message: 'Too many attempts, please try again later' },
 });
 
-router.post('/register', authLimiter, register);
-router.post('/login', authLimiter, login);
-router.post('/refresh', refreshToken);
-router.post('/logout', logout);
+router.post('/register', authLimiter, validate(registerSchema), register);
+router.post('/login', authLimiter, validate(loginSchema), login);
+router.post('/refresh', authLimiter, validate(refreshTokenSchema), refreshToken);
+router.post('/logout', validate(logoutSchema), logout);
 router.get('/me', authenticate, getMe);
-router.put('/change-password', authenticate, changePassword);
+router.put('/change-password', authenticate, validate(changePasswordSchema), changePassword);
 
 export default router;

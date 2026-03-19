@@ -15,6 +15,16 @@ export class PostgreSQLEngine extends BaseEngine {
     return { ...process.env, PGPASSWORD: this.config.password };
   }
 
+  private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
+    if (!this.config.sslEnabled) return undefined;
+    if (this.config.sslCa) {
+      return { rejectUnauthorized: true, ca: this.config.sslCa };
+    }
+    // No CA provided - warn and allow self-signed
+    console.warn('SSL enabled but no CA cert provided - using rejectUnauthorized: false');
+    return { rejectUnauthorized: false };
+  }
+
   private getBaseArgs(): string[] {
     const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
     const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
@@ -236,7 +246,7 @@ export class PostgreSQLEngine extends BaseEngine {
         user: this.config.username,
         password: this.config.password,
         database: 'postgres',
-        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: this.getSslOptions(),
         connectionTimeoutMillis: 10000,
         max: 1,
       });
@@ -270,7 +280,7 @@ export class PostgreSQLEngine extends BaseEngine {
         user: this.config.username,
         password: this.config.password,
         database: this.config.database,
-        ssl: this.config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: this.getSslOptions(),
         connectionTimeoutMillis: 10000,
         max: 1,
       });

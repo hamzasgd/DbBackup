@@ -2,7 +2,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { addBackupJob } from './backup.queue';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
+import { decrypt } from '../services/crypto.service';
 import { logger } from '../config/logger';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
@@ -86,21 +86,6 @@ export function createScheduleWorker(): Worker {
         connectionId: conn.id,
         outputDir,
         format: defaultFormat,
-        config: {
-          type: conn.type,
-          host: decrypt(conn.host),
-          port: conn.port,
-          username: decrypt(conn.username),
-          password: decrypt(conn.password),
-          database: decrypt(conn.database),
-          sslEnabled: conn.sslEnabled,
-          sshEnabled: conn.sshEnabled,
-          sshHost: decryptIfPresent(conn.sshHost) || undefined,
-          sshPort: conn.sshPort || 22,
-          sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-          sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-          sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-        },
       });
 
       await prisma.schedule.update({

@@ -5,6 +5,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { encrypt, decrypt, encryptIfPresent, decryptIfPresent } from '../services/crypto.service';
 import { engineFactory } from '../services/engines/engine.factory';
+import { logAudit } from '../services/audit.service';
 
 function encryptConnection(data: {
   host: string; username: string; password: string; database: string;
@@ -80,6 +81,9 @@ export async function createConnection(req: AuthRequest, res: Response, next: Ne
         ...encrypted,
       },
     });
+
+    await logAudit(req.user!.userId, 'CREATE', 'connection', { connectionId: conn.id, name }, req.ip);
+
     res.status(201).json({ success: true, data: decryptConnection(conn as Record<string, unknown>) });
   } catch (err) { next(err); }
 }
@@ -110,6 +114,9 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
         ...encrypted,
       },
     });
+
+    await logAudit(req.user!.userId, 'UPDATE', 'connection', { connectionId: updated.id, name }, req.ip);
+
     res.json({ success: true, data: decryptConnection(updated as Record<string, unknown>) });
   } catch (err) { next(err); }
 }
@@ -121,6 +128,9 @@ export async function deleteConnection(req: AuthRequest, res: Response, next: Ne
     });
     if (!existing) throw new AppError('Connection not found', 404);
     await prisma.connection.delete({ where: { id: req.params.id } });
+
+    await logAudit(req.user!.userId, 'DELETE', 'connection', { connectionId: existing.id, name: existing.name }, req.ip);
+
     res.json({ success: true, message: 'Connection deleted' });
   } catch (err) { next(err); }
 }

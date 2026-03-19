@@ -4,6 +4,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { engineFactory } from '../services/engines/engine.factory';
+import { logAudit } from '../services/audit.service';
 
 export async function restoreBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -38,6 +39,9 @@ export async function restoreBackup(req: AuthRequest, res: Response, next: NextF
     });
 
     await engine.restore(backup.filePath, targetDatabase);
+
+    await logAudit(req.user!.userId, 'RESTORE', 'backup', { backupId, targetConnectionId: connId, targetDatabase }, req.ip);
+
     res.json({ success: true, message: 'Database restored successfully' });
   } catch (err) { next(err); }
 }

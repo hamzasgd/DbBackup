@@ -150,7 +150,7 @@ async function listPostgresIndexSignatures(config: ConnectionConfig, tableName: 
 }
 
 async function listIndexSignatures(config: ConnectionConfig, tableName: string): Promise<IndexSignature[]> {
-  const dbType = config.type === 'POSTGRES' ? 'POSTGRESQL' : config.type;
+  const dbType = config.type;
 
   if (dbType === 'POSTGRESQL') {
     return listPostgresIndexSignatures(config, tableName);

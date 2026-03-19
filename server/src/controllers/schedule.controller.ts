@@ -5,6 +5,7 @@ import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { addScheduleJob, removeScheduleJob } from '../queue/schedule.queue';
+import { logAudit } from '../services/audit.service';
 
 function getNextRunAt(cronExpression: string): Date {
   try {
@@ -94,6 +95,9 @@ export async function createSchedule(req: AuthRequest, res: Response, next: Next
     });
 
     await addScheduleJob(schedule);
+
+    await logAudit(req.user!.userId, 'CREATE', 'schedule', { scheduleId: schedule.id, name, connectionId }, req.ip);
+
     res.status(201).json({ success: true, data: schedule });
   } catch (err) { next(err); }
 }
@@ -131,6 +135,9 @@ export async function deleteSchedule(req: AuthRequest, res: Response, next: Next
 
     await removeScheduleJob(req.params.id);
     await prisma.schedule.delete({ where: { id: req.params.id } });
+
+    await logAudit(req.user!.userId, 'DELETE', 'schedule', { scheduleId: existing.id, name: existing.name }, req.ip);
+
     res.json({ success: true, message: 'Schedule deleted' });
   } catch (err) { next(err); }
 }
