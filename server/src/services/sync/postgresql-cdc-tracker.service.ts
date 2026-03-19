@@ -8,7 +8,6 @@ import {
   SyncConfigWithConnections,
   escapeIdentifierPG,
 } from './sync-utils';
-import { decrypt } from '../crypto.service';
 
 interface ChangeLog {
   id: string;
