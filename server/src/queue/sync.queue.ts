@@ -874,18 +874,24 @@ async function applyChangeBatch(
           const pkColumns = Object.keys(pkValues);
           const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
 
-          if (nonPkColumns.length > 0) {
-            const updateClause = nonPkColumns
-              .map(col => `\`${col}\` = VALUES(\`${col}\`)`)
-              .join(', ');
-            const sql =
-              `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders}) ` +
-              `ON DUPLICATE KEY UPDATE ${updateClause}`;
-            await connection.execute(sql, values);
+          if (pkColumns.length > 0 && nonPkColumns.length > 0) {
+            // Safer upsert: update by primary key only, then insert if row does not exist.
+            const updateClause = nonPkColumns.map(col => `\`${col}\` = ?`).join(', ');
+            const whereClause = pkColumns.map(col => `\`${col}\` = ?`).join(' AND ');
+            const updateSql = `UPDATE \`${tableName}\` SET ${updateClause} WHERE ${whereClause}`;
+            const [updateResult] = await connection.execute(updateSql, [
+              ...nonPkColumns.map(col => data[col]),
+              ...pkColumns.map(col => pkValues[col]),
+            ]);
+
+            const affectedRows = (updateResult as any)?.affectedRows ?? 0;
+            if (affectedRows === 0) {
+              const insertSql = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
+              await connection.execute(insertSql, values);
+            }
           } else {
-            // If only PK columns are present, duplicate keys should be ignored.
-            const sql = `INSERT IGNORE INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
-            await connection.execute(sql, values);
+            const insertSql = `INSERT INTO \`${tableName}\` (\`${columns.join('`, `')}\`) VALUES (${placeholders})`;
+            await connection.execute(insertSql, values);
           }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
@@ -938,28 +944,29 @@ async function applyChangeBatch(
           const placeholders = columns.map((_, i) => `$${i + 1}`).join(', ');
           const pkColumns = Object.keys(pkValues);
           const hasAllPkColumns = pkColumns.length > 0 && pkColumns.every(col => columns.includes(col));
+          const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
 
-          if (hasAllPkColumns) {
-            const nonPkColumns = columns.filter(col => !pkColumns.includes(col));
-            const conflictTarget = pkColumns.map(col => `"${col}"`).join(', ');
+          if (hasAllPkColumns && nonPkColumns.length > 0) {
+            // Safer upsert: update by primary key only, then insert if row does not exist.
+            const setClause = nonPkColumns
+              .map((col, i) => `"${col}" = $${i + 1}`)
+              .join(', ');
+            const whereClause = pkColumns
+              .map((col, i) => `"${col}" = $${nonPkColumns.length + i + 1}`)
+              .join(' AND ');
+            const updateSql = `UPDATE "${tableName}" SET ${setClause} WHERE ${whereClause}`;
+            const updateResult = await client.query(updateSql, [
+              ...nonPkColumns.map(col => data[col]),
+              ...pkColumns.map(col => pkValues[col]),
+            ]);
 
-            if (nonPkColumns.length > 0) {
-              const updateClause = nonPkColumns
-                .map(col => `"${col}" = EXCLUDED."${col}"`)
-                .join(', ');
-              const sql =
-                `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders}) ` +
-                `ON CONFLICT (${conflictTarget}) DO UPDATE SET ${updateClause}`;
-              await client.query(sql, values);
-            } else {
-              const sql =
-                `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders}) ` +
-                `ON CONFLICT (${conflictTarget}) DO NOTHING`;
-              await client.query(sql, values);
+            if (updateResult.rowCount === 0) {
+              const insertSql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
+              await client.query(insertSql, values);
             }
           } else {
-            const sql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
-            await client.query(sql, values);
+            const insertSql = `INSERT INTO "${tableName}" ("${columns.join('", "')}") VALUES (${placeholders})`;
+            await client.query(insertSql, values);
           }
         } else if (change.operation === ChangeOperation.UPDATE) {
           const columns = Object.keys(data);
