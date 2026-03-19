@@ -737,6 +737,7 @@ async function applyChangeBatch(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
+        rejectUnauthorized: false, // Allow self-signed certificates
       } : undefined,
     });
 
@@ -786,6 +787,7 @@ async function applyChangeBatch(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
+        rejectUnauthorized: false, // Allow self-signed certificates
       } : undefined,
     });
 
@@ -858,6 +860,7 @@ async function fetchTableRecords(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
+        rejectUnauthorized: false, // Allow self-signed certificates
       } : undefined,
     });
 
@@ -879,6 +882,7 @@ async function fetchTableRecords(
         ca: config.sslCa,
         cert: config.sslCert,
         key: config.sslKey,
+        rejectUnauthorized: false, // Allow self-signed certificates
       } : undefined,
     });
 
