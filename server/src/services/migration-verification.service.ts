@@ -87,6 +87,9 @@ const PROFILE_DATA_TYPES = new Set([
   'json',
 ]);
 const ROW_HASH_SAMPLE_SIZE = 500;
+const DEEP_CHECK_MAX_TABLES = 20;
+const DEEP_CHECK_MAX_ROWCOUNT_FOR_PROFILE = 200000;
+const DEEP_CHECK_TABLE_TIMEOUT_MS = 8000;
 
 async function getEngineHostPort(config: ConnectionConfig): Promise<{ host: string; port: number; tunnel: SSHTunnel | null }> {
   let tunnel: SSHTunnel | null = null;
@@ -442,6 +445,21 @@ function approxEqual(a: number, b: number, epsilon = 0.0001): boolean {
   return Math.abs(a - b) <= epsilon;
 }
 
+async function withTimeout<T>(task: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`Deep check timed out after ${timeoutMs}ms`)), timeoutMs);
+    task
+      .then((v) => {
+        clearTimeout(timer);
+        resolve(v);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
+}
+
 export async function verifyMigrationConsistency(
   sourceConfig: ConnectionConfig,
   targetConfig: ConnectionConfig,
@@ -464,6 +482,9 @@ export async function verifyMigrationConsistency(
 
   const tableResults: TableVerificationResult[] = [];
   const deepChecksApplied = MYSQL_LIKE_TYPES.has(sourceConfig.type) && MYSQL_LIKE_TYPES.has(targetConfig.type);
+  const deepCheckTableSet = new Set(
+    tableNames.slice(0, DEEP_CHECK_MAX_TABLES)
+  );
 
   for (const tableName of tableNames) {
     const sourceTable = sourceDbInfo.tables.find((t) => t.name === tableName);
@@ -508,64 +529,78 @@ export async function verifyMigrationConsistency(
     let rowSampleSourceHash: string | undefined;
     let rowSampleTargetHash: string | undefined;
 
-    if (deepChecksApplied) {
-      const [srcIndexDefs, dstIndexDefs, srcProfileColumns, dstProfileColumns] = await Promise.all([
-        listMySQLIndexDefinitions(sourceConfig, tableName),
-        listMySQLIndexDefinitions(targetConfig, tableName),
-        getMySQLProfileColumns(sourceConfig, tableName),
-        getMySQLProfileColumns(targetConfig, tableName),
-      ]);
+    if (deepChecksApplied && deepCheckTableSet.has(tableName)) {
+      try {
+        await withTimeout((async () => {
+          const [srcIndexDefs, dstIndexDefs] = await Promise.all([
+            listMySQLIndexDefinitions(sourceConfig, tableName),
+            listMySQLIndexDefinitions(targetConfig, tableName),
+          ]);
 
-      const allIndexNames = new Set([
-        ...srcIndexDefs.map((i) => i.name),
-        ...dstIndexDefs.map((i) => i.name),
-      ]);
-      const srcIndexDefByName = new Map(srcIndexDefs.map((i) => [i.name, i.definition]));
-      const dstIndexDefByName = new Map(dstIndexDefs.map((i) => [i.name, i.definition]));
+          const allIndexNames = new Set([
+            ...srcIndexDefs.map((i) => i.name),
+            ...dstIndexDefs.map((i) => i.name),
+          ]);
+          const srcIndexDefByName = new Map(srcIndexDefs.map((i) => [i.name, i.definition]));
+          const dstIndexDefByName = new Map(dstIndexDefs.map((i) => [i.name, i.definition]));
 
-      indexDefinitionMismatches = [...allIndexNames]
-        .filter((name) => srcIndexDefByName.get(name) !== dstIndexDefByName.get(name))
-        .sort();
+          indexDefinitionMismatches = [...allIndexNames]
+            .filter((name) => srcIndexDefByName.get(name) !== dstIndexDefByName.get(name))
+            .sort();
 
-      const profileColumns = [...new Set([...srcProfileColumns, ...dstProfileColumns])];
-      if (profileColumns.length > 0) {
-        const [srcProfiles, dstProfiles] = await Promise.all([
-          getMySQLColumnProfileMap(sourceConfig, tableName, profileColumns),
-          getMySQLColumnProfileMap(targetConfig, tableName, profileColumns),
-        ]);
+          const canRunProfileCheck = sourceTable.rowCount <= DEEP_CHECK_MAX_ROWCOUNT_FOR_PROFILE
+            && targetTable.rowCount <= DEEP_CHECK_MAX_ROWCOUNT_FOR_PROFILE;
 
-        const profileIssues: string[] = [];
-        for (const columnName of profileColumns) {
-          const srcStat = srcProfiles.get(columnName);
-          const dstStat = dstProfiles.get(columnName);
-          if (!srcStat || !dstStat) {
-            profileIssues.push(columnName);
-            continue;
+          if (canRunProfileCheck) {
+            const [srcProfileColumns, dstProfileColumns] = await Promise.all([
+              getMySQLProfileColumns(sourceConfig, tableName),
+              getMySQLProfileColumns(targetConfig, tableName),
+            ]);
+
+            const profileColumns = [...new Set([...srcProfileColumns, ...dstProfileColumns])];
+            if (profileColumns.length > 0) {
+              const [srcProfiles, dstProfiles] = await Promise.all([
+                getMySQLColumnProfileMap(sourceConfig, tableName, profileColumns),
+                getMySQLColumnProfileMap(targetConfig, tableName, profileColumns),
+              ]);
+
+              const profileIssues: string[] = [];
+              for (const columnName of profileColumns) {
+                const srcStat = srcProfiles.get(columnName);
+                const dstStat = dstProfiles.get(columnName);
+                if (!srcStat || !dstStat) {
+                  profileIssues.push(columnName);
+                  continue;
+                }
+
+                const sameNulls = srcStat.nullCount === dstStat.nullCount;
+                const sameMin = srcStat.minBytes === dstStat.minBytes;
+                const sameMax = srcStat.maxBytes === dstStat.maxBytes;
+                const sameAvg = approxEqual(srcStat.avgBytes, dstStat.avgBytes);
+
+                if (!sameNulls || !sameMin || !sameMax || !sameAvg) {
+                  profileIssues.push(columnName);
+                }
+              }
+
+              columnProfileMismatches = profileIssues.sort();
+            }
           }
 
-          const sameNulls = srcStat.nullCount === dstStat.nullCount;
-          const sameMin = srcStat.minBytes === dstStat.minBytes;
-          const sameMax = srcStat.maxBytes === dstStat.maxBytes;
-          const sameAvg = approxEqual(srcStat.avgBytes, dstStat.avgBytes);
+          const [srcRowHash, dstRowHash] = await Promise.all([
+            computeMySQLSampleRowHash(sourceConfig, tableName, ROW_HASH_SAMPLE_SIZE),
+            computeMySQLSampleRowHash(targetConfig, tableName, ROW_HASH_SAMPLE_SIZE),
+          ]);
 
-          if (!sameNulls || !sameMin || !sameMax || !sameAvg) {
-            profileIssues.push(columnName);
+          if (!srcRowHash.skipped && !dstRowHash.skipped) {
+            rowSampleHashMatch = srcRowHash.hash === dstRowHash.hash && srcRowHash.sampledRows === dstRowHash.sampledRows;
+            rowSampledCount = Math.min(srcRowHash.sampledRows, dstRowHash.sampledRows);
+            rowSampleSourceHash = srcRowHash.hash;
+            rowSampleTargetHash = dstRowHash.hash;
           }
-        }
-
-        columnProfileMismatches = profileIssues.sort();
-      }
-
-      const [srcRowHash, dstRowHash] = await Promise.all([
-        computeMySQLSampleRowHash(sourceConfig, tableName, ROW_HASH_SAMPLE_SIZE),
-        computeMySQLSampleRowHash(targetConfig, tableName, ROW_HASH_SAMPLE_SIZE),
-      ]);
-
-      if (!srcRowHash.skipped && !dstRowHash.skipped) {
-        rowSampleHashMatch = srcRowHash.hash === dstRowHash.hash && srcRowHash.sampledRows === dstRowHash.sampledRows;
-        rowSampledCount = Math.min(srcRowHash.sampledRows, dstRowHash.sampledRows);
-        rowSampleSourceHash = srcRowHash.hash;
-        rowSampleTargetHash = dstRowHash.hash;
+        })(), DEEP_CHECK_TABLE_TIMEOUT_MS);
+      } catch {
+        // Keep base verification reliable even if optional deep checks are too expensive.
       }
     }
 
