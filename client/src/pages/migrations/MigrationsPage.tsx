@@ -122,9 +122,19 @@ export default function MigrationsPage() {
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [verification, setVerification] = useState<MigrationVerificationResult | null>(null)
   const [verificationOpen, setVerificationOpen] = useState(false)
+  const [tableVerifyOpen, setTableVerifyOpen] = useState(false)
+  const [tableVerifyTarget, setTableVerifyTarget] = useState<Migration | null>(null)
+  const [selectedVerifyTable, setSelectedVerifyTable] = useState('')
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
   const connections = connsData?.data.data ?? []
+
+  const { data: tableVerifyInfo, isLoading: isLoadingVerifyTables } = useQuery({
+    queryKey: ['verify-table-options', tableVerifyTarget?.id, tableVerifyTarget?.sourceConnectionId],
+    queryFn: () => connectionsApi.getInfo(tableVerifyTarget!.sourceConnectionId),
+    enabled: tableVerifyOpen && !!tableVerifyTarget?.sourceConnectionId,
+    staleTime: 60_000,
+  })
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['migrations'],
@@ -167,7 +177,7 @@ export default function MigrationsPage() {
   })
 
   const verifyMutation = useMutation({
-    mutationFn: (id: string) => migrationsApi.verify(id),
+    mutationFn: ({ id, tables }: { id: string; tables?: string[] }) => migrationsApi.verify(id, tables),
     onSuccess: (res) => {
       setVerification(res.data.data)
       setVerificationOpen(true)
@@ -179,6 +189,7 @@ export default function MigrationsPage() {
   })
 
   const targetOptions = connections.filter(c => c.id !== sourceId)
+  const verifyTables = tableVerifyInfo?.data.data.tables.map((t) => t.name) ?? []
   const selectedSource = connections.find(c => c.id === sourceId)
   const selectedTarget = connections.find(c => c.id === targetId)
   const usesRowBatching = selectedSource?.type === 'POSTGRESQL' && (selectedTarget?.type === 'MYSQL' || selectedTarget?.type === 'MARIADB')
@@ -286,10 +297,24 @@ export default function MigrationsPage() {
                               size="sm"
                               variant="ghost"
                               className="text-blue-600 hover:bg-blue-50"
-                              onClick={() => verifyMutation.mutate(m.id)}
+                              onClick={() => verifyMutation.mutate({ id: m.id })}
                               loading={verifyMutation.isPending}
                             >
                               Verify
+                            </Button>
+                          )}
+                          {m.status === 'COMPLETED' && (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="text-indigo-600 hover:bg-indigo-50"
+                              onClick={() => {
+                                setTableVerifyTarget(m)
+                                setSelectedVerifyTable('')
+                                setTableVerifyOpen(true)
+                              }}
+                            >
+                              Table Verify
                             </Button>
                           )}
                           <Button
@@ -529,6 +554,70 @@ export default function MigrationsPage() {
             </div>
           </div>
         )}
+      </Modal>
+
+      <Modal
+        open={tableVerifyOpen}
+        onClose={() => {
+          setTableVerifyOpen(false)
+          setTableVerifyTarget(null)
+          setSelectedVerifyTable('')
+        }}
+        title="Verify Specific Table"
+      >
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            Run verification for one table only. This is faster and helps avoid timeout on large databases.
+          </p>
+
+          <div>
+            <label className="text-sm font-medium text-gray-700">Table</label>
+            <select
+              className="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              value={selectedVerifyTable}
+              onChange={e => setSelectedVerifyTable(e.target.value)}
+              disabled={isLoadingVerifyTables || verifyMutation.isPending}
+            >
+              <option value="">Select table…</option>
+              {verifyTables.map((tableName) => (
+                <option key={tableName} value={tableName}>{tableName}</option>
+              ))}
+            </select>
+            <p className="text-xs text-gray-400 mt-1">
+              {isLoadingVerifyTables
+                ? 'Loading table list...'
+                : verifyTables.length > 0
+                  ? `${verifyTables.length} tables available`
+                  : 'No tables found for this source connection'}
+            </p>
+          </div>
+
+          <div className="flex gap-2 justify-end">
+            <Button
+              variant="outline"
+              onClick={() => {
+                setTableVerifyOpen(false)
+                setTableVerifyTarget(null)
+                setSelectedVerifyTable('')
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={() => {
+                if (!tableVerifyTarget || !selectedVerifyTable) return
+                verifyMutation.mutate({ id: tableVerifyTarget.id, tables: [selectedVerifyTable] })
+                setTableVerifyOpen(false)
+                setTableVerifyTarget(null)
+                setSelectedVerifyTable('')
+              }}
+              loading={verifyMutation.isPending}
+              disabled={!tableVerifyTarget || !selectedVerifyTable || isLoadingVerifyTables}
+            >
+              Verify Table
+            </Button>
+          </div>
+        </div>
       </Modal>
     </div>
   )
