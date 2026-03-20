@@ -37,6 +37,12 @@ export interface MigrationTableVerification {
   missingInTarget: boolean
   missingIndexes: string[]
   extraIndexes: string[]
+  indexDefinitionMismatches: string[]
+  columnProfileMismatches: string[]
+  rowSampleHashMatch: boolean | null
+  rowSampledCount: number
+  rowSampleSourceHash?: string
+  rowSampleTargetHash?: string
 }
 
 export interface MigrationVerificationResult {
@@ -47,6 +53,10 @@ export interface MigrationVerificationResult {
   rowMismatchCount: number
   missingTableCount: number
   missingIndexCount: number
+  indexDefinitionMismatchCount: number
+  columnProfileMismatchCount: number
+  rowSampleHashMismatchCount: number
+  deepChecksApplied: boolean
   schemaErrors: string[]
   schemaWarnings: string[]
   tableResults: MigrationTableVerification[]

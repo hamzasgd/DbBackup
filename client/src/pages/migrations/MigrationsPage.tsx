@@ -425,11 +425,11 @@ export default function MigrationsPage() {
                 : 'bg-amber-50 border-amber-200 text-amber-800'
             )}>
               {verification.ok
-                ? 'Verification passed: row counts, schema compatibility, and index signatures matched.'
+                ? 'Verification passed: rows, schema, index signatures, and deep data checks matched.'
                 : 'Verification found mismatches. Review details below.'}
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-sm">
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2 text-sm">
               <div className="bg-gray-50 rounded p-2">
                 <p className="text-gray-500 text-xs">Tables Checked</p>
                 <p className="font-semibold text-gray-800">{verification.tableCountChecked}</p>
@@ -446,7 +446,25 @@ export default function MigrationsPage() {
                 <p className="text-gray-500 text-xs">Missing Index Signatures</p>
                 <p className="font-semibold text-gray-800">{verification.missingIndexCount}</p>
               </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Index Def Mismatches</p>
+                <p className="font-semibold text-gray-800">{verification.indexDefinitionMismatchCount}</p>
+              </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Column Profile Mismatches</p>
+                <p className="font-semibold text-gray-800">{verification.columnProfileMismatchCount}</p>
+              </div>
+              <div className="bg-gray-50 rounded p-2">
+                <p className="text-gray-500 text-xs">Row Sample Hash Mismatches</p>
+                <p className="font-semibold text-gray-800">{verification.rowSampleHashMismatchCount}</p>
+              </div>
             </div>
+
+            {verification.deepChecksApplied && (
+              <p className="text-xs text-gray-500">
+                Deep checks enabled for MySQL-like routes: full index definition parity, per-column null/length profiles, and deterministic sampled row hashes.
+              </p>
+            )}
 
             {verification.schemaErrors.length > 0 && (
               <div>
@@ -468,18 +486,35 @@ export default function MigrationsPage() {
                       <th className="text-left px-3 py-2">Rows (src -&gt; dst)</th>
                       <th className="text-left px-3 py-2">Missing Idx</th>
                       <th className="text-left px-3 py-2">Extra Idx</th>
+                      <th className="text-left px-3 py-2">Idx Def</th>
+                      <th className="text-left px-3 py-2">Col Profile</th>
+                      <th className="text-left px-3 py-2">Row Hash</th>
                       <th className="text-left px-3 py-2">Status</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
                     {verification.tableResults.map((t) => {
-                      const issue = t.missingInTarget || !t.rowsMatch || t.missingIndexes.length > 0
+                      const issue = t.missingInTarget
+                        || !t.rowsMatch
+                        || t.missingIndexes.length > 0
+                        || t.indexDefinitionMismatches.length > 0
+                        || t.columnProfileMismatches.length > 0
+                        || t.rowSampleHashMatch === false
                       return (
                         <tr key={t.tableName}>
                           <td className="px-3 py-2 font-mono text-gray-700">{t.tableName}</td>
                           <td className="px-3 py-2 text-gray-600">{t.sourceRows.toLocaleString()} -&gt; {t.targetRows.toLocaleString()}</td>
                           <td className="px-3 py-2 text-gray-600">{t.missingIndexes.length}</td>
                           <td className="px-3 py-2 text-gray-600">{t.extraIndexes.length}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.indexDefinitionMismatches.length}</td>
+                          <td className="px-3 py-2 text-gray-600">{t.columnProfileMismatches.length}</td>
+                          <td className="px-3 py-2 text-gray-600">
+                            {t.rowSampleHashMatch === null
+                              ? 'Skipped'
+                              : t.rowSampleHashMatch
+                                ? `OK (${t.rowSampledCount})`
+                                : `Mismatch (${t.rowSampledCount})`}
+                          </td>
                           <td className="px-3 py-2">
                             <Badge className={issue ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}>
                               {issue ? 'Needs Review' : 'OK'}
