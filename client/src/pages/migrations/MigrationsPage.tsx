@@ -1,116 +1,23 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeftRight, Plus, Trash2, RefreshCw, MoveRight, CheckCircle2, XCircle, Clock, Loader2, Info } from 'lucide-react'
+import { ArrowLeftRight, Plus, RefreshCw, MoveRight } from 'lucide-react'
 import { migrationsApi, type Migration, type MigrationVerificationResult } from '../../services/migrations.service'
 import { connectionsApi } from '../../services/connections.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
-import { Badge } from '../../components/ui/Badge'
 import { Modal } from '../../components/ui/Modal'
-import { formatDate, dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
+import { Badge } from '../../components/ui/Badge'
+import { dbTypeLabel } from '../../lib/utils'
 import { cn } from '../../lib/utils'
-import { useProgressSSE } from '../../hooks/useProgressSSE'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton } from '../../components/ui/Skeleton'
-
-function statusIcon(status: Migration['status']) {
-  if (status === 'COMPLETED') return <CheckCircle2 className="h-4 w-4 text-green-500" />
-  if (status === 'FAILED') return <XCircle className="h-4 w-4 text-red-500" />
-  if (status === 'RUNNING') return <Loader2 className="h-4 w-4 text-blue-500 animate-spin" />
-  return <Clock className="h-4 w-4 text-gray-400" />
-}
-
-function statusBadge(status: Migration['status']) {
-  const map: Record<Migration['status'], string> = {
-    COMPLETED: 'bg-green-100 text-green-700',
-    FAILED: 'bg-red-100 text-red-700',
-    RUNNING: 'bg-blue-100 text-blue-700',
-    PENDING: 'bg-gray-100 text-gray-600',
-  }
-  return map[status]
-}
-
-function durationLabel(m: Migration) {
-  if (!m.startedAt) return '—'
-  const end = m.completedAt ? new Date(m.completedAt) : new Date()
-  const ms = end.getTime() - new Date(m.startedAt).getTime()
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const min = Math.floor(s / 60)
-  return `${min}m ${s % 60}s`
-}
-
-function rowsLabel(rowsMigrated?: number) {
-  if (rowsMigrated === -1) return 'N/A (stream mode)'
-  return ((rowsMigrated ?? 0)).toLocaleString()
-}
-
-function ActiveMigrationCard({ m }: { m: Migration }) {
-  const isActive = m.status === 'RUNNING' || m.status === 'PENDING'
-  const sse = useProgressSSE(`/migrations/${m.id}/progress`, isActive)
-
-  const progress = sse?.progress ?? m.progress
-  const currentTable = sse?.currentTable ?? m.currentTable
-  const tablesCompleted = sse?.tablesCompleted ?? m.tablesCompleted
-  const tableCount = sse?.tableCount ?? m.tableCount
-  const rowsMigrated = sse?.rowsMigrated ?? m.rowsMigrated
-  const isStreamMode = rowsMigrated === -1 || /dump pipe|pgloader/i.test(currentTable ?? '')
-
-  return (
-    <Card className="border-blue-200 bg-blue-50/40">
-      <CardContent className="pt-4 pb-4">
-        <div className="flex items-start gap-4">
-          <div className="mt-0.5">{statusIcon(m.status)}</div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-2 flex-wrap">
-              <span className="font-medium text-gray-900">{m.sourceConnection?.name}</span>
-              <MoveRight className="h-4 w-4 text-gray-400 shrink-0" />
-              <span className="font-medium text-gray-900">{m.targetConnection?.name}</span>
-              <Badge className={statusBadge(m.status)}>{m.status}</Badge>
-            </div>
-
-            {currentTable && (
-              <p className="text-xs text-gray-500 mt-1">
-                Currently migrating: <span className="font-mono text-blue-600">{currentTable}</span>
-              </p>
-            )}
-
-            <div className="mt-3 space-y-1">
-              <div className="flex justify-between text-xs text-gray-500">
-                <span>{tablesCompleted} / {tableCount} tables</span>
-                <span className="inline-flex items-center gap-1">
-                  {isStreamMode ? 'Streaming' : `${progress}%`}
-                  {isStreamMode && (
-                    <span
-                      className="inline-flex items-center text-gray-400"
-                      title="This migration runs in stream mode (CLI pipe), so exact row-by-row progress is not available."
-                    >
-                      <Info className="h-3.5 w-3.5" />
-                    </span>
-                  )}
-                </span>
-              </div>
-              <div className="h-2 bg-blue-200 rounded-full overflow-hidden">
-                <div
-                  className={cn(
-                    'h-full rounded-full transition-all duration-700',
-                    isStreamMode ? 'bg-blue-400 animate-pulse w-full' : 'bg-blue-500'
-                  )}
-                  style={isStreamMode ? undefined : { width: `${progress}%` }}
-                />
-              </div>
-              <div className="flex justify-between text-xs text-gray-400">
-                <span>{rowsLabel(rowsMigrated)} rows migrated</span>
-                <span>Running for {durationLabel(m)}</span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  )
-}
+import {
+  ActiveMigrationCard,
+  MigrationHistoryTable,
+  statusIcon,
+  statusBadge,
+} from './components'
 
 export default function MigrationsPage() {
   const qc = useQueryClient()
@@ -243,93 +150,17 @@ export default function MigrationsPage() {
         <Card>
           <CardHeader><CardTitle>Migration History</CardTitle></CardHeader>
           <div className="overflow-x-auto scroll-shadow-x">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-gray-100 bg-gray-50">
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Route</th>
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Status</th>
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Tables</th>
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Rows</th>
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Duration</th>
-                  <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Date</th>
-                  <th className="px-4 py-3"></th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-gray-50">
-                {migrations
-                  .filter(m => m.status === 'COMPLETED' || m.status === 'FAILED')
-                  .map(m => (
-                    <tr key={m.id} className="hover:bg-gray-50">
-                      <td className="px-6 py-3">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="flex items-center gap-1">
-                            <Badge className={dbTypeBadgeColor(m.sourceConnection?.type ?? '')}>{dbTypeLabel(m.sourceConnection?.type ?? '')}</Badge>
-                            <span className="text-gray-700 font-medium">{m.sourceConnection?.name}</span>
-                          </div>
-                          <MoveRight className="h-3.5 w-3.5 text-gray-400 shrink-0" />
-                          <div className="flex items-center gap-1">
-                            <Badge className={dbTypeBadgeColor(m.targetConnection?.type ?? '')}>{dbTypeLabel(m.targetConnection?.type ?? '')}</Badge>
-                            <span className="text-gray-700 font-medium">{m.targetConnection?.name}</span>
-                          </div>
-                        </div>
-                        {m.notes && <p className="text-xs text-gray-400 mt-0.5">{m.notes}</p>}
-                      </td>
-                      <td className="px-6 py-3">
-                        <div className="flex items-center gap-1.5">
-                          {statusIcon(m.status)}
-                          <Badge className={statusBadge(m.status)}>{m.status}</Badge>
-                        </div>
-                        {m.error && <p className="text-xs text-red-500 mt-0.5 max-w-[220px] truncate" title={m.error}>{m.error}</p>}
-                      </td>
-                      <td className="px-6 py-3 text-gray-600">{m.tablesCompleted} / {m.tableCount}</td>
-                      <td
-                        className="px-6 py-3 text-gray-600"
-                        title={m.rowsMigrated === -1 ? 'Stream mode does not provide exact migrated row count.' : undefined}
-                      >
-                        {rowsLabel(m.rowsMigrated)}
-                      </td>
-                      <td className="px-6 py-3 text-gray-500 text-xs">{durationLabel(m)}</td>
-                      <td className="px-6 py-3 text-gray-500 text-xs">{formatDate(m.createdAt)}</td>
-                      <td className="px-4 py-3">
-                        <div className="flex items-center gap-1 justify-end">
-                          {m.status === 'COMPLETED' && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-blue-600 hover:bg-blue-50"
-                              onClick={() => verifyMutation.mutate({ id: m.id })}
-                              loading={verifyMutation.isPending}
-                            >
-                              Verify
-                            </Button>
-                          )}
-                          {m.status === 'COMPLETED' && (
-                            <Button
-                              size="sm"
-                              variant="ghost"
-                              className="text-indigo-600 hover:bg-indigo-50"
-                              onClick={() => {
-                                setTableVerifyTarget(m)
-                                setSelectedVerifyTable('')
-                                setTableVerifyOpen(true)
-                              }}
-                            >
-                              Table Verify
-                            </Button>
-                          )}
-                          <Button
-                            size="sm" variant="ghost"
-                            className="text-red-500 hover:bg-red-50"
-                            onClick={() => setDeleteTarget(m.id)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </Button>
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
-              </tbody>
-            </table>
+            <MigrationHistoryTable
+              migrations={migrations.filter(m => m.status === 'COMPLETED' || m.status === 'FAILED')}
+              onVerify={(id) => verifyMutation.mutate({ id })}
+              onTableVerify={(m) => {
+                setTableVerifyTarget(m)
+                setSelectedVerifyTable('')
+                setTableVerifyOpen(true)
+              }}
+              onDelete={(id) => setDeleteTarget(id)}
+              verifyLoading={verifyMutation.isPending}
+            />
           </div>
         </Card>
       )}

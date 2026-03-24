@@ -1,4 +1,4 @@
-// Re-export from the refactored sync module for backward compatibility
+// Re-export all public APIs from sync queue module for backward compatibility
 export {
   getSyncQueue,
   addSyncJob,
@@ -6,4 +6,4 @@ export {
   SYNC_PROGRESS_CHANNEL,
   SYNC_QUEUE_NAME,
   SyncJobData,
-} from './sync';
+} from './sync.queue';

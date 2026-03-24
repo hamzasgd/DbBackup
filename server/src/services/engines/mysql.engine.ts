@@ -22,7 +22,7 @@ export class MySQLEngine extends BaseEngine {
   }
 
   private getEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, MYSQL_PWD: this.config.password };
+    return { ...process.env, MYSQL_PWD: this.config.password ?? undefined };
   }
 
   private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
@@ -191,7 +191,7 @@ export class MySQLEngine extends BaseEngine {
         host: host,
         port: port,
         user: this.config.username,
-        password: this.config.password,
+        password: this.config.password ?? undefined,
         ssl: this.getSslOptions(),
       });
 
@@ -222,7 +222,7 @@ export class MySQLEngine extends BaseEngine {
         host: host,
         port: port,
         user: this.config.username,
-        password: this.config.password,
+        password: this.config.password ?? undefined,
         database: this.config.database,
         ssl: this.getSslOptions(),
         connectTimeout: this.config.connectionTimeout || 30000,

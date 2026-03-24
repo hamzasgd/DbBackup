@@ -53,8 +53,8 @@ export class SSHTunnel {
           host: this.config.sshHost!,
           port: this.config.sshPort || 22,
           username: this.config.sshUsername!,
-          privateKey: this.config.sshPrivateKey,
-          passphrase: this.config.sshPassphrase,
+          privateKey: this.config.sshPrivateKey ?? undefined,
+          passphrase: this.config.sshPassphrase ?? undefined,
         });
     });
   }

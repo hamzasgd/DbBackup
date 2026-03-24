@@ -1,97 +1,25 @@
 import { Pool, PoolClient } from 'pg';
-import { CDCTrackerService } from './cdc-tracker.service';
-import { SSHTunnel } from '../ssh.service';
+import { BaseCDCTracker } from './base-cdc-tracker';
 import { prisma } from '../../config/database';
-import { decrypt, decryptIfPresent } from '../crypto.service';
+import { decrypt } from '../crypto.service';
 import { logger } from '../../config/logger';
+import { ConnectionFactory } from '../engines/connection-factory';
 import {
   SyncConfigWithConnections,
   escapeIdentifierPG,
 } from './sync-utils';
-
-interface ChangeLog {
-  id: string;
-  syncConfigId: string;
-  tableName: string;
-  operation: string;
-  primaryKeyValues: any;
-  changeData: any;
-  timestamp: Date;
-  checkpoint: string;
-  origin: string;
-  synchronized: boolean;
-  synchronizedAt: Date | null;
-}
+import type { ChangeLog } from './types';
 
 /**
  * PostgreSQLCDCTracker - Change Data Capture tracker for PostgreSQL databases
- * 
+ *
  * Implements CDC using trigger-based change capture.
  * Logical replication is detected but falls back to triggers when WAL
  * parsing is not implemented.
- * 
+ *
  * Requirements: 2.3, 2.4, 2.5
  */
-export class PostgreSQLCDCTracker implements CDCTrackerService {
-  /** Per-config tracking of whether to use trigger-based CDC */
-  private triggerBasedConfigs = new Map<string, boolean>();
-
-  private isTriggerBased(configId: string): boolean {
-    return this.triggerBasedConfigs.get(configId) ?? true;
-  }
-
-  /**
-   * Create a database connection pool with SSH tunnel support
-   */
-  private async createPool(
-    connectionConfig: any,
-    origin: 'source' | 'target'
-  ): Promise<{ pool: Pool; tunnel: SSHTunnel | null }> {
-    let tunnel: SSHTunnel | null = null;
-
-    try {
-      // Decrypt connection credentials
-      const decryptedConfig = {
-        ...connectionConfig,
-        host: decrypt(connectionConfig.host),
-        username: decrypt(connectionConfig.username),
-        password: decrypt(connectionConfig.password),
-        database: decrypt(connectionConfig.database),
-        sshHost: decryptIfPresent(connectionConfig.sshHost),
-        sshUsername: decryptIfPresent(connectionConfig.sshUsername),
-        sshPrivateKey: decryptIfPresent(connectionConfig.sshPrivateKey),
-        sshPassphrase: decryptIfPresent(connectionConfig.sshPassphrase),
-      };
-
-      if (decryptedConfig.sshEnabled) {
-        tunnel = new SSHTunnel(decryptedConfig);
-        const localPort = await tunnel.connect();
-        (decryptedConfig as any)._localPort = localPort;
-      }
-
-      const host = decryptedConfig.sshEnabled ? '127.0.0.1' : decryptedConfig.host;
-      const port = decryptedConfig.sshEnabled
-        ? (decryptedConfig as any)._localPort || decryptedConfig.port
-        : decryptedConfig.port;
-
-      const pool = new Pool({
-        host,
-        port,
-        user: decryptedConfig.username,
-        password: decryptedConfig.password,
-        database: decryptedConfig.database,
-        ssl: decryptedConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
-        connectionTimeoutMillis: decryptedConfig.connectionTimeout || 30000,
-        max: 5,
-      });
-
-      return { pool, tunnel };
-    } catch (error) {
-      tunnel?.close();
-      throw error;
-    }
-  }
-
+export class PostgreSQLCDCTracker extends BaseCDCTracker {
   /**
    * Check if logical replication is available
    */
@@ -340,7 +268,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       throw new Error('Source connection not found');
     }
 
-    const { pool, tunnel } = await this.createPool(sourceConnection, 'source');
+    const { pool, tunnel } = await ConnectionFactory.createPostgreSQLPool(sourceConnection);
     const client = await pool.connect();
 
     try {
@@ -387,7 +315,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       return; // Connection already deleted
     }
 
-    const { pool, tunnel } = await this.createPool(sourceConnection, 'source');
+    const { pool, tunnel } = await ConnectionFactory.createPostgreSQLPool(sourceConnection);
     const client = await pool.connect();
 
     try {
@@ -437,7 +365,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     sourceConnection: any,
     since: string
   ): Promise<ChangeLog[]> {
-    const { pool, tunnel } = await this.createPool(sourceConnection, 'source');
+    const { pool, tunnel } = await ConnectionFactory.createPostgreSQLPool(sourceConnection);
     const client = await pool.connect();
 
     try {
@@ -496,7 +424,7 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
       throw new Error(`${origin} connection not found`);
     }
 
-    const { pool, tunnel } = await this.createPool(connection, origin);
+    const { pool, tunnel } = await ConnectionFactory.createPostgreSQLPool(connection);
     const client = await pool.connect();
 
     try {
@@ -510,38 +438,4 @@ export class PostgreSQLCDCTracker implements CDCTrackerService {
     }
   }
 
-  /**
-   * Update the checkpoint after successful synchronization
-   * Requirements: 2.5, 7.4
-   */
-  async updateCheckpoint(
-    config: SyncConfigWithConnections,
-    checkpoint: string,
-    origin: 'source' | 'target'
-  ): Promise<void> {
-    const field = origin === 'source' ? 'sourceCheckpoint' : 'targetCheckpoint';
-    
-    await prisma.syncState.update({
-      where: { syncConfigId: config.id },
-      data: { [field]: checkpoint },
-    });
-  }
-
-  /**
-   * Clean up old change log entries
-   * Requirements: 2.7
-   */
-  async cleanupChangeLogs(config: SyncConfigWithConnections, before: Date): Promise<number> {
-    const result = await prisma.changeLog.deleteMany({
-      where: {
-        syncConfigId: config.id,
-        synchronized: true,
-        synchronizedAt: {
-          lt: before,
-        },
-      },
-    });
-
-    return result.count;
-  }
 }

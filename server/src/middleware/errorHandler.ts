@@ -1,17 +1,11 @@
 import { Request, Response, NextFunction } from 'express';
 import { logger } from '../config/logger';
+import {
+  AppError,
+  PrismaError,
+} from '../errors';
 
-export class AppError extends Error {
-  public statusCode: number;
-  public isOperational: boolean;
-
-  constructor(message: string, statusCode: number = 500) {
-    super(message);
-    this.statusCode = statusCode;
-    this.isOperational = true;
-    Error.captureStackTrace(this, this.constructor);
-  }
-}
+export { AppError };
 
 export function errorHandler(
   err: Error,
@@ -19,23 +13,46 @@ export function errorHandler(
   res: Response,
   _next: NextFunction
 ): void {
+  // Handle known error types
   if (err instanceof AppError) {
     res.status(err.statusCode).json({
       success: false,
-      message: err.message,
+      error: {
+        code: err.code,
+        message: err.message,
+      },
     });
     return;
   }
 
-  // Prisma errors
-  if (err.message.includes('Unique constraint')) {
-    res.status(409).json({ success: false, message: 'Resource already exists' });
+  // Handle Prisma errors using code pattern matching (Pxxxx codes)
+  if (isPrismaError(err)) {
+    const prismaError = new PrismaError(err);
+    res.status(prismaError.statusCode).json({
+      success: false,
+      error: {
+        code: prismaError.code,
+        message: prismaError.message,
+      },
+    });
     return;
   }
 
+  // Handle unexpected errors
   logger.error('Unhandled error:', err);
   res.status(500).json({
     success: false,
-    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+    error: {
+      code: 'INTERNAL_ERROR',
+      message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message,
+    },
   });
+}
+
+function isPrismaError(err: unknown): boolean {
+  if (err && typeof err === 'object' && 'code' in err) {
+    const code = (err as { code: unknown }).code;
+    return typeof code === 'string' && code.startsWith('P');
+  }
+  return false;
 }

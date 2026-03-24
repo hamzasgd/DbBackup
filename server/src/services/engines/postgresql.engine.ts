@@ -12,7 +12,7 @@ export class PostgreSQLEngine extends BaseEngine {
   }
 
   private getEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, PGPASSWORD: this.config.password };
+    return { ...process.env, PGPASSWORD: this.config.password ?? undefined };
   }
 
   private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
@@ -245,7 +245,7 @@ export class PostgreSQLEngine extends BaseEngine {
         host,
         port,
         user: this.config.username,
-        password: this.config.password,
+        password: this.config.password ?? undefined,
         database: 'postgres',
         ssl: this.getSslOptions(),
         connectionTimeoutMillis: 10000,
@@ -279,7 +279,7 @@ export class PostgreSQLEngine extends BaseEngine {
         host,
         port,
         user: this.config.username,
-        password: this.config.password,
+        password: this.config.password ?? undefined,
         database: this.config.database,
         ssl: this.getSslOptions(),
         connectionTimeoutMillis: 10000,

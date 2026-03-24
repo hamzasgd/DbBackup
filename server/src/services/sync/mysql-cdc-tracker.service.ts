@@ -1,27 +1,14 @@
 import * as mysql2 from 'mysql2/promise';
-import { CDCTrackerService } from './cdc-tracker.service';
-import { SSHTunnel } from '../ssh.service';
+import { BaseCDCTracker } from './base-cdc-tracker';
 import { prisma } from '../../config/database';
-import { decrypt, decryptIfPresent } from '../crypto.service';
+import { decrypt } from '../crypto.service';
 import { logger } from '../../config/logger';
+import { ConnectionFactory } from '../engines/connection-factory';
 import {
   SyncConfigWithConnections,
   escapeIdentifierMySQL,
 } from './sync-utils';
-
-interface ChangeLog {
-  id: string;
-  syncConfigId: string;
-  tableName: string;
-  operation: string;
-  primaryKeyValues: any;
-  changeData: any;
-  timestamp: Date;
-  checkpoint: string;
-  origin: string;
-  synchronized: boolean;
-  synchronizedAt: Date | null;
-}
+import type { ChangeLog, PrimaryKeyValues, RowData } from './types';
 
 interface BinlogPosition {
   file: string;
@@ -30,72 +17,14 @@ interface BinlogPosition {
 
 /**
  * MySQLCDCTracker - Change Data Capture tracker for MySQL/MariaDB databases
- * 
+ *
  * Implements CDC using trigger-based change capture.
  * Binary log support is detected but falls back to triggers when binlog
  * parsing is not implemented.
- * 
+ *
  * Requirements: 2.2, 2.4, 2.5
  */
-export class MySQLCDCTracker implements CDCTrackerService {
-  /** Per-config tracking of whether to use trigger-based CDC */
-  private triggerBasedConfigs = new Map<string, boolean>();
-
-  private isTriggerBased(configId: string): boolean {
-    return this.triggerBasedConfigs.get(configId) ?? true; // default to trigger-based (safe)
-  }
-
-  /**
-   * Create a database connection with SSH tunnel support
-   */
-  private async createConnection(
-    connectionConfig: any,
-    origin: 'source' | 'target'
-  ): Promise<{ conn: mysql2.Connection; tunnel: SSHTunnel | null }> {
-    let tunnel: SSHTunnel | null = null;
-
-    try {
-      // Decrypt connection credentials
-      const decryptedConfig = {
-        ...connectionConfig,
-        host: decrypt(connectionConfig.host),
-        username: decrypt(connectionConfig.username),
-        password: decrypt(connectionConfig.password),
-        database: decrypt(connectionConfig.database),
-        sshHost: decryptIfPresent(connectionConfig.sshHost),
-        sshUsername: decryptIfPresent(connectionConfig.sshUsername),
-        sshPrivateKey: decryptIfPresent(connectionConfig.sshPrivateKey),
-        sshPassphrase: decryptIfPresent(connectionConfig.sshPassphrase),
-      };
-
-      if (decryptedConfig.sshEnabled) {
-        tunnel = new SSHTunnel(decryptedConfig);
-        const localPort = await tunnel.connect();
-        (decryptedConfig as any)._localPort = localPort;
-      }
-
-      const host = decryptedConfig.sshEnabled ? '127.0.0.1' : decryptedConfig.host;
-      const port = decryptedConfig.sshEnabled
-        ? (decryptedConfig as any)._localPort || decryptedConfig.port
-        : decryptedConfig.port;
-
-      const conn = await mysql2.createConnection({
-        host,
-        port,
-        user: decryptedConfig.username,
-        password: decryptedConfig.password,
-        database: decryptedConfig.database,
-        ssl: decryptedConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
-        connectTimeout: decryptedConfig.connectionTimeout || 30000,
-      });
-
-      return { conn, tunnel };
-    } catch (error) {
-      tunnel?.close();
-      throw error;
-    }
-  }
-
+export class MySQLCDCTracker extends BaseCDCTracker {
   /**
    * Check if binary log is enabled on the MySQL server
    */
@@ -338,7 +267,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
       throw new Error('Source connection not found');
     }
 
-    const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const { connection: conn, tunnel } = await ConnectionFactory.createMySQLConnection(sourceConnection);
     const decryptedDb = decrypt(sourceConnection.database);
 
     try {
@@ -388,7 +317,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
       return; // Connection already deleted
     }
 
-    const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const { connection: conn, tunnel } = await ConnectionFactory.createMySQLConnection(sourceConnection);
     const decryptedDb = decrypt(sourceConnection.database);
 
     try {
@@ -444,7 +373,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
     sourceConnection: any,
     since: string
   ): Promise<ChangeLog[]> {
-    const { conn, tunnel } = await this.createConnection(sourceConnection, 'source');
+    const { connection: conn, tunnel } = await ConnectionFactory.createMySQLConnection(sourceConnection);
     const decryptedDb = decrypt(sourceConnection.database);
 
     try {
@@ -502,7 +431,7 @@ export class MySQLCDCTracker implements CDCTrackerService {
       throw new Error(`${origin} connection not found`);
     }
 
-    const { conn, tunnel } = await this.createConnection(connection, origin);
+    const { connection: conn, tunnel } = await ConnectionFactory.createMySQLConnection(connection);
 
     try {
       // For trigger-based, return current timestamp
@@ -512,40 +441,5 @@ export class MySQLCDCTracker implements CDCTrackerService {
       await conn.end();
       tunnel?.close();
     }
-  }
-
-  /**
-   * Update the checkpoint after successful synchronization
-   * Requirements: 2.5, 7.4
-   */
-  async updateCheckpoint(
-    config: SyncConfigWithConnections,
-    checkpoint: string,
-    origin: 'source' | 'target'
-  ): Promise<void> {
-    const field = origin === 'source' ? 'sourceCheckpoint' : 'targetCheckpoint';
-    
-    await prisma.syncState.update({
-      where: { syncConfigId: config.id },
-      data: { [field]: checkpoint },
-    });
-  }
-
-  /**
-   * Clean up old change log entries
-   * Requirements: 2.7
-   */
-  async cleanupChangeLogs(config: SyncConfigWithConnections, before: Date): Promise<number> {
-    const result = await prisma.changeLog.deleteMany({
-      where: {
-        syncConfigId: config.id,
-        synchronized: true,
-        synchronizedAt: {
-          lt: before,
-        },
-      },
-    });
-
-    return result.count;
   }
 }

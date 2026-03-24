@@ -498,7 +498,7 @@ export class SchemaValidatorService {
         host: config.host,
         port: config.port,
         user: config.username,
-        password: config.password,
+        password: config.password ?? undefined,
         database: config.database,
         ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
       });
@@ -514,7 +514,7 @@ export class SchemaValidatorService {
         host: config.host,
         port: config.port,
         user: config.username,
-        password: config.password,
+        password: config.password ?? undefined,
         database: config.database,
         ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
       });

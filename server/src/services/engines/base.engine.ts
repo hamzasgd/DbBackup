@@ -3,19 +3,19 @@ export interface ConnectionConfig {
   host: string;
   port: number;
   username: string;
-  password?: string;
+  password?: string | null;
   database: string;
   sslEnabled?: boolean;
-  sslCa?: string;
-  sslCert?: string;
-  sslKey?: string;
-  connectionTimeout?: number;
+  sslCa?: string | null;
+  sslCert?: string | null;
+  sslKey?: string | null;
+  connectionTimeout?: number | null;
   sshEnabled?: boolean;
-  sshHost?: string;
-  sshPort?: number;
-  sshUsername?: string;
-  sshPrivateKey?: string;
-  sshPassphrase?: string;
+  sshHost?: string | null;
+  sshPort?: number | null;
+  sshUsername?: string | null;
+  sshPrivateKey?: string | null;
+  sshPassphrase?: string | null;
 }
 
 export interface BackupResult {
