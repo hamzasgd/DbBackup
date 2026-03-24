@@ -103,6 +103,7 @@ model User {
   notificationSettings NotificationSettings?
   storageSettings      StorageSettings?
   syncConfigurations   SyncConfiguration[]
+  credentialAccessLogs CredentialAccessLog[]
   createdAt            DateTime              @default(now())
   updatedAt            DateTime              @updatedAt
 
@@ -153,6 +154,7 @@ model Connection {
   migrationsAsTarget  Migration[]         @relation("MigrationTarget")
   syncConfigsAsSource SyncConfiguration[] @relation("SyncSource")
   syncConfigsAsTarget SyncConfiguration[] @relation("SyncTarget")
+  credentialAccessLogs CredentialAccessLog[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -216,6 +218,23 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@map("audit_logs")
+}
+
+model CredentialAccessLog {
+  id            String   @id @default(uuid())
+  connectionId  String
+  connection    Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action        String   // DECRYPT, TEST, BACKUP, RESTORE, SYNC, MIGRATION, VIEW
+  ipAddress     String?
+  success       Boolean  @default(true)
+  errorMessage  String?
+  timestamp     DateTime @default(now())
+
+  @@index([connectionId, timestamp])
+  @@index([userId, timestamp])
+  @@map("credential_access_logs")
 }
 
 model Migration {
