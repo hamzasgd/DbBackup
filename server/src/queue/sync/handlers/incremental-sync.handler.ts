@@ -1,5 +1,5 @@
 import { Job } from 'bullmq';
-import { SyncDirection } from '@prisma/client';
+import { SyncDirection, ChangeOperation } from '@prisma/client';
 import { prisma } from '../../../config/database';
 import { logger } from '../../../config/logger';
 import { publishProgress } from '../../../services/sse.service';
@@ -86,7 +86,7 @@ export async function executeIncrementalSync(ctx: IncrementalSyncContext): Promi
     },
   });
 
-  let targetChangeLogs: { id: string; tableName: string; primaryKeyValues: Record<string, unknown>; checkpoint: string }[] = [];
+  let targetChangeLogs: { id: string; tableName: string; operation: ChangeOperation; primaryKeyValues: Record<string, unknown>; changeData: Record<string, unknown> | null; checkpoint: string }[] = [];
   if (config.direction === SyncDirection.BIDIRECTIONAL) {
     const targetCheckpoint = config.syncState.targetCheckpoint ?? '';
     const rawTargetLogs = await prisma.changeLog.findMany({
@@ -107,7 +107,9 @@ export async function executeIncrementalSync(ctx: IncrementalSyncContext): Promi
     targetChangeLogs = rawTargetLogs.map(log => ({
       id: log.id,
       tableName: log.tableName,
+      operation: log.operation,
       primaryKeyValues: log.primaryKeyValues as Record<string, unknown>,
+      changeData: log.changeData as Record<string, unknown> | null,
       checkpoint: log.checkpoint,
     }));
   }

@@ -15,8 +15,6 @@ import { TableSkeleton } from '../../components/ui/Skeleton'
 import {
   ActiveMigrationCard,
   MigrationHistoryTable,
-  statusIcon,
-  statusBadge,
 } from './components'
 
 export default function MigrationsPage() {

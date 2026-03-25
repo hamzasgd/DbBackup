@@ -96,13 +96,21 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
     if (!existing) throw new AppError('Connection not found', 404);
 
     const { name, type, host, port, username, password, database, sslEnabled, sshEnabled, ...rest } = req.body;
-    const encrypted = encryptConnection({
-      host: host || decrypt(existing.host),
-      username: username || decrypt(existing.username),
-      password: password || decrypt(existing.password),
-      database: database || decrypt(existing.database),
-      ...rest,
-    });
+
+    // Only encrypt new values, keep existing encrypted values as-is
+    const encrypted = {
+      host: host ? encrypt(host) : existing.host,
+      username: username ? encrypt(username) : existing.username,
+      password: password ? encrypt(password) : existing.password,
+      database: database ? encrypt(database) : existing.database,
+      sslCa: rest.sslCa !== undefined ? encryptIfPresent(rest.sslCa) : existing.sslCa,
+      sslCert: rest.sslCert !== undefined ? encryptIfPresent(rest.sslCert) : existing.sslCert,
+      sslKey: rest.sslKey !== undefined ? encryptIfPresent(rest.sslKey) : existing.sslKey,
+      sshHost: rest.sshHost !== undefined ? encryptIfPresent(rest.sshHost) : existing.sshHost,
+      sshUsername: rest.sshUsername !== undefined ? encryptIfPresent(rest.sshUsername) : existing.sshUsername,
+      sshPrivateKey: rest.sshPrivateKey !== undefined ? encryptIfPresent(rest.sshPrivateKey) : existing.sshPrivateKey,
+      sshPassphrase: rest.sshPassphrase !== undefined ? encryptIfPresent(rest.sshPassphrase) : existing.sshPassphrase,
+    };
 
     const updated = await prisma.connection.update({
       where: { id: req.params.id },

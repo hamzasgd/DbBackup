@@ -1,6 +1,5 @@
 import { MoveRight, Info } from 'lucide-react'
 import { Card, CardContent } from '../../../components/ui/Card'
-import { Badge } from '../../../components/ui/Badge'
 import { useProgressSSE } from '../../../hooks/useProgressSSE'
 import { MigrationStatusIcon, MigrationStatusBadge } from './MigrationStatusBadge'
 import { durationLabel, rowsLabel } from './MigrationLabels'
