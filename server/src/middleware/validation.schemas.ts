@@ -28,7 +28,7 @@ export const connectionSchema = z.object({
   host: z.string().min(1, 'Host is required'),
   port: z.number().int().positive('Port must be a positive integer'),
   username: z.string().min(1, 'Username is required'),
-  password: z.string().min(1, 'Password is required'),
+  password: z.string().optional(),
   database: z.string().min(1, 'Database is required'),
   sslEnabled: z.boolean().optional().default(false),
   sslCa: z.string().optional(),
