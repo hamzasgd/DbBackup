@@ -42,8 +42,15 @@
 
 - **JWT Authentication** — Access + refresh token rotation with race-condition-safe refresh
 - **Encryption at Rest** — AES-256-GCM encryption for all stored credentials and SSH keys
+- **Key Rotation** — Support for multiple encryption keys with version prefixes for seamless rotation
+- **Cloud KMS Integration** — Optional AWS KMS, Azure Key Vault, GCP KMS, or HashiCorp Vault for key management
+- **Credential Access Logging** — Full audit trail of credential access (decrypt, test, backup, restore, sync, migration)
+- **Rate Limiting** — Brute-force protection on auth endpoints + credential access rate limiting
+- **Sensitive Data Redaction** — Logger automatically redacts passwords, tokens, keys, and other secrets
+- **SSL/TLS Enforcement** — Connection validator warns/enforces SSL in production
+- **SSH Key Validation** — Validates SSH private key format and minimum length
+- **Secure Memory Handling** — Credentials cleared from memory after use
 - **SSH Tunnels** — Connect to remote databases through SSH bastion hosts
-- **Rate Limiting** — Brute-force protection on auth endpoints
 - **Helmet & CORS** — Standard Express security hardening
 
 ### Integrations
@@ -70,7 +77,7 @@
 | **Database** | PostgreSQL 16 via Prisma ORM 5 |
 | **Queue** | BullMQ 5 + Redis 7 (via ioredis) |
 | **Auth** | JWT (access + refresh tokens), bcryptjs |
-| **Encryption** | AES-256-GCM (Node.js `crypto`) |
+| **Encryption** | AES-256-GCM (Node.js `crypto`), Key Manager with rotation support, Cloud KMS providers (AWS, Azure, GCP, Vault) |
 | **SSH** | ssh2 library |
 | **Storage** | Local filesystem + AWS S3 SDK v3 |
 | **Notifications** | Nodemailer (SMTP) + Slack webhooks |
@@ -96,7 +103,7 @@ DbBackup/
 │   │   │   ├── connections/    # Manage database connections
 │   │   │   ├── backups/        # Backup list, trigger, verify, download
 │   │   │   ├── schedules/      # Scheduled backup management
-│   │   │   ├── migrations/     # Cross-engine migration
+│   │   │   ├── migrations/     # Cross-engine migration (modular components)
 │   │   │   └── settings/       # Notifications, Storage, Retention, Audit
 │   │   ├── services/           # API service layer (axios)
 │   │   ├── hooks/              # useProgressSSE (SSE hook)
@@ -106,11 +113,15 @@ DbBackup/
 │
 └── server/                     # Express.js backend
     ├── prisma/
-    │   └── schema.prisma       # User, Connection, Backup, Schedule, Migration, AuditLog, etc.
+    │   └── schema.prisma       # User, Connection, Backup, Schedule, Migration, AuditLog, CredentialAccessLog
     └── src/
         ├── controllers/        # Auth, Backup, Connection, Export, Migration, Notification, Restore, Schedule, SSE, Storage
         ├── services/
-        │   ├── engines/        # MySQL, MariaDB, PostgreSQL engine adapters
+        │   ├── engines/        # MySQL, MariaDB, PostgreSQL engine adapters + ConnectionFactory
+        │   ├── crypto/         # Key rotation, CryptoProvider interface, KMS providers (AWS, Azure, GCP, Vault)
+        │   ├── migrations/     # Modular: executors, schema builder, type mapper
+        │   ├── security/      # Credential audit, rate limiting, secure credentials, connection validator
+        │   ├── sync/           # CDC trackers, conflict resolver, sync types
         │   ├── crypto.service.ts
         │   ├── ssh.service.ts
         │   ├── token.service.ts
@@ -122,8 +133,12 @@ DbBackup/
         │   ├── migration.service.ts
         │   └── verification.service.ts
         ├── routes/             # Express route definitions
-        ├── middleware/         # Auth guard, error handler, 404
-        ├── queue/              # BullMQ queues & workers (backup, migration, schedule)
+        ├── middleware/         # Auth guard, error handler, rate limiters, 404
+        ├── queue/              # BullMQ queues & workers
+        │   ├── backup.queue.ts
+        │   ├── migration.queue.ts
+        │   ├── schedule.queue.ts
+        │   └── sync/          # Modular sync queue (handlers, validation, sanitation, execution, utils)
         └── config/             # Prisma client, Redis, Winston logger
 ```
 
@@ -238,7 +253,23 @@ Open http://localhost:5173 and register your first user.
 | `JWT_REFRESH_SECRET` | Secret for signing refresh tokens | — |
 | `JWT_ACCESS_EXPIRES_IN` | Access token TTL | `15m` |
 | `JWT_REFRESH_EXPIRES_IN` | Refresh token TTL | `7d` |
-| `ENCRYPTION_KEY` | AES-256 encryption key (64 hex characters) | — |
+| `ENCRYPTION_KEY` | Legacy AES-256 encryption key (64 hex characters) | — |
+| `ENCRYPTION_KEY_PRIMARY` | Primary AES-256 encryption key (64 hex characters) | — |
+| `ENCRYPTION_KEY_V1, V2...` | Additional keys for key rotation | — |
+| `ENCRYPTION_PROVIDER` | Crypto provider: `local`, `aws-kms`, `azure-keyvault`, `gcp-kms`, `hashicorp-vault` | `local` |
+| `AWS_KMS_KEY_ID` | AWS KMS key ID (when provider is `aws-kms`) | — |
+| `AWS_REGION` | AWS region | `us-east-1` |
+| `AZURE_KEYVAULT_URL` | Azure Key Vault URL (when provider is `azure-keyvault`) | — |
+| `AZURE_KEYVAULT_KEY_NAME` | Key name | `dbbackup-encryption` |
+| `GCP_PROJECT_ID` | GCP project ID (when provider is `gcp-kms`) | — |
+| `GCP_KMS_LOCATION` | KMS location | `global` |
+| `GCP_KMS_KEY_RING` | KMS key ring | `dbbackup` |
+| `GCP_KMS_KEY_NAME` | Key name | `dbbackup-encryption` |
+| `VAULT_ADDR` | HashiCorp Vault address (when provider is `hashicorp-vault`) | `http://localhost:8200` |
+| `VAULT_TOKEN` | Vault token | — |
+| `VAULT_KEY_NAME` | Transit key name | `dbbackup-encryption` |
+| `VAULT_MOUNT_PATH` | Transit mount path | `transit` |
+| `ENFORCE_SSL` | Enforce SSL for database connections in production | `false` |
 | `REDIS_HOST` | Redis host | `localhost` |
 | `REDIS_PORT` | Redis port | `6379` |
 | `REDIS_PASSWORD` | Redis password | — |
@@ -308,6 +339,10 @@ Open http://localhost:5173 and register your first user.
 |---|---|---|
 | `GET` | `/api/migrations` | List all migrations |
 | `POST` | `/api/migrations` | Start a migration |
+| `GET` | `/api/migrations/:id` | Get migration details |
+| `GET` | `/api/migrations/:id/progress` | Get migration progress (SSE) |
+| `POST` | `/api/migrations/:id/verify` | Verify migration results |
+| `DELETE` | `/api/migrations/:id` | Delete a migration |
 
 ### Exports
 
