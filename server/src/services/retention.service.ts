@@ -100,27 +100,73 @@ export async function enforceRetentionForConnection(
 }
 
 /**
- * Run retention across ALL connections for a given user (daily sweep).
+ * Fallback policy for connections without any schedule.
+ * Configurable via DEFAULT_RETENTION_DAYS / DEFAULT_RETENTION_COUNT (0 or unset = rule disabled).
  */
-export async function runGlobalRetentionSweep(userId: string): Promise<RetentionResult[]> {
+function envDefaultRetention(): { retentionDays: number; retentionCount: number | null } {
+  const days = parseInt(process.env.DEFAULT_RETENTION_DAYS ?? '30', 10);
+  const count = parseInt(process.env.DEFAULT_RETENTION_COUNT ?? '0', 10);
+  return {
+    retentionDays: Number.isFinite(days) && days > 0 ? days : 0,
+    retentionCount: Number.isFinite(count) && count > 0 ? count : null,
+  };
+}
+
+/**
+ * Effective retention policy for a connection.
+ * When multiple schedules exist, the strictest rule of each kind wins
+ * (smallest retentionDays / smallest retentionCount) so no schedule's
+ * policy is silently ignored.
+ */
+export async function getRetentionPolicy(
+  connectionId: string,
+): Promise<{ retentionDays: number; retentionCount: number | null }> {
   const schedules = await prisma.schedule.findMany({
-    where: { connection: { userId } },
-    select: {
-      connectionId: true,
-      retentionDays: true,
-      retentionCount: true,
-    },
+    where: { connectionId },
+    select: { retentionDays: true, retentionCount: true },
+  });
+
+  if (schedules.length === 0) {
+    return envDefaultRetention();
+  }
+
+  const days = schedules.map((s) => s.retentionDays).filter((d) => d > 0);
+  const counts = schedules
+    .map((s) => s.retentionCount)
+    .filter((c): c is number => typeof c === 'number' && c > 0);
+
+  return {
+    retentionDays: days.length ? Math.min(...days) : 0,
+    retentionCount: counts.length ? Math.min(...counts) : null,
+  };
+}
+
+/**
+ * Run retention across ALL connections that have completed backups (daily sweep).
+ * Covers scheduled connections (schedule policy) and manual-only connections (env defaults).
+ */
+export async function runGlobalRetentionSweep(): Promise<RetentionResult[]> {
+  const connections = await prisma.backup.findMany({
+    where: { status: 'COMPLETED' },
+    select: { connectionId: true, connection: { select: { userId: true } } },
+    distinct: ['connectionId'],
   });
 
   const results: RetentionResult[] = [];
-  for (const s of schedules) {
-    const result = await enforceRetentionForConnection(
-      s.connectionId,
-      s.retentionDays,
-      s.retentionCount,
-      userId,
-    );
-    results.push(result);
+  for (const { connectionId, connection } of connections) {
+    const policy = await getRetentionPolicy(connectionId);
+    if (policy.retentionDays <= 0 && !policy.retentionCount) continue;
+    try {
+      const result = await enforceRetentionForConnection(
+        connectionId,
+        policy.retentionDays,
+        policy.retentionCount,
+        connection.userId,
+      );
+      results.push(result);
+    } catch (err) {
+      logger.warn(`Retention sweep failed for connection ${connectionId}:`, err);
+    }
   }
   return results;
 }

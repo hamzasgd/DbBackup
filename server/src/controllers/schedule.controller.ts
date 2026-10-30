@@ -74,7 +74,7 @@ export async function getSchedules(req: AuthRequest, res: Response, next: NextFu
 
 export async function createSchedule(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { connectionId, name, frequency, cronExpression, retentionDays } = req.body;
+    const { connectionId, name, frequency, cronExpression, retentionDays, retentionCount } = req.body;
 
     const conn = await prisma.connection.findFirst({
       where: { id: connectionId, userId: req.user!.userId },
@@ -90,6 +90,7 @@ export async function createSchedule(req: AuthRequest, res: Response, next: Next
         cronExpression,
         nextRunAt: getNextRunAt(cronExpression),
         retentionDays: retentionDays || 30,
+        retentionCount: retentionCount ?? null,
         isActive: true,
       },
     });
@@ -109,14 +110,14 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
     });
     if (!existing) throw new AppError('Schedule not found', 404);
 
-    const { name, frequency, cronExpression, isActive, retentionDays } = req.body;
+    const { name, frequency, cronExpression, isActive, retentionDays, retentionCount } = req.body;
     const nextRunAt = isActive === false
       ? null
       : (cronExpression ? getNextRunAt(cronExpression) : getNextRunAt(existing.cronExpression));
 
     const updated = await prisma.schedule.update({
       where: { id: req.params.id },
-      data: { name, frequency, cronExpression, isActive, retentionDays, nextRunAt },
+      data: { name, frequency, cronExpression, isActive, retentionDays, retentionCount, nextRunAt },
     });
 
     await removeScheduleJob(req.params.id);

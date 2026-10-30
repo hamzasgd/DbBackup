@@ -23,6 +23,10 @@ const schema = z.object({
   frequency: z.enum(['HOURLY', 'DAILY', 'WEEKLY', 'MONTHLY', 'CUSTOM']),
   cronExpression: z.string().min(1, 'Cron expression is required'),
   retentionDays: z.coerce.number().int().min(1).max(365).default(30),
+  retentionCount: z.preprocess(
+    (v) => (v === '' || v === null || v === undefined ? undefined : Number(v)),
+    z.number().int().min(1, 'Must be at least 1').max(1000).optional(),
+  ),
 })
 type FormData = z.infer<typeof schema>
 
@@ -47,7 +51,7 @@ export default function SchedulesPage() {
 
   const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30 },
+    defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined },
   })
 
   const frequency = watch('frequency')
@@ -127,7 +131,7 @@ export default function SchedulesPage() {
                 <p><span className="font-medium text-gray-700">Connection:</span> {s.connection?.name} ({dbTypeLabel(s.connection?.type ?? '')})</p>
                 <p><span className="font-medium text-gray-700">Frequency:</span> {s.frequency}</p>
                 <p><span className="font-medium text-gray-700">Cron:</span> <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{s.cronExpression}</code></p>
-                <p><span className="font-medium text-gray-700">Retention:</span> {s.retentionDays} days</p>
+                <p><span className="font-medium text-gray-700">Retention:</span> {s.retentionDays} days{s.retentionCount ? ` · keep last ${s.retentionCount}` : ''}</p>
                 {s.lastRunAt && <p><span className="font-medium text-gray-700">Last run:</span> {formatDate(s.lastRunAt)}</p>}
                 {s.nextRunAt && s.isActive && <p><span className="font-medium text-gray-700">Next run:</span> {formatDate(s.nextRunAt)}</p>}
               </div>
@@ -200,7 +204,17 @@ export default function SchedulesPage() {
             error={errors.cronExpression?.message}
             {...register('cronExpression')}
           />
-          <Input label="Retention (days)" type="number" defaultValue={30} error={errors.retentionDays?.message} {...register('retentionDays')} />
+          <div className="grid grid-cols-2 gap-4">
+            <Input label="Retention (days)" type="number" defaultValue={30} error={errors.retentionDays?.message} {...register('retentionDays')} />
+            <Input
+              label="Keep last N (optional)"
+              type="number"
+              placeholder="e.g. 5"
+              hint="Delete older backups beyond the newest N"
+              error={errors.retentionCount?.message}
+              {...register('retentionCount')}
+            />
+          </div>
           <div className="flex gap-2 justify-end">
             <Button type="button" variant="outline" onClick={closeModal}>Cancel</Button>
             <Button type="submit" loading={isSubmitting || createMutation.isPending || updateMutation.isPending}>

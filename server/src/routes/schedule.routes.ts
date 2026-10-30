@@ -8,7 +8,8 @@ const router = Router();
 router.use(authenticate);
 router.get('/', getSchedules);
 router.post('/', validate(scheduleSchema), createSchedule);
-router.put('/:id', validate(scheduleSchema), updateSchedule);
+// Partial schema: updates may send only some fields (e.g. { isActive } from the Pause/Resume toggle)
+router.put('/:id', validate(scheduleSchema.partial()), updateSchedule);
 router.delete('/:id', deleteSchedule);
 
 export default router;

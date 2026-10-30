@@ -2,6 +2,7 @@ import { createBackupWorker } from './backup.queue';
 import { createScheduleWorker } from './schedule.queue';
 import { createMigrationWorker } from './migration.queue';
 import { createSyncWorker } from './sync.queue';
+import { createRetentionWorker, scheduleRetentionSweep } from './retention.queue';
 import { logger } from '../config/logger';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
 import { PrismaClient } from '@prisma/client';
@@ -10,18 +11,28 @@ let backupWorker: ReturnType<typeof createBackupWorker>;
 let scheduleWorker: ReturnType<typeof createScheduleWorker>;
 let migrationWorker: ReturnType<typeof createMigrationWorker>;
 let syncWorker: ReturnType<typeof createSyncWorker>;
+let retentionWorker: ReturnType<typeof createRetentionWorker>;
 
 export async function startWorkers(): Promise<void> {
   backupWorker = createBackupWorker();
   scheduleWorker = createScheduleWorker();
   migrationWorker = createMigrationWorker();
   syncWorker = createSyncWorker();
+  retentionWorker = createRetentionWorker();
 
   logger.info('✅ Queue workers started');
   logger.info(`Backup worker id=${backupWorker.id}`);
   logger.info(`Schedule worker id=${scheduleWorker.id}`);
   logger.info(`Migration worker id=${migrationWorker.id}`);
   logger.info(`Sync worker id=${syncWorker.id}`);
+  logger.info(`Retention worker id=${retentionWorker.id}`);
+
+  // Register the daily global retention sweep
+  try {
+    await scheduleRetentionSweep();
+  } catch (error) {
+    logger.error('Failed to schedule retention sweep:', error);
+  }
 
   // Recover active real-time sync configurations after restart
   try {
@@ -37,5 +48,6 @@ export async function stopWorkers(): Promise<void> {
   await scheduleWorker.close();
   await migrationWorker.close();
   await syncWorker.close();
+  await retentionWorker.close();
   logger.info('Workers stopped gracefully');
 }

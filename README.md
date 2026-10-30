@@ -274,6 +274,9 @@ Open http://localhost:5173 and register your first user.
 | `REDIS_PORT` | Redis port | `6379` |
 | `REDIS_PASSWORD` | Redis password | — |
 | `BACKUP_STORAGE_PATH` | Local backup directory | `./backups` |
+| `DEFAULT_RETENTION_DAYS` | Fallback retention (days) for connections without a schedule (0 = disabled) | `30` |
+| `DEFAULT_RETENTION_COUNT` | Fallback "keep last N" for connections without a schedule (0 = disabled) | — |
+| `RETENTION_SWEEP_CRON` | Cron pattern for the global retention sweep | `30 3 * * *` |
 | `STORAGE_TYPE` | Storage backend (`local` or `s3`) | `local` |
 | `CLIENT_URL` | Frontend URL (for CORS) | `http://localhost:5173` |
 | `S3_BUCKET` | S3 bucket name | — |

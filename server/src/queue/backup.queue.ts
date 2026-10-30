@@ -8,7 +8,7 @@ import { verifyBackup } from '../services/verification.service';
 import { publishProgress, BACKUP_PROGRESS_CHANNEL } from '../services/sse.service';
 import { notify } from '../services/notification.service';
 import { uploadToS3 } from '../services/storage.service';
-import { enforceRetentionForConnection } from '../services/retention.service';
+import { enforceRetentionForConnection, getRetentionPolicy } from '../services/retention.service';
 import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { sanitizeConfig } from '../utils/sanitize';
 
@@ -169,15 +169,13 @@ export function createBackupWorker(): Worker<BackupJobData> {
           }
 
           // ── Step 6: Enforce retention ──
-          const schedule = await prisma.schedule.findFirst({
-            where: { connectionId },
-            select: { retentionDays: true, retentionCount: true },
-          });
-          if (schedule) {
+          // Schedule policy if one exists, otherwise env-default fallback
+          const policy = await getRetentionPolicy(connectionId);
+          if (policy.retentionDays > 0 || policy.retentionCount) {
             void enforceRetentionForConnection(
               connectionId,
-              schedule.retentionDays,
-              schedule.retentionCount,
+              policy.retentionDays,
+              policy.retentionCount,
               userId,
             ).catch((err) => logger.warn('Retention enforcement failed:', err));
           }

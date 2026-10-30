@@ -9,6 +9,7 @@ export interface Schedule {
   cronExpression: string
   isActive: boolean
   retentionDays: number
+  retentionCount?: number | null
   lastRunAt?: string
   nextRunAt?: string
   history?: Array<{
@@ -25,7 +26,7 @@ export interface Schedule {
 export const schedulesApi = {
   getAll: () =>
     api.get<{ success: boolean; data: Schedule[] }>('/schedules'),
-  create: (data: { connectionId: string; name: string; frequency: string; cronExpression: string; retentionDays?: number }) =>
+  create: (data: { connectionId: string; name: string; frequency: string; cronExpression: string; retentionDays?: number; retentionCount?: number }) =>
     api.post<{ success: boolean; data: Schedule }>('/schedules', data),
   update: (id: string, data: Partial<Schedule>) =>
     api.put<{ success: boolean; data: Schedule }>(`/schedules/${id}`, data),
