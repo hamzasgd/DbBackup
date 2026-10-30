@@ -1,11 +1,16 @@
 import { Response, NextFunction } from 'express';
+import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
-import { engineFactory } from '../services/engines/engine.factory';
-import { logAudit } from '../services/audit.service';
+import { addRestoreJob } from '../queue/restore.queue';
 
+/**
+ * Validate the restore request and enqueue it.
+ * The heavy work (S3 download + engine restore) runs in the restore worker —
+ * long restores no longer block (and time out) the HTTP request.
+ * Progress is streamed via GET /api/restore/:jobId/progress (SSE).
+ */
 export async function restoreBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { backupId, targetConnectionId, targetDatabase } = req.body;
@@ -22,26 +27,19 @@ export async function restoreBackup(req: AuthRequest, res: Response, next: NextF
     });
     if (!conn) throw new AppError('Target connection not found', 404);
 
-    const engine = engineFactory({
-      type: conn.type,
-      host: decrypt(conn.host),
-      port: conn.port,
-      username: decrypt(conn.username),
-      password: decrypt(conn.password),
-      database: decrypt(conn.database),
-      sslEnabled: conn.sslEnabled,
-      sshEnabled: conn.sshEnabled,
-      sshHost: decryptIfPresent(conn.sshHost) || undefined,
-      sshPort: conn.sshPort || 22,
-      sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-      sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-      sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
+    const jobId = uuidv4();
+    await addRestoreJob({
+      jobId,
+      backupId,
+      userId: req.user!.userId,
+      targetConnectionId: targetConnectionId || undefined,
+      targetDatabase,
     });
 
-    await engine.restore(backup.filePath, targetDatabase);
-
-    await logAudit(req.user!.userId, 'RESTORE', 'backup', { backupId, targetConnectionId: connId, targetDatabase }, req.ip);
-
-    res.json({ success: true, message: 'Database restored successfully' });
+    res.status(202).json({
+      success: true,
+      data: { jobId },
+      message: 'Restore job queued',
+    });
   } catch (err) { next(err); }
 }

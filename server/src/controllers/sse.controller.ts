@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { streamSSE, BACKUP_PROGRESS_CHANNEL, MIGRATION_PROGRESS_CHANNEL } from '../services/sse.service';
+import { streamSSE, BACKUP_PROGRESS_CHANNEL, MIGRATION_PROGRESS_CHANNEL, RESTORE_PROGRESS_CHANNEL } from '../services/sse.service';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 
@@ -23,5 +23,15 @@ export async function migrationProgressSSE(req: AuthRequest, res: Response, next
     if (!migration) { next(new AppError('Migration not found', 404)); return; }
 
     streamSSE(res, MIGRATION_PROGRESS_CHANNEL(req.params.id));
+  } catch (err) { next(err); }
+}
+
+/**
+ * Restore progress SSE. The channel is keyed by the authenticated user's id,
+ * so ownership is enforced by the channel itself (no DB lookup needed).
+ */
+export async function restoreProgressSSE(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    streamSSE(res, RESTORE_PROGRESS_CHANNEL(req.user!.userId, req.params.jobId));
   } catch (err) { next(err); }
 }

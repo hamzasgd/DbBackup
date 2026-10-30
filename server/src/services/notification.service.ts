@@ -11,6 +11,8 @@ export type NotificationEventType =
   | 'MIGRATION_FAILED'
   | 'VERIFICATION_FAILED'
   | 'RETENTION_CLEANUP'
+  | 'RESTORE_COMPLETED'
+  | 'RESTORE_FAILED'
   | 'SYNC_COMPLETED'
   | 'SYNC_FAILED';
 

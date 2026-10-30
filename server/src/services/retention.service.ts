@@ -1,27 +1,12 @@
-import fs from 'fs';
-import path from 'path';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 import { notify } from './notification.service';
+import { deleteBackupArtifact } from './storage.service';
 
 export interface RetentionResult {
   connectionId: string;
   deleted: number;
   freedBytes: bigint;
-}
-
-function deleteBackupFile(filePath: string): void {
-  if (!filePath || filePath === 'pending') return;
-  try {
-    const stat = fs.statSync(filePath);
-    if (stat.isDirectory()) {
-      fs.rmSync(filePath, { recursive: true, force: true });
-    } else {
-      fs.unlinkSync(filePath);
-    }
-  } catch (err) {
-    logger.debug('Failed to delete backup file:', err);
-  }
 }
 
 /**
@@ -45,9 +30,9 @@ export async function enforceRetentionForConnection(
         status: 'COMPLETED',
         createdAt: { lt: cutoff },
       },
-      select: { id: true, filePath: true, fileSize: true },
+      select: { id: true },
     });
-    old.forEach((b: { id: string; filePath: string; fileSize: bigint }) => toDelete.add(b.id));
+    old.forEach((b: { id: string }) => toDelete.add(b.id));
   }
 
   // Rule 2: keep only last N
@@ -55,9 +40,9 @@ export async function enforceRetentionForConnection(
     const all = await prisma.backup.findMany({
       where: { connectionId, status: 'COMPLETED' },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, filePath: true, fileSize: true },
+      select: { id: true },
     });
-    all.slice(retentionCount).forEach((b: { id: string; filePath: string; fileSize: bigint }) => toDelete.add(b.id));
+    all.slice(retentionCount).forEach((b: { id: string }) => toDelete.add(b.id));
   }
 
   if (toDelete.size === 0) {
@@ -66,12 +51,15 @@ export async function enforceRetentionForConnection(
 
   const records = await prisma.backup.findMany({
     where: { id: { in: [...toDelete] } },
-    select: { id: true, filePath: true, fileSize: true },
+    select: { id: true, filePath: true, fileSize: true, storageType: true, storageKey: true },
   });
 
   let freedBytes = 0n;
   for (const r of records) {
-    deleteBackupFile(r.filePath);
+    // Deletes the S3 object (if any) AND the local file
+    await deleteBackupArtifact(userId, r).catch((err) =>
+      logger.warn(`Artifact cleanup failed for backup ${r.id}:`, err),
+    );
     freedBytes += BigInt(r.fileSize);
   }
 

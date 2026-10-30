@@ -8,7 +8,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { decrypt } from '../services/crypto.service';
 import { addBackupJob } from '../queue/backup.queue';
 import { verifyBackup } from '../services/verification.service';
-import { streamFromS3 } from '../services/storage.service';
+import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempFile } from '../services/storage.service';
 import { logAudit } from '../services/audit.service';
 
 const STORAGE_PATH = process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
@@ -106,15 +106,8 @@ export async function deleteBackup(req: AuthRequest, res: Response, next: NextFu
     });
     if (!backup) throw new AppError('Backup not found', 404);
 
-    // Delete file (or directory for PostgreSQL DIRECTORY format)
-    if (fs.existsSync(backup.filePath)) {
-      const stat = fs.statSync(backup.filePath);
-      if (stat.isDirectory()) {
-        fs.rmSync(backup.filePath, { recursive: true, force: true });
-      } else {
-        fs.unlinkSync(backup.filePath);
-      }
-    }
+    // Delete S3 object (if any) and local file/directory
+    await deleteBackupArtifact(req.user!.userId, backup);
 
     await prisma.backup.delete({ where: { id: backup.id } });
     res.json({ success: true, message: 'Backup deleted' });
@@ -150,19 +143,25 @@ export async function verifyBackupEndpoint(req: AuthRequest, res: Response, next
     });
     if (!backup) throw new AppError('Backup not found', 404);
     if (backup.status !== 'COMPLETED') throw new AppError('Only completed backups can be verified', 400);
-    if (!fs.existsSync(backup.filePath)) throw new AppError('Backup file not found on disk', 404);
 
-    const result = await verifyBackup(backup.filePath, backup.dbType, backup.format);
+    // Works for local backups and S3 backups whose local copy was deleted
+    // (downloads to a temp file first)
+    const { localPath, downloaded } = await ensureLocalBackupFile(req.user!.userId, backup);
+    try {
+      const result = await verifyBackup(localPath, backup.dbType, backup.format);
 
-    await prisma.backup.update({
-      where: { id: backup.id },
-      data: {
-        verified: result.valid,
-        verifiedAt: new Date(),
-        checksum: result.checksum || null,
-      },
-    });
+      await prisma.backup.update({
+        where: { id: backup.id },
+        data: {
+          verified: result.valid,
+          verifiedAt: new Date(),
+          checksum: result.checksum || null,
+        },
+      });
 
-    res.json({ success: true, data: result });
+      res.json({ success: true, data: result });
+    } finally {
+      if (downloaded) cleanupTempFile(localPath);
+    }
   } catch (err) { next(err); }
 }

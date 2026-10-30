@@ -43,6 +43,7 @@ export const backupsApi = {
 }
 
 export const restoreApi = {
+  // Returns 202 with a jobId — track progress via SSE at /restore/:jobId/progress
   restore: (data: { backupId: string; targetConnectionId?: string; targetDatabase?: string }) =>
-    api.post('/restore', data),
+    api.post<{ success: boolean; data: { jobId: string }; message: string }>('/restore', data),
 }

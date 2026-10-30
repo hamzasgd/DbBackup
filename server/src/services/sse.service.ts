@@ -20,6 +20,8 @@ function getPublisher(): Redis {
 
 export const BACKUP_PROGRESS_CHANNEL = (id: string) => `backup:progress:${id}`;
 export const MIGRATION_PROGRESS_CHANNEL = (id: string) => `migration:progress:${id}`;
+// Keyed by userId so only the owner can subscribe to a restore job's channel
+export const RESTORE_PROGRESS_CHANNEL = (userId: string, jobId: string) => `restore:progress:${userId}:${jobId}`;
 
 export async function publishProgress(channel: string, payload: object): Promise<void> {
   const pub = getPublisher();

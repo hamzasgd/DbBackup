@@ -35,13 +35,16 @@ export async function triggerSync(
       throw new AppError('Access denied', 403);
     }
 
-    // Validate tables parameter if provided
-    if (tables !== undefined && !Array.isArray(tables)) {
-      throw new AppError('tables must be an array of table names', 400);
+    // Per-run table filtering is not supported yet — reject explicitly instead
+    // of silently ignoring the parameter. Configure tables via the sync
+    // configuration's includeTables setting instead.
+    if (tables !== undefined) {
+      throw new AppError(
+        'Per-run table filtering is not supported. Use the configuration\'s includeTables setting to select tables.',
+        400,
+      );
     }
 
-    // TODO: Support table filtering in triggerSync
-    // For now, we trigger sync for all configured tables
     const jobId = await syncEngineService.triggerSync(id, false);
 
     res.status(202).json({
@@ -81,13 +84,16 @@ export async function triggerFullSync(
       throw new AppError('Access denied', 403);
     }
 
-    // Validate tables parameter if provided
-    if (tables !== undefined && !Array.isArray(tables)) {
-      throw new AppError('tables must be an array of table names', 400);
+    // Per-run table filtering is not supported yet — reject explicitly instead
+    // of silently ignoring the parameter. Configure tables via the sync
+    // configuration's includeTables setting instead.
+    if (tables !== undefined) {
+      throw new AppError(
+        'Per-run table filtering is not supported. Use the configuration\'s includeTables setting to select tables.',
+        400,
+      );
     }
 
-    // TODO: Support table filtering in performFullSync
-    // For now, we trigger full sync for all configured tables
     const jobId = await syncEngineService.performFullSync(id);
 
     res.status(202).json({

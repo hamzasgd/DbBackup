@@ -1,7 +1,9 @@
 import fs from 'fs';
 import path from 'path';
+import os from 'os';
 import crypto from 'crypto';
 import { Readable } from 'stream';
+import { pipeline } from 'stream/promises';
 import {
   S3Client,
   GetObjectCommand,
@@ -194,6 +196,83 @@ export async function deleteFromS3(userId: string, storageKey: string): Promise<
 
   await s3.send(new DeleteObjectCommand({ Bucket: settings.bucket, Key: storageKey }));
   logger.info(`☁️  Deleted from S3: ${storageKey}`);
+}
+
+/**
+ * Download an S3 object to a local file.
+ */
+export async function downloadFromS3(userId: string, storageKey: string, destPath: string): Promise<string> {
+  const body = await streamFromS3(userId, storageKey);
+  await pipeline(body, fs.createWriteStream(destPath));
+  logger.info(`☁️  Downloaded from S3: ${storageKey} -> ${destPath}`);
+  return destPath;
+}
+
+/** Minimal shape of a Backup record needed for artifact cleanup */
+export interface BackupArtifact {
+  storageType?: string | null;
+  storageKey?: string | null;
+  filePath: string;
+}
+
+/**
+ * Delete every artifact of a backup: the S3 object (if S3-stored) and the local
+ * file/directory. Used by manual delete and retention cleanup so S3 objects
+ * are never orphaned.
+ */
+export async function deleteBackupArtifact(userId: string, backup: BackupArtifact): Promise<void> {
+  if (backup.storageType === 'S3' && backup.storageKey) {
+    try {
+      await deleteFromS3(userId, backup.storageKey);
+    } catch (err) {
+      logger.warn(`Failed to delete S3 object ${backup.storageKey}:`, err);
+    }
+  }
+
+  if (!backup.filePath || backup.filePath === 'pending') return;
+  try {
+    const stat = fs.statSync(backup.filePath);
+    if (stat.isDirectory()) {
+      fs.rmSync(backup.filePath, { recursive: true, force: true });
+    } else {
+      fs.unlinkSync(backup.filePath);
+    }
+  } catch (err) {
+    logger.debug('Failed to delete local backup file:', err);
+  }
+}
+
+/**
+ * Resolve a locally-readable path for a backup file.
+ * Falls back to downloading from S3 into a temp dir when the local copy is gone
+ * (e.g. deleteLocal=true). Caller is responsible for deleting the returned
+ * temp file when `downloaded` is true.
+ */
+export async function ensureLocalBackupFile(
+  userId: string,
+  backup: BackupArtifact & { fileName?: string | null },
+): Promise<{ localPath: string; downloaded: boolean }> {
+  if (backup.filePath && backup.filePath !== 'pending' && fs.existsSync(backup.filePath)) {
+    return { localPath: backup.filePath, downloaded: false };
+  }
+  if (backup.storageType !== 'S3' || !backup.storageKey) {
+    throw new Error('Backup file not found on disk');
+  }
+
+  const name = backup.fileName || path.basename(backup.storageKey);
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-restore-'));
+  const destPath = path.join(tempDir, name.endsWith('.tar') || name.includes('.') ? name : `${name}.dump`);
+  await downloadFromS3(userId, backup.storageKey, destPath);
+  return { localPath: destPath, downloaded: true };
+}
+
+/** Remove the temp dir produced by ensureLocalBackupFile */
+export function cleanupTempFile(tempPath: string): void {
+  try {
+    fs.rmSync(path.dirname(tempPath), { recursive: true, force: true });
+  } catch {
+    /* best effort */
+  }
 }
 
 /**

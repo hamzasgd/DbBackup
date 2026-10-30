@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff } from 'lucide-react'
 import { backupsApi, restoreApi, type BackupFormat, type Backup } from '../../services/backups.service'
@@ -202,6 +202,7 @@ export default function BackupsPage() {
   const [triggerConnId, setTriggerConnId] = useState('')
   const [backupFormat, setBackupFormat] = useState<BackupFormat>('COMPRESSED_SQL')
   const [restoreTargetConn, setRestoreTargetConn] = useState('')
+  const [restoreJobId, setRestoreJobId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
@@ -242,11 +243,30 @@ export default function BackupsPage() {
     onError: () => toast.error('Failed to delete backup'),
   })
 
+  // Restore runs async in a queue — track it via SSE
+  const restoreProgress = useProgressSSE(
+    restoreJobId ? `/restore/${restoreJobId}/progress` : null,
+    restoreJobId !== null,
+  )
+
   const restoreMutation = useMutation({
     mutationFn: () => restoreApi.restore({ backupId: selectedBackup!, targetConnectionId: restoreTargetConn || undefined }),
-    onSuccess: () => { toast.success('Restore completed successfully'); setRestoreModal(false) },
-    onError: () => toast.error('Restore failed'),
+    onSuccess: (res) => { setRestoreJobId(res.data.data.jobId) },
+    onError: () => toast.error('Failed to queue restore'),
   })
+
+  useEffect(() => {
+    if (!restoreJobId || !restoreProgress?.status) return
+    if (restoreProgress.status === 'COMPLETED') {
+      toast.success('Restore completed successfully')
+      setRestoreJobId(null)
+      setRestoreModal(false)
+    } else if (restoreProgress.status === 'FAILED') {
+      toast.error(`Restore failed: ${restoreProgress.error ?? 'unknown error'}`)
+      setRestoreJobId(null)
+      setRestoreModal(false)
+    }
+  }, [restoreProgress, restoreJobId])
 
   return (
     <div className="space-y-6">
@@ -364,21 +384,40 @@ export default function BackupsPage() {
 
       <Modal open={restoreModal} onClose={() => setRestoreModal(false)} title="Restore Backup">
         <div className="space-y-4">
-          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
-            \u26a0\ufe0f This will overwrite the target database. Make sure you have a backup before proceeding.
-          </div>
-          <Select
-            label="Restore to connection"
-            options={connections.map((c) => ({ label: `${c.name} (${dbTypeLabel(c.type)})`, value: c.id }))}
-            value={restoreTargetConn}
-            onChange={(e) => setRestoreTargetConn(e.target.value)}
-          />
-          <div className="flex gap-2 justify-end">
-            <Button variant="outline" onClick={() => setRestoreModal(false)}>Cancel</Button>
-            <Button variant="danger" onClick={() => restoreMutation.mutate()} loading={restoreMutation.isPending}>
-              <RotateCcw className="h-4 w-4" />Restore
-            </Button>
-          </div>
+          {restoreJobId ? (
+            <div className="space-y-3 py-2">
+              <div className="flex items-center gap-3 text-sm text-gray-600">
+                <RotateCcw className="h-4 w-4 animate-spin" />
+                Restore in progress — you can safely close this dialog, the job keeps running.
+              </div>
+              {restoreProgress?.error && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
+                  {restoreProgress.error}
+                </div>
+              )}
+              <div className="flex justify-end">
+                <Button variant="outline" onClick={() => { setRestoreJobId(null); setRestoreModal(false) }}>Close</Button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
+                ⚠️ This will overwrite the target database. Make sure you have a backup before proceeding.
+              </div>
+              <Select
+                label="Restore to connection"
+                options={connections.map((c) => ({ label: `${c.name} (${dbTypeLabel(c.type)})`, value: c.id }))}
+                value={restoreTargetConn}
+                onChange={(e) => setRestoreTargetConn(e.target.value)}
+              />
+              <div className="flex gap-2 justify-end">
+                <Button variant="outline" onClick={() => setRestoreModal(false)}>Cancel</Button>
+                <Button variant="danger" onClick={() => restoreMutation.mutate()} loading={restoreMutation.isPending}>
+                  <RotateCcw className="h-4 w-4" />Restore
+                </Button>
+              </div>
+            </>
+          )}
         </div>
       </Modal>
 

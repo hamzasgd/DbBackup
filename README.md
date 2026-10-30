@@ -247,7 +247,7 @@ Open http://localhost:5173 and register your first user.
 
 | Variable | Description | Default |
 |---|---|---|
-| `PORT` | API server port | `5000` |
+| `PORT` | API server port | `3001` |
 | `DATABASE_URL` | PostgreSQL connection string | — |
 | `JWT_ACCESS_SECRET` | Secret for signing access tokens | — |
 | `JWT_REFRESH_SECRET` | Secret for signing refresh tokens | — |
@@ -316,16 +316,18 @@ Open http://localhost:5173 and register your first user.
 | Method | Endpoint | Description |
 |---|---|---|
 | `GET` | `/api/backups` | List all backups |
-| `POST` | `/api/backups/trigger` | Trigger a manual backup |
-| `POST` | `/api/backups/:id/verify` | Verify backup integrity |
-| `GET` | `/api/backups/:id/download` | Download backup file |
-| `DELETE` | `/api/backups/:id` | Delete a backup |
+| `POST` | `/api/backups` | Trigger a manual backup |
+| `GET` | `/api/backups/:id/progress` | Backup progress (SSE) |
+| `POST` | `/api/backups/:id/verify` | Verify backup integrity (works for S3-stored backups too) |
+| `GET` | `/api/backups/:id/download` | Download backup file (streams from S3 if needed) |
+| `DELETE` | `/api/backups/:id` | Delete a backup (removes the S3 object too) |
 
 ### Restores
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `POST` | `/api/restore` | Restore a backup to a connection |
+| `POST` | `/api/restore` | Queue a restore job — returns `202` with a `jobId` |
+| `GET` | `/api/restore/:jobId/progress` | Restore progress (SSE) |
 
 ### Schedules
 
@@ -357,9 +359,9 @@ Open http://localhost:5173 and register your first user.
 
 | Method | Endpoint | Description |
 |---|---|---|
-| `GET/PUT` | `/api/notifications/settings` | Notification settings |
+| `GET/PUT` | `/api/notifications` | Notification settings |
 | `POST` | `/api/notifications/test` | Send test notification |
-| `GET/PUT` | `/api/storage/settings` | Storage settings |
+| `GET/PUT` | `/api/storage` | Storage settings |
 | `GET` | `/api/audit` | View audit log |
 
 ---
