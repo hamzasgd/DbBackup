@@ -8,6 +8,7 @@ export class SSHTunnel {
   private server: net.Server | null = null;
   private localPort: number = 0;
   private config: ConnectionConfig;
+  private sockets = new Set<net.Socket>();
 
   constructor(config: ConnectionConfig) {
     this.config = config;
@@ -15,19 +16,30 @@ export class SSHTunnel {
   }
 
   async connect(): Promise<number> {
+    // Capture the real DB target BEFORE rewriting config below: the
+    // forwardOut callback resolves its host/port lazily (per incoming
+    // socket), which happens after config was rewritten to 127.0.0.1,
+    // making the tunnel loop back to the SSH server instead of the DB.
+    const targetHost = this.config.host;
+    const targetPort = this.config.port;
+
     return new Promise((resolve, reject) => {
       this.client
         .on('ready', () => {
           logger.debug(`SSH tunnel connected to ${this.config.sshHost}`);
 
           this.server = net.createServer((sock) => {
+            this.sockets.add(sock);
+            sock.on('close', () => this.sockets.delete(sock));
+
             this.client.forwardOut(
               sock.remoteAddress || '127.0.0.1',
               sock.remotePort || 0,
-              this.config.host,
-              this.config.port,
+              targetHost,
+              targetPort,
               (err, stream) => {
                 if (err) {
+                  logger.debug(`SSH forwardOut to ${targetHost}:${targetPort} failed: ${err.message}`);
                   sock.end();
                   return;
                 }
@@ -39,9 +51,11 @@ export class SSHTunnel {
           this.server!.listen(0, '127.0.0.1', () => {
             const address = this.server!.address() as net.AddressInfo;
             this.localPort = address.port;
-            logger.debug(`SSH tunnel listening on port ${this.localPort}`);
+            logger.debug(`SSH tunnel 127.0.0.1:${this.localPort} -> ${targetHost}:${targetPort}`);
 
-            // Override config to use tunnel
+            // Rewrite config so consumers that read config.host/port directly
+            // (e.g. export.service) target the tunnel. Engine paths use
+            // sshEnabled + _localPort instead.
             this.config.host = '127.0.0.1';
             this.config.port = this.localPort;
 
@@ -64,9 +78,11 @@ export class SSHTunnel {
   }
 
   close(): void {
-    if (this.server) {
-      this.server.close();
-    }
+    // server.close() alone waits for open sockets; destroy them so
+    // repeated test/info calls don't leak connections
+    for (const sock of this.sockets) sock.destroy();
+    this.sockets.clear();
+    this.server?.close();
     this.client.end();
   }
 }
