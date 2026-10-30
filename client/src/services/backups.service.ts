@@ -39,6 +39,8 @@ export const backupsApi = {
     api.delete(`/backups/${id}`),
   verify: (id: string) =>
     api.post<{ success: boolean; data: { valid: boolean; checksum: string } }>(`/backups/${id}/verify`),
+  runRetention: () =>
+    api.post<{ success: boolean; data: { deleted: number; freedBytes: number; connections: number } }>('/backups/retention/run'),
   downloadUrl: (id: string) => `/api/backups/${id}/download`,
 }
 

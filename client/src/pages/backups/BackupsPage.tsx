@@ -204,6 +204,7 @@ export default function BackupsPage() {
   const [restoreTargetConn, setRestoreTargetConn] = useState('')
   const [restoreJobId, setRestoreJobId] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
+  const [purgeOpen, setPurgeOpen] = useState(false)
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
   const connections = connsData?.data.data ?? []
@@ -243,6 +244,19 @@ export default function BackupsPage() {
     onError: () => toast.error('Failed to delete backup'),
   })
 
+  // On-demand retention purge — same policy as the daily sweep
+  const purgeMutation = useMutation({
+    mutationFn: () => backupsApi.runRetention(),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['backups'] })
+      const { deleted, freedBytes } = res.data.data
+      if (deleted === 0) toast.success('Nothing to purge — all backups are within policy')
+      else toast.success(`Purged ${deleted} backup(s), freed ${formatBytes(freedBytes)}`)
+      setPurgeOpen(false)
+    },
+    onError: () => toast.error('Failed to run retention'),
+  })
+
   // Restore runs async in a queue — track it via SSE
   const restoreProgress = useProgressSSE(
     restoreJobId ? `/restore/${restoreJobId}/progress` : null,
@@ -277,6 +291,9 @@ export default function BackupsPage() {
         </div>
         <div className="flex gap-2">
           <Button variant="outline" size="sm" onClick={() => refetch()}><RefreshCw className="h-4 w-4" /></Button>
+          <Button variant="outline" size="sm" onClick={() => setPurgeOpen(true)} title="Delete backups that exceed the retention policy">
+            <Trash2 className="h-4 w-4" />Purge Old
+          </Button>
           <Button onClick={() => {
             const first = connections[0]
             setTriggerConnId(first?.id ?? '')
@@ -430,6 +447,17 @@ export default function BackupsPage() {
         confirmLabel="Delete"
         variant="danger"
         loading={deleteMutation.isPending}
+      />
+
+      <ConfirmDialog
+        open={purgeOpen}
+        onClose={() => setPurgeOpen(false)}
+        onConfirm={() => purgeMutation.mutate()}
+        title="Purge Old Backups"
+        description="Deletes backups that exceed each connection's retention policy (from its schedule, or server defaults). This cannot be undone."
+        confirmLabel="Purge"
+        variant="danger"
+        loading={purgeMutation.isPending}
       />
     </div>
   )

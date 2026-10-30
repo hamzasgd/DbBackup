@@ -10,6 +10,7 @@ import { addBackupJob } from '../queue/backup.queue';
 import { verifyBackup } from '../services/verification.service';
 import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempFile } from '../services/storage.service';
 import { logAudit } from '../services/audit.service';
+import { runGlobalRetentionSweep } from '../services/retention.service';
 
 const STORAGE_PATH = process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
 
@@ -163,5 +164,21 @@ export async function verifyBackupEndpoint(req: AuthRequest, res: Response, next
     } finally {
       if (downloaded) cleanupTempFile(localPath);
     }
+  } catch (err) { next(err); }
+}
+
+/**
+ * Manually enforce retention policies now (all of the user's connections).
+ * Same logic as the daily sweep — exposed so users can purge on demand.
+ */
+export async function runRetention(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const results = await runGlobalRetentionSweep(req.user!.userId);
+    const deleted = results.reduce((n, r) => n + r.deleted, 0);
+    const freedBytes = Number(results.reduce((n, r) => n + r.freedBytes, 0n));
+
+    await logAudit(req.user!.userId, 'DELETE', 'backup', { action: 'retention-purge', deleted, freedBytes }, req.ip);
+
+    res.json({ success: true, data: { deleted, freedBytes, connections: results.length } });
   } catch (err) { next(err); }
 }

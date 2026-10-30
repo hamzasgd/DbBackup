@@ -133,9 +133,9 @@ export async function getRetentionPolicy(
  * Run retention across ALL connections that have completed backups (daily sweep).
  * Covers scheduled connections (schedule policy) and manual-only connections (env defaults).
  */
-export async function runGlobalRetentionSweep(): Promise<RetentionResult[]> {
+export async function runGlobalRetentionSweep(userId?: string): Promise<RetentionResult[]> {
   const connections = await prisma.backup.findMany({
-    where: { status: 'COMPLETED' },
+    where: { status: 'COMPLETED', ...(userId ? { connection: { userId } } : {}) },
     select: { connectionId: true, connection: { select: { userId: true } } },
     distinct: ['connectionId'],
   });
