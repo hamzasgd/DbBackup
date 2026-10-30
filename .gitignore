@@ -31,3 +31,7 @@ server/prisma/*.db
 
 # OS
 Thumbs.db
+
+# Tool state
+.v2c/
+.video_agent/
