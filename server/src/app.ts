@@ -27,6 +27,11 @@ import { mcpRouter, keysRouter } from './routes/mcp.routes';
 
 const app = express();
 
+// Behind nginx (aaPanel reverse proxy): trust X-Forwarded-* headers so
+// req.ip gets the real client IP — required for rate limiting, login
+// lockout and audit logging to work per-client instead of per-nginx.
+app.set('trust proxy', 1);
+
 // Security
 app.use(helmet());
 app.use(cors({
