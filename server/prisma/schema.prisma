@@ -396,6 +396,10 @@ model NotificationSettings {
   telegramChatId    String?
   discordEnabled    Boolean  @default(false)
   discordWebhookUrl String?
+  whatsappEnabled      Boolean @default(false)
+  whatsappPhoneNumberId String?   // Meta WhatsApp Business phone number ID
+  whatsappAccessToken   String?   // permanent access token (encrypted)
+  whatsappRecipient     String?   // your personal WhatsApp number (E.164, e.g. 15551234567)
   notifyOnSuccess   Boolean  @default(false)
   notifyOnFailure   Boolean  @default(true)
   notifyOnRetention Boolean  @default(false)

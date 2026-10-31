@@ -35,6 +35,7 @@ export async function upsertNotificationSettings(req: AuthRequest, res: Response
       ntfyEnabled, ntfyServerUrl, ntfyTopic,
       telegramEnabled, telegramBotToken, telegramChatId,
       discordEnabled, discordWebhookUrl,
+      whatsappEnabled, whatsappPhoneNumberId, whatsappAccessToken, whatsappRecipient,
     } = req.body;
 
     // Only encrypt if a real value (not the masked placeholder) is provided
@@ -58,7 +59,11 @@ export async function upsertNotificationSettings(req: AuthRequest, res: Response
     if (notifyOnLogin !== undefined) data.notifyOnLogin = notifyOnLogin;
     if (notifyOnStorage !== undefined) data.notifyOnStorage = notifyOnStorage;
     if (discordEnabled !== undefined) data.discordEnabled = discordEnabled;
+    if (whatsappEnabled !== undefined) data.whatsappEnabled = whatsappEnabled;
+    if (whatsappPhoneNumberId !== undefined) data.whatsappPhoneNumberId = whatsappPhoneNumberId || null;
+    if (whatsappRecipient !== undefined) data.whatsappRecipient = whatsappRecipient || null;
     if (telegramBotToken && telegramBotToken !== '••••••••') data.telegramBotToken = encrypt(telegramBotToken);
+    if (whatsappAccessToken && whatsappAccessToken !== '••••••••') data.whatsappAccessToken = encrypt(whatsappAccessToken);
     if (discordWebhookUrl !== undefined) data.discordWebhookUrl = discordWebhookUrl || null;
     if (telegramChatId !== undefined) data.telegramChatId = telegramChatId;
     if (telegramEnabled !== undefined) data.telegramEnabled = telegramEnabled;

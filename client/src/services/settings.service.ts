@@ -19,6 +19,9 @@ export interface NotificationSettings {
   telegramChatId?: string | null
   discordEnabled: boolean
   discordWebhookUrl?: string | null
+  whatsappEnabled: boolean
+  whatsappPhoneNumberId?: string | null
+  whatsappRecipient?: string | null
   notifyOnSuccess: boolean
   notifyOnFailure: boolean
   notifyOnRetention: boolean

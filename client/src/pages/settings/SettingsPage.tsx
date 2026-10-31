@@ -64,6 +64,10 @@ function NotificationsTab() {
     telegramChatId: '',
     discordEnabled: false,
     discordWebhookUrl: '',
+    whatsappEnabled: false,
+    whatsappPhoneNumberId: '',
+    whatsappAccessToken: '',
+    whatsappRecipient: '',
     notifyOnSuccess: true,
     notifyOnFailure: true,
     notifyOnRetention: false,
@@ -93,6 +97,10 @@ function NotificationsTab() {
         telegramChatId: s.telegramChatId ?? '',
         discordEnabled: s.discordEnabled ?? false,
         discordWebhookUrl: s.discordWebhookUrl ?? '',
+        whatsappEnabled: s.whatsappEnabled ?? false,
+        whatsappPhoneNumberId: s.whatsappPhoneNumberId ?? '',
+        whatsappAccessToken: '',
+        whatsappRecipient: s.whatsappRecipient ?? '',
         notifyOnSuccess: s.notifyOnSuccess ?? prev.notifyOnSuccess,
         notifyOnFailure: s.notifyOnFailure ?? prev.notifyOnFailure,
         notifyOnRetention: s.notifyOnRetention ?? prev.notifyOnRetention,
@@ -129,7 +137,7 @@ function NotificationsTab() {
     }
   }
 
-  function field(key: 'emailAddress' | 'smtpHost' | 'smtpUser' | 'smtpPass' | 'slackWebhookUrl' | 'ntfyServerUrl' | 'ntfyTopic' | 'telegramBotToken' | 'telegramChatId' | 'discordWebhookUrl') {
+  function field(key: 'emailAddress' | 'smtpHost' | 'smtpUser' | 'smtpPass' | 'slackWebhookUrl' | 'ntfyServerUrl' | 'ntfyTopic' | 'telegramBotToken' | 'telegramChatId' | 'discordWebhookUrl' | 'whatsappPhoneNumberId' | 'whatsappAccessToken' | 'whatsappRecipient') {
     return {
       value: form[key],
       onChange: (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => ({ ...f, [key]: e.target.value })),
@@ -254,6 +262,24 @@ function NotificationsTab() {
             <Input label="Webhook URL" type="password" placeholder="https://discord.com/api/webhooks/..." {...field('discordWebhookUrl')} />
             <p className="text-xs text-gray-400">
               Server Settings &rarr; Integrations &rarr; Webhooks &rarr; New Webhook.
+            </p>
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+            <CardTitle>WhatsApp</CardTitle>
+            <Toggle checked={form.whatsappEnabled} onChange={(v) => setForm(f => ({ ...f, whatsappEnabled: v }))} label="Enabled" />
+        </CardHeader>
+        {form.whatsappEnabled && (
+          <CardContent className="space-y-4">
+            <Input label="Phone Number ID" placeholder="123456789012345" {...field('whatsappPhoneNumberId')} />
+            <Input label="Access Token" type="password" placeholder="EAAG..." {...field('whatsappAccessToken')} />
+            <Input label="Recipient (your WhatsApp number)" placeholder="15551234567" {...field('whatsappRecipient')} />
+            <p className="text-xs text-gray-400">
+              Meta Business Suite &rarr; WhatsApp Manager &rarr; API Setup. Phone Number ID and token from there.
+              Recipient = your number in international format (no +, no spaces).
             </p>
           </CardContent>
         )}

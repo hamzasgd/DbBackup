@@ -167,6 +167,24 @@ async function sendDiscord(webhookUrl: string, payload: NotificationPayload): Pr
   await sendSlack(webhookUrl, payload);
 }
 
+async function sendWhatsApp(settings: { phoneNumberId: string; accessToken: string; recipient: string }, payload: NotificationPayload): Promise<void> {
+  const text = `${payload.title}\n\n${payload.message}${payload.details ? '\n\n' + Object.entries(payload.details).map(([k, v]) => `${k}: ${v}`).join('\n') : ''}`;
+
+  await fetch(`https://graph.facebook.com/v21.0/${settings.phoneNumberId}/messages`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${settings.accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      messaging_product: 'whatsapp',
+      to: settings.recipient,
+      type: 'text',
+      text: { body: text.slice(0, 4096) }, // WhatsApp text limit
+    }),
+  });
+}
+
 export async function notify(userId: string, payload: NotificationPayload): Promise<void> {
   try {
     const settings = await prisma.notificationSettings.findUnique({ where: { userId } });
@@ -233,6 +251,15 @@ export async function notify(userId: string, payload: NotificationPayload): Prom
       tasks.push(
         sendDiscord(settings.discordWebhookUrl, payload)
           .catch((err) => { logger.error('Discord notification failed:', err); }),
+      );
+    }
+
+    if (settings.whatsappEnabled && settings.whatsappPhoneNumberId && settings.whatsappAccessToken && settings.whatsappRecipient) {
+      tasks.push(
+        sendWhatsApp(
+          { phoneNumberId: settings.whatsappPhoneNumberId, accessToken: settings.whatsappAccessToken, recipient: settings.whatsappRecipient },
+          payload,
+        ).catch((err) => { logger.error('WhatsApp notification failed:', err); }),
       );
     }
 
