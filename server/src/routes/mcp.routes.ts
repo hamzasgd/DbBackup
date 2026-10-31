@@ -209,6 +209,27 @@ keysRouter.post('/', async (req: AuthRequest, res, next) => {
   } catch (err) { next(err); }
 });
 
+keysRouter.post('/:id/rotate', async (req: AuthRequest, res, next) => {
+  try {
+    const existing = await prisma.mcpApiKey.findFirst({ where: { id: req.params.id, userId: req.user!.userId, revokedAt: null } });
+    if (!existing) throw new AppError('Key not found', 404);
+
+    // Generate a new key, replace the hash — old key stops working immediately
+    const { raw, hash, prefix } = generateMcpKey();
+    await prisma.mcpApiKey.update({
+      where: { id: existing.id },
+      data: { keyHash: hash, keyPrefix: prefix, callsToday: 0, lastUsedAt: null },
+    });
+
+    await logAudit(req.user!.userId, 'MCP_KEY_ROTATE', 'mcp', { keyId: existing.id, name: existing.name }, req.ip, req.headers['user-agent']);
+    res.json({
+      success: true,
+      data: { key: raw },
+      message: `Key "${existing.name}" rotated — the old key is now invalid. Copy the new key now.`,
+    });
+  } catch (err) { next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Rotate failed', 400)); }
+});
+
 keysRouter.delete('/:id', async (req: AuthRequest, res, next) => {
   try {
     const existing = await prisma.mcpApiKey.findFirst({ where: { id: req.params.id, userId: req.user!.userId } });

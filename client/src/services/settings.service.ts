@@ -84,6 +84,7 @@ export const mcpApi = {
   create: (data: { name: string; scopes: string[]; expiresInDays?: number; approvalRequired?: boolean; dailyCallLimit?: number }) =>
     api.post<{ success: boolean; data: { id: string; name: string; scopes: string[]; key: string }; message: string }>('/mcp/keys', data),
   revoke: (id: string) => api.delete(`/mcp/keys/${id}`),
+  rotate: (id: string) => api.post<{ success: boolean; data: { key: string }; message: string }>(`/mcp/keys/${id}/rotate`),
 }
 
 export interface PendingApproval {

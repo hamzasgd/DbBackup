@@ -3,7 +3,7 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { User, Lock, Save, Bell, Cloud, Mail, MessageSquare, CheckCircle, AlertCircle, Loader2, Monitor, Globe, KeyRound, Bot, Copy } from 'lucide-react'
+import { User, Lock, Save, Bell, Cloud, Mail, MessageSquare, CheckCircle, AlertCircle, Loader2, Monitor, Globe, KeyRound, Bot, Copy, RotateCcw } from 'lucide-react'
 import { useAuthStore } from '../../store/auth.store'
 import { authApi, type ActiveSession, type Passkey } from '../../services/auth.service'
 import { notificationsApi, storageApi, mcpApi, mcpApprovalsApi, type McpKey, type PendingApproval } from '../../services/settings.service'
@@ -876,6 +876,7 @@ function McpTab() {
   const [approvalRequired, setApprovalRequired] = useState(false)
   const [dailyCallLimit, setDailyCallLimit] = useState<number | undefined>()
   const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [rotatedKey, setRotatedKey] = useState<string | null>(null)
   const [endpoint, setEndpoint] = useState('')
 
   useEffect(() => { setEndpoint(`${window.location.origin}/mcp`) }, [])
@@ -911,6 +912,16 @@ function McpTab() {
     mutationFn: (id: string) => mcpApprovalsApi.deny(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['mcp-approvals'] }); toast.success('Denied') },
     onError: () => toast.error('Failed to deny'),
+  })
+
+  const rotateMutation = useMutation({
+    mutationFn: (id: string) => mcpApi.rotate(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['mcp-keys'] })
+      setRotatedKey(res.data.data.key)
+      toast.success('Key rotated — copy the new key now')
+    },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to rotate'),
   })
 
   const revokeMutation = useMutation({
@@ -984,6 +995,19 @@ function McpTab() {
             </Button>
           </div>
 
+          {rotatedKey && (
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 space-y-2">
+              <p className="text-sm font-medium text-blue-800">Key rotated! Copy the NEW key now (old key is dead):</p>
+              <div className="flex gap-2 items-center">
+                <code className="flex-1 text-xs font-mono bg-white border rounded p-2 break-all">{rotatedKey}</code>
+                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(rotatedKey); toast.success('Copied') }}>
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setRotatedKey(null)}>✕</Button>
+              </div>
+            </div>
+          )}
+
           {createdKey && (
             <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 space-y-2">
               <p className="text-sm font-medium text-yellow-800">Copy this key now — it cannot be shown again:</p>
@@ -1048,15 +1072,27 @@ function McpTab() {
                   {k.expiresAt && <span className="text-orange-500">expires {formatDate(k.expiresAt)}</span>}
                 </p>
               </div>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-red-500 hover:bg-red-50 shrink-0"
-                onClick={() => revokeMutation.mutate(k.id)}
-                loading={revokeMutation.isPending && revokeMutation.variables === k.id}
-              >
-                Revoke
-              </Button>
+              <div className="flex gap-1.5 shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-blue-600 hover:bg-blue-50"
+                  onClick={() => rotateMutation.mutate(k.id)}
+                  loading={rotateMutation.isPending && rotateMutation.variables === k.id}
+                  title="Generate a new key — old one stops working immediately"
+                >
+                  <RotateCcw className="h-3.5 w-3.5" />
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-red-500 hover:bg-red-50"
+                  onClick={() => revokeMutation.mutate(k.id)}
+                  loading={revokeMutation.isPending && revokeMutation.variables === k.id}
+                >
+                  Revoke
+                </Button>
+              </div>
             </div>
           ))}
         </CardContent>
