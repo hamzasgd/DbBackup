@@ -58,7 +58,7 @@ async function getForeignKeyDependencies(config: ConnectionConfig): Promise<Tabl
     }
   }
 
-  if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+  if (config.type === 'POSTGRESQL') {
     const result = await ConnectionFactory.createPostgreSQLPool(config);
     try {
       const client = await ConnectionFactory.getPostgreSQLClient(result.pool);

@@ -3,7 +3,7 @@ import api from '../lib/api'
 export interface Connection {
   id: string
   name: string
-  type: 'MYSQL' | 'MARIADB' | 'POSTGRESQL'
+  type: 'MYSQL' | 'MARIADB' | 'POSTGRESQL' | 'MONGODB' | 'REDIS'
   host: string
   port: number
   username: string
@@ -23,7 +23,7 @@ export interface Connection {
 
 export interface CreateConnectionPayload {
   name: string
-  type: 'MYSQL' | 'MARIADB' | 'POSTGRESQL'
+  type: 'MYSQL' | 'MARIADB' | 'POSTGRESQL' | 'MONGODB' | 'REDIS'
   host: string
   port: number
   username: string

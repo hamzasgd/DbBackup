@@ -35,6 +35,10 @@ const MYSQL_FORMATS: { label: string; value: BackupFormat }[] = [
   { label: 'Plain SQL (.sql)', value: 'PLAIN_SQL' },
 ]
 
+const NOSQL_FORMATS: { label: string; value: BackupFormat }[] = [
+  { label: 'Native archive (mongodump / RDB snapshot)', value: 'COMPRESSED_SQL' },
+]
+
 const PG_FORMATS: { label: string; value: BackupFormat }[] = [
   { label: 'Custom / pg_dump (-Fc)', value: 'CUSTOM' },
   { label: 'Compressed SQL (.sql.gz)', value: 'COMPRESSED_SQL' },
@@ -247,7 +251,7 @@ export default function BackupsPage() {
   const connections = connsData?.data.data ?? []
 
   const selectedConnObj = connections.find(c => c.id === triggerConnId)
-  const formatOptions = selectedConnObj?.type === 'POSTGRESQL' ? PG_FORMATS : MYSQL_FORMATS
+  const formatOptions = selectedConnObj?.type === 'POSTGRESQL' ? PG_FORMATS : (selectedConnObj?.type === 'MONGODB' || selectedConnObj?.type === 'REDIS') ? NOSQL_FORMATS : MYSQL_FORMATS
 
   const { data, isLoading, refetch } = useQuery({
     queryKey: ['backups', selectedConnection],

@@ -25,7 +25,7 @@ export const changePasswordSchema = z.object({
 // Connection schemas
 export const connectionSchema = z.object({
   name: z.string().min(1, 'Name is required'),
-  type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL']),
+  type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL', 'MONGODB', 'REDIS']),
   host: z.string().min(1, 'Host is required'),
   port: z.number().int().positive('Port must be a positive integer'),
   username: z.string().min(1, 'Username is required'),

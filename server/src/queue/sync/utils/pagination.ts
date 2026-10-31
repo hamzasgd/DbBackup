@@ -23,7 +23,7 @@ export async function fetchTableRecordsPaginated(
     } finally {
       await ConnectionFactory.closeMySQLConnection(result);
     }
-  } else if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+  } else if (config.type === 'POSTGRESQL') {
     const result = await ConnectionFactory.createPostgreSQLPool(config);
     try {
       const client = await ConnectionFactory.getPostgreSQLClient(result.pool);

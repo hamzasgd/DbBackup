@@ -86,7 +86,7 @@ export async function applyChangeBatch(
     } finally {
       await ConnectionFactory.closeMySQLConnection(result);
     }
-  } else if (config.type === 'POSTGRESQL' || config.type === 'POSTGRES') {
+  } else if (config.type === 'POSTGRESQL') {
     const result = await ConnectionFactory.createPostgreSQLPool(config);
     let client: Awaited<ReturnType<typeof ConnectionFactory.getPostgreSQLClient>> | null = null;
     try {

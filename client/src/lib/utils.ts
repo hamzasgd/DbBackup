@@ -22,6 +22,8 @@ export function formatDate(date: string | Date): string {
 }
 
 export function dbTypeLabel(type: string): string {
+  if (type === 'MONGODB') return 'MongoDB'
+  if (type === 'REDIS') return 'Redis'
   const map: Record<string, string> = {
     MYSQL: 'MySQL',
     MARIADB: 'MariaDB',
@@ -31,6 +33,8 @@ export function dbTypeLabel(type: string): string {
 }
 
 export function dbTypeBadgeColor(type: string): string {
+  if (type === 'MONGODB') return 'bg-green-100 text-green-700'
+  if (type === 'REDIS') return 'bg-red-100 text-red-700'
   const map: Record<string, string> = {
     MYSQL: 'bg-orange-100 text-orange-700',
     MARIADB: 'bg-blue-100 text-blue-700',

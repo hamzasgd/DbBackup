@@ -18,7 +18,7 @@ import { dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required'),
-  type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL']),
+  type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL', 'MONGODB', 'REDIS']),
   host: z.string().min(1, 'Host is required'),
   port: z.coerce.number().int().min(1).max(65535),
   username: z.string().min(1, 'Username is required'),
