@@ -14,6 +14,7 @@ import {
 import { AppError } from '../middleware/errorHandler';
 import { logAudit } from '../services/audit.service';
 import { notify } from '../services/notification.service';
+import { isLoginLocked, recordLoginFailure, clearLoginFailures } from '../services/login-lockout.service';
 
 
 /** Fire-and-forget login alert (email/Slack) respecting the user's notifyOnLogin toggle. */
@@ -45,6 +46,28 @@ function lockMessage(msLeft: number): string {
   const mins = Math.ceil(msLeft / 60000);
   const human = mins >= 60 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${mins}m`;
   return `Sign-in is locked for ${human} after the password change (security cool-down). Try again later.`;
+}
+
+/**
+ * Count the failure and, when the threshold trips, audit + alert the owner
+ * by email/Slack exactly once per lockout.
+ */
+async function maybeLockout(ip: string | undefined): Promise<void> {
+  if (!recordLoginFailure(ip)) return;
+  const minutes = parseInt(process.env.LOGIN_LOCKOUT_MINUTES ?? '15', 10) || 15;
+  await logAudit(null, 'LOGIN_IP_LOCKOUT', 'user', { ip, attempts: process.env.LOGIN_LOCKOUT_ATTEMPTS ?? '3', minutes }, ip);
+  await notifyOwner({
+    event: 'LOGIN_IP_LOCKOUT',
+    title: '🚨 Login Lockout Triggered',
+    message: `${process.env.LOGIN_LOCKOUT_ATTEMPTS ?? 3} failed sign-in attempts from ${ip ?? 'unknown IP'} — this address is now locked for ${minutes} minutes.`,
+    details: { IP: ip ?? 'unknown', Attempts: process.env.LOGIN_LOCKOUT_ATTEMPTS ?? '3', 'Locked for': `${minutes} minutes`, Time: new Date().toISOString() },
+  });
+}
+
+/** This is a single-user deployment — alerts go to the primary account. */
+async function notifyOwner(payload: Parameters<typeof notify>[1]): Promise<void> {
+  const owner = await prisma.user.findFirst({ orderBy: { createdAt: 'asc' }, select: { id: true } });
+  if (owner) void notify(owner.id, payload).catch(() => undefined);
 }
 
 export async function register(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -81,15 +104,26 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
   try {
     const { email, password } = req.body;
 
+    // Hard "3 strikes" lock — blocks the IP before password checking
+    const lock = isLoginLocked(req.ip);
+    if (lock.locked) {
+      const mins = Math.ceil(lock.secondsLeft / 60);
+      await logAudit(null, 'LOGIN_IP_LOCKED', 'user', { ip: req.ip, secondsLeft: lock.secondsLeft }, req.ip, req.headers['user-agent']);
+      res.status(429).json({ success: false, message: `Too many failed attempts — this address is locked for ${mins} more minute${mins > 1 ? 's' : ''}.` });
+      return;
+    }
+
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user || !user.isActive) {
       await logAudit(null, 'LOGIN_FAILED', 'user', { email, reason: 'unknown or inactive user' }, req.ip, req.headers['user-agent']);
+      maybeLockout(req.ip);
       throw new AppError('Invalid credentials', 401);
     }
 
     const isValid = await bcrypt.compare(password, user.passwordHash);
     if (!isValid) {
       await logAudit(null, 'LOGIN_FAILED', 'user', { email, reason: 'wrong password' }, req.ip, req.headers['user-agent']);
+      maybeLockout(req.ip);
       void notify(user.id, {
         event: 'LOGIN_FAILED',
         title: '🚨 Failed Login Attempt',
@@ -98,6 +132,8 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       }).catch(() => undefined);
       throw new AppError('Invalid credentials', 401);
     }
+
+    clearLoginFailures(req.ip);
 
     const lockMs = loginLockRemaining(user);
     if (lockMs > 0) {
@@ -380,6 +416,8 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
       res.status(401).json({ success: false, message: 'User not found' });
       return;
     }
+
+    clearLoginFailures(req.ip);
 
     const lockMs = loginLockRemaining(user);
     if (lockMs > 0) {

@@ -21,7 +21,8 @@ export type NotificationEventType =
   | 'LOGIN_FAILED'
   | 'PASSKEY_LOGIN'
   | 'STORAGE_THRESHOLD'
-  | 'ENCRYPTION_FAILED';
+  | 'ENCRYPTION_FAILED'
+  | 'LOGIN_IP_LOCKOUT';
 
 export interface NotificationPayload {
   event: NotificationEventType;
@@ -145,7 +146,7 @@ export async function notify(userId: string, payload: NotificationPayload): Prom
     const settings = await prisma.notificationSettings.findUnique({ where: { userId } });
     if (!settings) return;
 
-    const isFailure = payload.event.includes('FAILED') || payload.event === 'HEARTBEAT_DOWN';
+    const isFailure = payload.event.includes('FAILED') || payload.event === 'HEARTBEAT_DOWN' || payload.event === 'LOGIN_IP_LOCKOUT';
     const isSuccess = payload.event.includes('COMPLETED') || payload.event === 'HEARTBEAT_RECOVERED';
     const isRetention = payload.event === 'RETENTION_CLEANUP';
     const isLogin = payload.event === 'LOGIN' || payload.event === 'PASSKEY_LOGIN';
