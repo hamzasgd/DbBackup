@@ -29,6 +29,18 @@ const ACTION_GROUPS: Record<string, { label: string; color: string }> = {
   VERIFY: { label: 'Verify', color: 'bg-teal-100 text-teal-700' },
   DOWNLOAD: { label: 'Download', color: 'bg-gray-100 text-gray-600' },
   RETENTION_SWEEP: { label: 'Retention', color: 'bg-amber-100 text-amber-700' },
+  MCP_CALL: { label: 'MCP tool call', color: 'bg-violet-100 text-violet-700' },
+  MCP_KEY_CREATE: { label: 'MCP key created', color: 'bg-violet-100 text-violet-700' },
+  MCP_KEY_REVOKE: { label: 'MCP key revoked', color: 'bg-red-100 text-red-700' },
+  MCP_KEY_ROTATE: { label: 'MCP key rotated', color: 'bg-blue-100 text-blue-700' },
+  MCP_APPROVE: { label: 'MCP approved', color: 'bg-green-100 text-green-700' },
+  MCP_DENY: { label: 'MCP denied', color: 'bg-red-100 text-red-700' },
+  BACKUP_STALE: { label: 'Backup missed', color: 'bg-amber-100 text-amber-700' },
+  DRILL_PASSED: { label: 'Drill passed', color: 'bg-green-100 text-green-700' },
+  DRILL_FAILED: { label: 'Drill failed', color: 'bg-red-100 text-red-700' },
+  LOGIN_IP_LOCKOUT: { label: 'IP locked', color: 'bg-red-100 text-red-700' },
+  LOGIN_BRUTE_FORCE_SUSPECT: { label: 'Brute force', color: 'bg-red-100 text-red-700' },
+  LOGIN_BLOCKED_LOCKDOWN: { label: 'Lockdown block', color: 'bg-orange-100 text-orange-700' },
 }
 
 const RESOURCE_LABELS: Record<string, string> = {
@@ -50,6 +62,24 @@ function actionBadge(a: string) {
 function detailSummary(log: AuditLog): string {
   const d = log.details ?? {}
   const parts: string[] = []
+
+  // MCP tool calls: key name, tool, result, duration
+  if (log.action === 'MCP_CALL') {
+    if (d.tool) parts.push(String(d.tool))
+    if (d.key) parts.push(`via ${d.key}`)
+    if (d.ms !== undefined) parts.push(`${d.ms}ms`)
+    if (d.ok === false) parts.push('failed')
+    return parts.join(' · ')
+  }
+
+  // MCP key lifecycle events
+  if (log.action.startsWith('MCP_KEY') || log.action.startsWith('MCP_APPROVE') || log.action.startsWith('MCP_DENY')) {
+    if (d.name) parts.push(String(d.name))
+    if (d.keyId) parts.push(String(d.keyId).slice(0, 8))
+    if (d.scopes) parts.push(Array.isArray(d.scopes) ? d.scopes.join(', ') : String(d.scopes))
+    return parts.join(' · ')
+  }
+
   if (d.name) parts.push(String(d.name))
   else if (d.fileName) parts.push(String(d.fileName))
   else if (d.email) parts.push(String(d.email))
@@ -59,6 +89,10 @@ function detailSummary(log: AuditLog): string {
   if (d.deleted) parts.push(`${d.deleted} deleted`)
   if (d.sizeBytes) parts.push(`${(Number(d.sizeBytes) / 1048576).toFixed(1)} MB`)
   if (d.storageType) parts.push(String(d.storageType))
+  if (d.percent) parts.push(`${d.percent}%`)
+  if (d.connectionId) parts.push(String(d.connectionId).slice(0, 8))
+  if (d.attempts) parts.push(`${d.attempts} attempts`)
+  if (d.minutes) parts.push(`${d.minutes} min`)
   return parts.join(' · ')
 }
 
