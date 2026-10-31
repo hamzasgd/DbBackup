@@ -44,7 +44,7 @@ export default function ConnectionsPage() {
   const navigate = useNavigate()
   const [modalOpen, setModalOpen] = useState(false)
   const [editId, setEditId] = useState<string | null>(null)
-  const [showSSH, setShowSSH] = useState(false)
+  const [showSSH, setShowSSH] = useState(true)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
   const { data, isLoading } = useQuery({
@@ -227,7 +227,7 @@ export default function ConnectionsPage() {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Input label="Username" placeholder="root" error={errors.username?.message} {...register('username')} required />
-            <Input label="Password" type="password" placeholder="••••••••" error={errors.password?.message} {...register('password')} required={!editId} />
+            <Input label={editId ? 'Password (leave blank to keep current)' : 'Password'} type="password" placeholder="••••••••" error={errors.password?.message} {...register('password')} required={!editId} />
           </div>
 
           <Input label="Database name" placeholder="my_database" error={errors.database?.message} {...register('database')} required />
