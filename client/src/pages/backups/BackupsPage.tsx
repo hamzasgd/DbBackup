@@ -92,6 +92,7 @@ function BackupRow({
   onVerified,
   onDrill,
   drilling,
+  onCancelDrill,
 }: {
   b: Backup
   onRestore: () => void
@@ -99,6 +100,7 @@ function BackupRow({
   onVerified: () => void
   onDrill: () => void
   drilling: boolean
+  onCancelDrill: () => void
 }) {
   const isActive = b.status === 'RUNNING' || b.status === 'PENDING'
   const sse = useProgressSSE(`/backups/${b.id}/progress`, isActive)
@@ -202,11 +204,17 @@ function BackupRow({
               </Button>
               <Button
                 size="sm" variant="ghost"
-                onClick={onDrill}
-                disabled={drilling || b.status !== 'COMPLETED'}
-                title="Restore drill — test-restore into a scratch database, then clean up"
+                onClick={() => {
+                  if (b.lastDrill?.status === 'RUNNING') {
+                    onCancelDrill()
+                  } else {
+                    onDrill()
+                  }
+                }}
+                disabled={(!drilling && b.status !== 'COMPLETED') || (drilling && !b.lastDrill)}
+                title={b.lastDrill?.status === 'RUNNING' ? 'Cancel stuck drill' : 'Restore drill — test-restore into a scratch database'}
               >
-                <FlaskConical className="h-3.5 w-3.5" />
+                <FlaskConical className={`h-3.5 w-3.5 ${b.lastDrill?.status === 'RUNNING' ? 'text-amber-500' : ''}`} />
               </Button>
               <Button
                 size="sm" variant="ghost"
@@ -293,6 +301,17 @@ export default function BackupsPage() {
     mutationFn: (id: string) => backupsApi.delete(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['backups'] }); toast.success('Backup deleted') },
     onError: () => toast.error('Failed to delete backup'),
+  })
+
+  // Cancel a stuck drill (e.g. after a server crash)
+  const cancelDrillMutation = useMutation({
+    mutationFn: ({ backupId, drillId }: { backupId: string; drillId: string }) =>
+      backupsApi.cancelDrill(backupId, drillId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['backups'] })
+      toast.success('Drill cancelled')
+    },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to cancel'),
   })
 
   // Restore drill — proves the backup actually restores
@@ -437,6 +456,7 @@ export default function BackupsPage() {
                     onVerified={() => qc.invalidateQueries({ queryKey: ['backups'] })}
                     onDrill={() => drillMutation.mutate(b.id)}
                     drilling={b.lastDrill?.status === 'RUNNING' || drillMutation.isPending}
+                    onCancelDrill={() => b.lastDrill && cancelDrillMutation.mutate({ backupId: b.id, drillId: b.lastDrill.id })}
                   />
                 ))}
               </tbody>

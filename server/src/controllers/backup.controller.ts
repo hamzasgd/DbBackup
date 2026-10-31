@@ -12,7 +12,7 @@ import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempF
 import { streamFromGdrive } from '../services/gdrive.service';
 import { logAudit } from '../services/audit.service';
 import { runGlobalRetentionSweep } from '../services/retention.service';
-import { startRestoreDrill } from '../services/restore-drill.service';
+import { startRestoreDrill, cancelStaleDrill } from '../services/restore-drill.service';
 
 const STORAGE_PATH = getStoragePath();
 ensureStorageDir(STORAGE_PATH);
@@ -221,5 +221,16 @@ export async function drillBackup(req: AuthRequest, res: Response, next: NextFun
     res.status(202).json({ success: true, data: { drillId }, message: 'Restore drill started — the backup will be restored into a scratch database and cleaned up' });
   } catch (err) {
     next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Drill failed to start', 400));
+  }
+}
+
+export async function cancelDrill(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { drillId } = req.body as { drillId: string };
+    await cancelStaleDrill(req.user!.userId, drillId);
+    await logAudit(req.user!.userId, 'DRILL_CANCELLED', 'backup', { drillId }, req.ip, req.headers['user-agent']);
+    res.json({ success: true, message: 'Drill cancelled' });
+  } catch (err) {
+    next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Cancel failed', 400));
   }
 }

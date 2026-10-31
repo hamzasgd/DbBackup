@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { authenticate } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
 import { backupTriggerSchema } from '../middleware/validation.schemas';
-import { getBackups, triggerBackup, getBackup, deleteBackup, downloadBackup, verifyBackupEndpoint, runRetention, drillBackup } from '../controllers/backup.controller';
+import { getBackups, triggerBackup, getBackup, deleteBackup, downloadBackup, verifyBackupEndpoint, runRetention, drillBackup, cancelDrill } from '../controllers/backup.controller';
 import { backupProgressSSE } from '../controllers/sse.controller';
 
 const router = Router();
@@ -13,6 +13,7 @@ router.get('/', getBackups);
 router.post('/', validate(backupTriggerSchema), triggerBackup);
 router.post('/retention/run', runRetention);
 router.post('/:id/drill', drillBackup);
+router.post('/:id/drill/cancel', cancelDrill);
 router.get('/:id', getBackup);
 router.delete('/:id', deleteBackup);
 router.get('/:id/download', downloadBackup);

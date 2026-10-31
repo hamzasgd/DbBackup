@@ -27,6 +27,7 @@ function auditEnvFileSecurity(): void {
   }
 }
 import { ensureStorageDir, getStoragePath } from './services/storage.service';
+import { cleanupOrphanedDrills } from './services/restore-drill.service';
 
 const PORT = process.env.PORT || 3001;
 
@@ -44,6 +45,7 @@ async function bootstrap() {
     auditEnvFileSecurity();
     await initCrypto();
     ensureStorageDir(getStoragePath());
+    await cleanupOrphanedDrills();
     await connectRedis();
     await startWorkers();
 

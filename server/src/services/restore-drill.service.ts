@@ -117,3 +117,31 @@ async function runDrill(drillId: string, userId: string, backupId: string): Prom
     if (tempPath) cleanupTempFile(tempPath);
   }
 }
+
+/**
+ * Cancel a stuck RUNNING drill (e.g. after a server crash/restart).
+ */
+export async function cancelStaleDrill(userId: string, drillId: string): Promise<void> {
+  const drill = await prisma.restoreDrill.findFirst({ where: { id: drillId, userId } });
+  if (!drill) throw new Error('Drill not found');
+  if (drill.status !== 'RUNNING') throw new Error('Only RUNNING drills can be cancelled');
+  await prisma.restoreDrill.update({
+    where: { id: drillId },
+    data: { status: 'FAILED', error: 'Cancelled by user', finishedAt: new Date() },
+  });
+}
+
+/**
+ * Boot cleanup: if the server crashed/restart mid-drill, RUNNING rows are
+ * orphaned forever. Mark anything still RUNNING from a previous process
+ * as FAILED so the UI doesn't hang on 'Drilling…'.
+ */
+export async function cleanupOrphanedDrills(): Promise<void> {
+  const result = await prisma.restoreDrill.updateMany({
+    where: { status: 'RUNNING' },
+    data: { status: 'FAILED', error: 'Interrupted by server restart', finishedAt: new Date() },
+  });
+  if (result.count > 0) {
+    logger.info(`🧪  Cleaned up ${result.count} orphaned drill(s) from a previous run`);
+  }
+}
