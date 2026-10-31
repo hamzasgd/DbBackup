@@ -26,6 +26,7 @@ export interface McpToolContext {
   keyName: string;
   scopes: McpScope[];
   ip?: string;
+  approvalRequired?: boolean;
 }
 
 export interface McpToolDef {
@@ -305,12 +306,33 @@ export function toolSummaries(scopes: McpScope[]) {
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 }
 
-export async function dispatchTool(name: string, args: Record<string, unknown>, ctx: McpToolContext): Promise<{ text: string; isError: boolean }> {
+export async function dispatchTool(name: string, args: Record<string, unknown>, ctx: McpToolContext): Promise<{ text: string; isError: boolean; approvalId?: string; pendingApproval?: boolean }> {
   const tool = MCP_TOOLS.find((t) => t.name === name);
   if (!tool) return { text: `Unknown tool: ${name}`, isError: true };
   if (!ctx.scopes.includes(tool.scope)) {
     return { text: `Tool "${name}" requires the "${tool.scope}" scope (key "${ctx.keyName}" has: ${ctx.scopes.join(', ') || 'none'})`, isError: true };
   }
+
+  // Human-in-the-loop: destructive tools pause for approval when the key requires it
+  if (ctx.approvalRequired && (tool.scope === 'write' || tool.scope === 'admin')) {
+    const approval = await prisma.mcpApproval.create({
+      data: {
+        userId: ctx.userId,
+        mcpKeyId: ctx.keyId,
+        keyName: ctx.keyName,
+        tool: name,
+        args: args as object,
+        status: 'PENDING',
+      },
+    });
+    return {
+      text: `⏸ Approval required: "${name}" is waiting for human approval. Check Settings → AI/MCP → Pending approvals. The owner will approve or deny it.`,
+      isError: false,
+      approvalId: approval.id,
+      pendingApproval: true,
+    };
+  }
+
   try {
     const text = await tool.handler(args, ctx);
     await prisma.mcpApiKey.update({ where: { id: ctx.keyId }, data: { lastUsedAt: new Date() } });
@@ -318,6 +340,39 @@ export async function dispatchTool(name: string, args: Record<string, unknown>, 
   } catch (err) {
     return { text: err instanceof Error ? err.message : String(err), isError: true };
   }
+}
+
+/** Approve a pending MCP action and execute it. */
+export async function approveMcpAction(userId: string, approvalId: string): Promise<{ text: string }> {
+  const approval = await prisma.mcpApproval.findFirst({ where: { id: approvalId, userId, status: 'PENDING' } });
+  if (!approval) throw new Error('Pending approval not found');
+
+  const key = await prisma.mcpApiKey.findUnique({ where: { id: approval.mcpKeyId } });
+  if (!key) throw new Error('MCP key no longer exists');
+
+  const result = await dispatchTool(approval.tool, (approval.args ?? {}) as Record<string, unknown>, {
+    userId,
+    keyId: key.id,
+    keyName: key.name,
+    scopes: key.scopes as McpScope[],
+    approvalRequired: false, // already approved
+  });
+
+  await prisma.mcpApproval.update({
+    where: { id: approvalId },
+    data: { status: 'APPROVED', result: result.text, resolvedAt: new Date() },
+  });
+
+  return { text: result.text };
+}
+
+/** Deny a pending MCP action. */
+export async function denyMcpAction(userId: string, approvalId: string): Promise<void> {
+  const result = await prisma.mcpApproval.updateMany({
+    where: { id: approvalId, userId, status: 'PENDING' },
+    data: { status: 'DENIED', resolvedAt: new Date() },
+  });
+  if (result.count === 0) throw new Error('Pending approval not found');
 }
 
 /** Key generation: raw key returned ONCE, only the SHA-256 hash is stored. */

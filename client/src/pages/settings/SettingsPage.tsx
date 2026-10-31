@@ -6,7 +6,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { User, Lock, Save, Bell, Cloud, Mail, MessageSquare, CheckCircle, AlertCircle, Loader2, Monitor, Globe, KeyRound, Bot, Copy } from 'lucide-react'
 import { useAuthStore } from '../../store/auth.store'
 import { authApi, type ActiveSession, type Passkey } from '../../services/auth.service'
-import { notificationsApi, storageApi, mcpApi, type McpKey } from '../../services/settings.service'
+import { notificationsApi, storageApi, mcpApi, mcpApprovalsApi, type McpKey, type PendingApproval } from '../../services/settings.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
@@ -508,6 +508,7 @@ function SessionsTab() {
   const sessions: ActiveSession[] = data?.data.data.sessions ?? []
   const count = data?.data.data.count ?? 0
 
+
   const revokeMutation = useMutation({
     mutationFn: (id: string) => authApi.revokeSession(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['auth-sessions'] }); toast.success('Session revoked') },
@@ -820,6 +821,7 @@ function McpTab() {
   const qc = useQueryClient()
   const [name, setName] = useState('')
   const [scopes, setScopes] = useState<string[]>(['read'])
+  const [approvalRequired, setApprovalRequired] = useState(false)
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [endpoint, setEndpoint] = useState('')
 
@@ -829,7 +831,7 @@ function McpTab() {
   const keys: McpKey[] = data?.data.data.keys ?? []
 
   const createMutation = useMutation({
-    mutationFn: () => mcpApi.create({ name, scopes }),
+    mutationFn: () => mcpApi.create({ name, scopes, approvalRequired }),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['mcp-keys'] })
       setCreatedKey(res.data.data.key)
@@ -837,6 +839,25 @@ function McpTab() {
       toast.success('API key created — copy it now')
     },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to create key'),
+  })
+
+
+  const { data: pendingData } = useQuery({
+    queryKey: ['mcp-approvals'],
+    queryFn: () => mcpApprovalsApi.pending(),
+    refetchInterval: 10_000,
+  })
+  const pending: PendingApproval[] = pendingData?.data.data.approvals ?? []
+
+  const approveMutation = useMutation({
+    mutationFn: (id: string) => mcpApprovalsApi.approve(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['mcp-approvals'] }); toast.success('Action executed') },
+    onError: () => toast.error('Failed to execute'),
+  })
+  const denyMutation = useMutation({
+    mutationFn: (id: string) => mcpApprovalsApi.deny(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['mcp-approvals'] }); toast.success('Denied') },
+    onError: () => toast.error('Failed to deny'),
   })
 
   const revokeMutation = useMutation({
@@ -888,6 +909,10 @@ function McpTab() {
                 ))}
               </div>
               <p className="text-xs text-gray-400 mt-1">admin ⊃ write ⊃ read (implied automatically)</p>
+              <label className="flex items-center gap-2 text-sm text-gray-600 mt-2">
+                <input type="checkbox" className="rounded" checked={approvalRequired} onChange={(e) => setApprovalRequired(e.target.checked)} />
+                Require approval for write/admin tools (human-in-the-loop)
+              </label>
             </div>
             <Button onClick={() => createMutation.mutate()} disabled={!name.trim() || scopes.length === 0} loading={createMutation.isPending}>
               <KeyRound className="h-4 w-4" />Create API key
@@ -907,6 +932,39 @@ function McpTab() {
           )}
         </CardContent>
       </Card>
+
+      {pending.length > 0 && (
+        <Card className="border-amber-200">
+          <CardHeader>
+            <CardTitle className="text-amber-700">
+              ⏸ Pending approvals ({pending.length})
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            {pending.map((a) => (
+              <div key={a.id} className="flex items-center justify-between gap-4 border border-amber-100 rounded-lg p-3 bg-amber-50/50">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium text-gray-900">
+                    <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">{a.tool}</code>
+                    <span className="text-gray-400 ml-2">via {a.keyName}</span>
+                  </p>
+                  <p className="text-xs text-gray-500 mt-0.5 truncate">
+                    {JSON.stringify(a.args ?? {})}
+                  </p>
+                </div>
+                <div className="flex gap-2 shrink-0">
+                  <Button size="sm" onClick={() => approveMutation.mutate(a.id)} loading={approveMutation.isPending && approveMutation.variables === a.id}>
+                    Approve
+                  </Button>
+                  <Button size="sm" variant="outline" className="text-red-500" onClick={() => denyMutation.mutate(a.id)}>
+                    Deny
+                  </Button>
+                </div>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      )}
 
       <Card>
         <CardHeader><CardTitle>Active keys <span className="text-sm font-normal text-gray-400">({keys.length})</span></CardTitle></CardHeader>

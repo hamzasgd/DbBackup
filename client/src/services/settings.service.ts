@@ -73,6 +73,7 @@ export interface McpKey {
   name: string
   keyPrefix: string
   scopes: string[]
+  approvalRequired?: boolean
   lastUsedAt?: string | null
   expiresAt?: string | null
   createdAt: string
@@ -80,7 +81,24 @@ export interface McpKey {
 
 export const mcpApi = {
   list: () => api.get<{ success: boolean; data: { keys: McpKey[] } }>('/mcp/keys'),
-  create: (data: { name: string; scopes: string[]; expiresInDays?: number }) =>
+  create: (data: { name: string; scopes: string[]; expiresInDays?: number; approvalRequired?: boolean }) =>
     api.post<{ success: boolean; data: { id: string; name: string; scopes: string[]; key: string }; message: string }>('/mcp/keys', data),
   revoke: (id: string) => api.delete(`/mcp/keys/${id}`),
+}
+
+export interface PendingApproval {
+  id: string
+  keyName: string
+  tool: string
+  args?: Record<string, unknown> | null
+  createdAt: string
+}
+
+export const mcpApprovalsApi = {
+  pending: () =>
+    api.get<{ success: boolean; data: { approvals: PendingApproval[] } }>('/mcp/keys/approvals/pending'),
+  approve: (id: string) =>
+    api.post<{ success: boolean; data: { text: string } }>(`/mcp/keys/approvals/${id}/approve`),
+  deny: (id: string) =>
+    api.post<{ success: boolean }>(`/mcp/keys/approvals/${id}/deny`),
 }

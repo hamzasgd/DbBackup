@@ -115,6 +115,7 @@ model User {
   credentialAccessLogs CredentialAccessLog[]
   passkeys             PasskeyCredential[]
   mcpApiKeys           McpApiKey[]
+  mcpApprovals         McpApproval[]
   restoreDrills        RestoreDrill[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
@@ -254,6 +255,8 @@ model McpApiKey {
   keyHash    String    @unique
   keyPrefix  String
   scopes     String[]
+  // When true, write/admin tools pause for human approval before executing
+  approvalRequired Boolean @default(false)
   expiresAt  DateTime?
   revokedAt  DateTime?
   lastUsedAt DateTime?
@@ -278,6 +281,23 @@ model RestoreDrill {
 
   @@index([userId, startedAt])
   @@map("restore_drills")
+}
+
+model McpApproval {
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mcpKeyId    String
+  keyName     String
+  tool        String
+  args        Json?
+  status      String    @default("PENDING") // PENDING | APPROVED | DENIED
+  result      String?
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
+
+  @@index([userId, status])
+  @@map("mcp_approvals")
 }
 
 model Schedule {

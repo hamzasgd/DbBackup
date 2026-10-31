@@ -14,7 +14,7 @@ import {
 import { authenticate } from '../middleware/auth.middleware';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { AppError } from '../middleware/errorHandler';
-import { generateMcpKey } from '../services/mcp.service';
+import { generateMcpKey, approveMcpAction, denyMcpAction } from '../services/mcp.service';
 
 /**
  * MCP (Model Context Protocol) over Streamable HTTP — a minimal JSON-RPC 2.0
@@ -46,6 +46,7 @@ interface AuthedKey {
   name: string;
   userId: string;
   scopes: string[];
+  approvalRequired?: boolean;
 }
 
 async function authenticateKey(authHeader: string | undefined): Promise<AuthedKey | null> {
@@ -57,7 +58,7 @@ async function authenticateKey(authHeader: string | undefined): Promise<AuthedKe
   });
   if (!key || key.revokedAt || key.user.isActive !== true) return null;
   if (key.expiresAt && key.expiresAt < new Date()) return null;
-  return { id: key.id, name: key.name, userId: key.userId, scopes: key.scopes };
+  return { id: key.id, name: key.name, userId: key.userId, scopes: key.scopes, approvalRequired: key.approvalRequired };
 }
 
 function rpcResult(id: JsonRpcRequest['id'], result: unknown) {
@@ -119,6 +120,7 @@ mcpRouter.post('/', mcpLimiter, async (req, res: Response, next) => {
             keyName: authed.name,
             scopes: authed.scopes as McpScope[],
             ip: req.ip,
+            approvalRequired: authed.approvalRequired,
           };
           const started = Date.now();
           const result = await dispatchTool(name, args, ctx);
@@ -131,6 +133,7 @@ mcpRouter.post('/', mcpLimiter, async (req, res: Response, next) => {
           responses.push(rpcResult(msg.id, {
             content: [{ type: 'text', text: result.text }],
             isError: result.isError,
+            ...(result.pendingApproval ? { approvalId: result.approvalId, pendingApproval: true } : {}),
           }));
           break;
         }
@@ -157,7 +160,7 @@ keysRouter.get('/', async (req: AuthRequest, res, next) => {
     const keys = await prisma.mcpApiKey.findMany({
       where: { userId: req.user!.userId, revokedAt: null },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, name: true, keyPrefix: true, scopes: true, lastUsedAt: true, expiresAt: true, createdAt: true },
+      select: { id: true, name: true, keyPrefix: true, scopes: true, lastUsedAt: true, expiresAt: true, createdAt: true, approvalRequired: true },
     });
     res.json({ success: true, data: { keys } });
   } catch (err) { next(err); }
@@ -165,7 +168,7 @@ keysRouter.get('/', async (req: AuthRequest, res, next) => {
 
 keysRouter.post('/', async (req: AuthRequest, res, next) => {
   try {
-    const { name, scopes, expiresInDays } = req.body as { name?: string; scopes?: string[]; expiresInDays?: number };
+    const { name, scopes, expiresInDays, approvalRequired } = req.body as { name?: string; scopes?: string[]; expiresInDays?: number; approvalRequired?: boolean };
     if (!name || typeof name !== 'string' || name.length > 60) throw new AppError('Key name is required (max 60 chars)', 400);
     const valid: McpScope[] = ['read', 'write', 'admin'];
     const requested = Array.isArray(scopes) && scopes.length > 0 ? scopes : ['read'];
@@ -191,6 +194,7 @@ keysRouter.post('/', async (req: AuthRequest, res, next) => {
         keyPrefix: prefix,
         scopes: [...finalScopes],
         expiresAt,
+        approvalRequired: !!approvalRequired,
       },
     });
     await logAudit(req.user!.userId, 'MCP_KEY_CREATE', 'mcp', { keyId: key.id, name, scopes: [...finalScopes], expiresAt }, req.ip, req.headers['user-agent']);
@@ -212,6 +216,33 @@ keysRouter.delete('/:id', async (req: AuthRequest, res, next) => {
     await logAudit(req.user!.userId, 'MCP_KEY_REVOKE', 'mcp', { keyId: existing.id, name: existing.name }, req.ip, req.headers['user-agent']);
     res.json({ success: true, message: `Key "${existing.name}" revoked — agents using it get 401 immediately` });
   } catch (err) { next(err); }
+});
+
+// Pending MCP approvals (human-in-the-loop)
+keysRouter.get('/approvals/pending', async (req: AuthRequest, res, next) => {
+  try {
+    const pending = await prisma.mcpApproval.findMany({
+      where: { userId: req.user!.userId, status: 'PENDING' },
+      orderBy: { createdAt: 'desc' },
+    });
+    res.json({ success: true, data: { approvals: pending } });
+  } catch (err) { next(err); }
+});
+
+keysRouter.post('/approvals/:id/approve', async (req: AuthRequest, res, next) => {
+  try {
+    const result = await approveMcpAction(req.user!.userId, req.params.id);
+    await logAudit(req.user!.userId, 'MCP_APPROVE', 'mcp', { approvalId: req.params.id }, req.ip, req.headers['user-agent']);
+    res.json({ success: true, data: result, message: 'Action executed' });
+  } catch (err) { next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Approve failed', 400)); }
+});
+
+keysRouter.post('/approvals/:id/deny', async (req: AuthRequest, res, next) => {
+  try {
+    await denyMcpAction(req.user!.userId, req.params.id);
+    await logAudit(req.user!.userId, 'MCP_DENY', 'mcp', { approvalId: req.params.id }, req.ip, req.headers['user-agent']);
+    res.json({ success: true, message: 'Action denied' });
+  } catch (err) { next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Deny failed', 400)); }
 });
 
 export { mcpRouter, keysRouter };
