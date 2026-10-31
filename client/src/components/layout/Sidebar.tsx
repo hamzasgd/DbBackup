@@ -10,15 +10,35 @@ import { toast } from '../../store/toast.store'
 import { cn } from '../../lib/utils'
 import { queryClient } from '../../App'
 
-const navItems = [
-  { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
-  { to: '/connections', icon: Database, label: 'Connections' },
-  { to: '/backups', icon: HardDrive, label: 'Backups' },
-  { to: '/schedules', icon: Clock, label: 'Schedules' },
-  { to: '/migrations', icon: ArrowLeftRight, label: 'Migrations' },
-  { to: '/sync', icon: RefreshCw, label: 'Sync' },
-  { to: '/audit', icon: History, label: 'Activity Logs' },
-  { to: '/settings', icon: Settings, label: 'Settings' },
+const navGroups: { title: string; items: { to: string; icon: React.ElementType; label: string }[] }[] = [
+  {
+    title: 'Overview',
+    items: [
+      { to: '/dashboard', icon: LayoutDashboard, label: 'Dashboard' },
+      { to: '/audit', icon: History, label: 'Activity Logs' },
+    ],
+  },
+  {
+    title: 'Data',
+    items: [
+      { to: '/connections', icon: Database, label: 'Connections' },
+      { to: '/backups', icon: HardDrive, label: 'Backups' },
+    ],
+  },
+  {
+    title: 'Automation',
+    items: [
+      { to: '/schedules', icon: Clock, label: 'Schedules' },
+      { to: '/migrations', icon: ArrowLeftRight, label: 'Migrations' },
+      { to: '/sync', icon: RefreshCw, label: 'Sync' },
+    ],
+  },
+  {
+    title: 'Account',
+    items: [
+      { to: '/settings', icon: Settings, label: 'Settings' },
+    ],
+  },
 ]
 
 export function Sidebar() {
@@ -71,7 +91,11 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-        {navItems.map(({ to, icon: Icon, label }) => (
+        {navGroups.map((group) => (
+          <div key={group.title} className="mb-3 last:mb-0">
+            <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-gray-600">{group.title}</p>
+            <div className="space-y-0.5">
+        {group.items.map(({ to, icon: Icon, label }) => (
           <NavLink
             key={to}
             to={to}
@@ -92,6 +116,9 @@ export function Sidebar() {
               </>
             )}
           </NavLink>
+        ))}
+            </div>
+          </div>
         ))}
       </nav>
 
