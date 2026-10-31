@@ -23,7 +23,8 @@ export type NotificationEventType =
   | 'STORAGE_THRESHOLD'
   | 'ENCRYPTION_FAILED'
   | 'LOGIN_IP_LOCKOUT'
-  | 'LOGIN_BRUTE_FORCE_SUSPECT';
+  | 'LOGIN_BRUTE_FORCE_SUSPECT'
+  | 'BACKUP_STALE';
 
 export interface NotificationPayload {
   event: NotificationEventType;
@@ -148,7 +149,8 @@ export async function notify(userId: string, payload: NotificationPayload): Prom
     if (!settings) return;
 
     const isFailure = payload.event.includes('FAILED') || payload.event === 'HEARTBEAT_DOWN' || payload.event === 'LOGIN_IP_LOCKOUT'
-    || payload.event === 'LOGIN_BRUTE_FORCE_SUSPECT';
+    || payload.event === 'LOGIN_BRUTE_FORCE_SUSPECT'
+    || payload.event === 'BACKUP_STALE';
     const isSuccess = payload.event.includes('COMPLETED') || payload.event === 'HEARTBEAT_RECOVERED';
     const isRetention = payload.event === 'RETENTION_CLEANUP';
     const isLogin = payload.event === 'LOGIN' || payload.event === 'PASSKEY_LOGIN';

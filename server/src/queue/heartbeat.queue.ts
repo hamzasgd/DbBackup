@@ -2,6 +2,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import { getRedisConfig } from '../config/redis';
 import { runHeartbeatChecks } from '../services/heartbeat.service';
 import { runStorageChecks } from '../services/storage-alerts.service';
+import { runBackupWatchdog } from '../services/backup-watchdog.service';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 
@@ -43,6 +44,7 @@ export function createHeartbeatWorker(): Worker {
       const users = await prisma.user.findMany({ select: { id: true } });
       for (const u of users) {
         await runStorageChecks(u.id).catch((err) => logger.warn('Storage check failed:', err));
+        await runBackupWatchdog(u.id).catch((err) => logger.warn('Backup watchdog failed:', err));
       }
     },
     { connection: getRedisConfig() },

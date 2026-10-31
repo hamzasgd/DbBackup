@@ -27,6 +27,7 @@ const schema = z.object({
   sslEnabled: z.boolean().default(false),
   sshEnabled: z.boolean().default(false),
   heartbeatEnabled: z.boolean().default(false),
+  expectedBackupHours: z.coerce.number().int().positive().optional().nullable(),
   sshHost: z.string().optional().nullable(),
   sshPort: z.coerce.number().optional().nullable(),
   sshUsername: z.string().optional().nullable(),
@@ -260,6 +261,17 @@ export default function ConnectionsPage() {
                   <label htmlFor="heartbeatEnabledChk" className="text-sm text-gray-700">
                     Heartbeat monitoring <span className="text-gray-400">(health check every 5 min, alerts on down/recovery)</span>
                   </label>
+                </div>
+                <div className="pt-1">
+                  <Input
+                    label="Missed-backup watchdog (hours, optional)"
+                    type="number"
+                    placeholder="e.g. 26 — alert if no successful backup within this window"
+                    {...register('expectedBackupHours', { setValueAs: (v: string) => v === '' ? undefined : Number(v) })}
+                  />
+                  <p className="text-xs text-gray-400 mt-1">
+                    Alerts when a scheduled backup is missed (⏰ dead-man switch — works even if the app was down).
+                  </p>
                 </div>
                 {sshEnabled && (
                   <>

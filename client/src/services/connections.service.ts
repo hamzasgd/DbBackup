@@ -12,6 +12,7 @@ export interface Connection {
   sslEnabled: boolean
   sshEnabled: boolean
   heartbeatEnabled?: boolean
+  expectedBackupHours?: number | null
   latestHeartbeat?: { status: string; latencyMs: number | null; checkedAt: string } | null
   sshHost?: string
   sshPort?: number

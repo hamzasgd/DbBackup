@@ -178,6 +178,8 @@ model Connection {
   // Heartbeat monitoring
   heartbeatEnabled Boolean @default(false)
   heartbeats       ConnectionHeartbeat[]
+  // Watchdog: alert when no completed backup within this many hours (null = off)
+  expectedBackupHours Int?
 
   // Relations
   userId              String
