@@ -129,7 +129,7 @@ function NotificationsTab() {
     }
   }
 
-  function field(key: 'emailAddress' | 'smtpHost' | 'smtpUser' | 'smtpPass' | 'slackWebhookUrl') {
+  function field(key: 'emailAddress' | 'smtpHost' | 'smtpUser' | 'smtpPass' | 'slackWebhookUrl' | 'ntfyServerUrl' | 'ntfyTopic' | 'telegramBotToken' | 'telegramChatId' | 'discordWebhookUrl') {
     return {
       value: form[key],
       onChange: (e: React.ChangeEvent<HTMLInputElement>) => setForm((f) => ({ ...f, [key]: e.target.value })),
@@ -203,6 +203,58 @@ function NotificationsTab() {
                 Send test message
               </Button>
             </div>
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+            <CardTitle>ntfy</CardTitle>
+            <Toggle checked={form.ntfyEnabled} onChange={(v) => setForm(f => ({ ...f, ntfyEnabled: v }))} label="Enabled" />
+        </CardHeader>
+        {form.ntfyEnabled && (
+          <CardContent className="space-y-4">
+            <Input label="Server URL (optional, default ntfy.sh)" placeholder="https://ntfy.sh" {...field('ntfyServerUrl')} />
+            <Input label="Topic" placeholder="my-dbbackup-alerts" {...field('ntfyTopic')} />
+            <p className="text-xs text-gray-400">
+              Install the{' '}
+              <a href="https://ntfy.sh" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">ntfy app</a>{' '}
+              and subscribe to this topic to receive push notifications.
+            </p>
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+            <CardTitle>Telegram</CardTitle>
+            <Toggle checked={form.telegramEnabled} onChange={(v) => setForm(f => ({ ...f, telegramEnabled: v }))} label="Enabled" />
+        </CardHeader>
+        {form.telegramEnabled && (
+          <CardContent className="space-y-4">
+            <Input label="Bot token" type="password" placeholder="123456:ABC-DEF..." {...field('telegramBotToken')} />
+            <Input label="Chat ID" placeholder="-1001234567890" {...field('telegramChatId')} />
+            <p className="text-xs text-gray-400">
+              Create a bot via{' '}
+              <a href="https://t.me/BotFather" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">@BotFather</a>{' '}
+              and get your chat ID from{' '}
+              <a href="https://t.me/userinfobot" target="_blank" rel="noreferrer" className="text-blue-500 hover:underline">@userinfobot</a>.
+            </p>
+          </CardContent>
+        )}
+      </Card>
+
+      <Card>
+        <CardHeader>
+            <CardTitle>Discord</CardTitle>
+            <Toggle checked={form.discordEnabled} onChange={(v) => setForm(f => ({ ...f, discordEnabled: v }))} label="Enabled" />
+        </CardHeader>
+        {form.discordEnabled && (
+          <CardContent className="space-y-4">
+            <Input label="Webhook URL" type="password" placeholder="https://discord.com/api/webhooks/..." {...field('discordWebhookUrl')} />
+            <p className="text-xs text-gray-400">
+              Server Settings &rarr; Integrations &rarr; Webhooks &rarr; New Webhook.
+            </p>
           </CardContent>
         )}
       </Card>

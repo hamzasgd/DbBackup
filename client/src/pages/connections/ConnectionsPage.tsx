@@ -212,6 +212,8 @@ export default function ConnectionsPage() {
               { label: 'MySQL', value: 'MYSQL' },
               { label: 'MariaDB', value: 'MARIADB' },
               { label: 'PostgreSQL', value: 'POSTGRESQL' },
+              { label: 'MongoDB', value: 'MONGODB' },
+              { label: 'Redis', value: 'REDIS' },
             ]}
             {...register('type', {
               onChange: (e: React.ChangeEvent<HTMLSelectElement>) =>
