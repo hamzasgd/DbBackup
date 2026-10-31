@@ -134,6 +134,7 @@ export class ConnectionFactory {
             sshHost: decryptIfPresent(config.sshHost) ?? undefined,
             sshUsername: decryptIfPresent(config.sshUsername) ?? undefined,
             sshPrivateKey: decryptIfPresent(config.sshPrivateKey) ?? undefined,
+            sshPrivateKeyPath: config.sshPrivateKeyPath ?? undefined,
             sshPassphrase: decryptIfPresent(config.sshPassphrase) ?? undefined,
         };
     }

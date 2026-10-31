@@ -76,6 +76,7 @@ export function connectionToConfig(connection: Connection): ConnectionConfig {
     sshPort: connection.sshPort ?? undefined,
     sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
     sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
+    sshPrivateKeyPath: connection.sshPrivateKeyPath ?? undefined,
     sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
     connectionTimeout: connection.connectionTimeout ?? 30000,
   };

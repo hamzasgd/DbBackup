@@ -1,4 +1,5 @@
 import { Client as SSHClient } from 'ssh2';
+import fs from 'fs';
 import net from 'net';
 import { ConnectionConfig } from './engines/base.engine';
 import { logger } from '../config/logger';
@@ -13,6 +14,18 @@ export class SSHTunnel {
   constructor(config: ConnectionConfig) {
     this.config = config;
     this.client = new SSHClient();
+  }
+
+  private resolvePrivateKey(): Buffer | string | undefined {
+    if (this.config.sshPrivateKey) {
+      return this.config.sshPrivateKey;
+    }
+    const keyPath = (this.config as { sshPrivateKeyPath?: string }).sshPrivateKeyPath;
+    if (!keyPath) return undefined;
+    if (!fs.existsSync(keyPath)) {
+      throw new Error(`SSH private key file not found on server: ${keyPath}`);
+    }
+    return fs.readFileSync(keyPath);
   }
 
   async connect(): Promise<number> {
@@ -67,7 +80,9 @@ export class SSHTunnel {
           host: this.config.sshHost!,
           port: this.config.sshPort || 22,
           username: this.config.sshUsername!,
-          privateKey: this.config.sshPrivateKey ?? undefined,
+          // Prefer an explicitly stored key; otherwise read the referenced
+          // server-side key file at use time (key material never in the DB).
+          privateKey: this.resolvePrivateKey(),
           passphrase: this.config.sshPassphrase ?? undefined,
         });
     });

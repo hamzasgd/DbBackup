@@ -118,6 +118,7 @@ export async function createMissingTables(
       sshPort: config.sourceConnection.sshPort ?? undefined,
       sshUsername: config.sourceConnection.sshUsername ?? undefined,
       sshPrivateKey: config.sourceConnection.sshPrivateKey ?? undefined,
+      sshPrivateKeyPath: config.sourceConnection.sshPrivateKeyPath ?? undefined,
       sshPassphrase: config.sourceConnection.sshPassphrase ?? undefined,
     };
 
@@ -138,6 +139,7 @@ export async function createMissingTables(
       sshPort: config.targetConnection.sshPort ?? undefined,
       sshUsername: config.targetConnection.sshUsername ?? undefined,
       sshPrivateKey: config.targetConnection.sshPrivateKey ?? undefined,
+      sshPrivateKeyPath: config.targetConnection.sshPrivateKeyPath ?? undefined,
       sshPassphrase: config.targetConnection.sshPassphrase ?? undefined,
     };
 

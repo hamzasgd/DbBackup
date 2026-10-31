@@ -1,55 +1,26 @@
-import crypto from 'crypto';
+/**
+ * Credential encryption — thin facade over the KeyManager
+ * (server/src/services/crypto/key-manager.ts).
+ *
+ * Format: versioned ciphertext `<keyVersion>:<base64 JSON envelope>`
+ * (AES-256-GCM). Legacy unversioned blobs still decrypt, so existing
+ * rows keep working across upgrades and key rotations.
+ *
+ * Key sources (first match wins):
+ *   1. KMS_WRAPPED_MASTER_KEY  — master key unwrapped from AWS KMS at boot,
+ *      memory-only. Kill switch: revoke IAM / KMS key policy and stolen
+ *      ciphertext is permanently unusable.
+ *   2. ENCRYPTION_KEY_PRIMARY (+ ENCRYPTION_KEY_V1..Vn for rotation)
+ *   3. ENCRYPTION_KEY          — legacy single key (still decrypts old rows)
+ *
+ * Call initCrypto() once at boot (index.ts) before anything decrypts.
+ */
 
-const ALGORITHM = 'aes-256-gcm';
-const IV_LENGTH = 16;
-const SALT_LENGTH = 64;
-const TAG_LENGTH = 16;
-const KEY_LENGTH = 32;
-const ITERATIONS = 100000;
+export { encrypt, decrypt, encryptIfPresent, decryptIfPresent, getKeyManager } from './crypto/key-manager';
 
-function getEncryptionKey(): Buffer {
-  const key = process.env.ENCRYPTION_KEY;
-  if (!key) throw new Error('ENCRYPTION_KEY environment variable not set');
-  if (key.length !== 64) throw new Error('ENCRYPTION_KEY must be 64 hex characters (32 bytes)');
-  return Buffer.from(key, 'hex');
-}
+import { getKeyManager } from './crypto/key-manager';
 
-export function encrypt(plaintext: string): string {
-  const masterKey = getEncryptionKey();
-  const salt = crypto.randomBytes(SALT_LENGTH);
-  const iv = crypto.randomBytes(IV_LENGTH);
-
-  const derivedKey = crypto.pbkdf2Sync(masterKey, salt, ITERATIONS, KEY_LENGTH, 'sha512');
-  const cipher = crypto.createCipheriv(ALGORITHM, derivedKey, iv);
-
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-
-  return Buffer.concat([salt, iv, tag, encrypted]).toString('base64');
-}
-
-export function decrypt(ciphertext: string): string {
-  const masterKey = getEncryptionKey();
-  const buffer = Buffer.from(ciphertext, 'base64');
-
-  const salt = buffer.subarray(0, SALT_LENGTH);
-  const iv = buffer.subarray(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
-  const tag = buffer.subarray(SALT_LENGTH + IV_LENGTH, SALT_LENGTH + IV_LENGTH + TAG_LENGTH);
-  const encrypted = buffer.subarray(SALT_LENGTH + IV_LENGTH + TAG_LENGTH);
-
-  const derivedKey = crypto.pbkdf2Sync(masterKey, salt, ITERATIONS, KEY_LENGTH, 'sha512');
-  const decipher = crypto.createDecipheriv(ALGORITHM, derivedKey, iv);
-  decipher.setAuthTag(tag);
-
-  return decipher.update(encrypted) + decipher.final('utf8');
-}
-
-export function encryptIfPresent(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return encrypt(value);
-}
-
-export function decryptIfPresent(value: string | null | undefined): string | null {
-  if (!value) return null;
-  return decrypt(value);
+/** Unwrap the KMS master key if configured (no-op otherwise). */
+export async function initCrypto(): Promise<void> {
+  await getKeyManager().initializeFromKms();
 }

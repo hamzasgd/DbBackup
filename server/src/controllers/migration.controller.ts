@@ -23,6 +23,7 @@ const decryptConn = (conn: any): ConnectionConfig => {
     sshPort: conn.sshPort || 22,
     sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
     sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
     sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
   };
 }

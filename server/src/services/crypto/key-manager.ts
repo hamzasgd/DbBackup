@@ -30,6 +30,7 @@ interface EncryptedValue {
 export class KeyManager {
   private keys: Map<string, KeyVersion> = new Map();
   private primaryKeyId!: string;
+  private awaitingKmsUnwrap = false;
 
   constructor() {
     this.loadKeys();
@@ -58,11 +59,47 @@ export class KeyManager {
     }
 
     if (this.keys.size === 0) {
-      throw new Error('No encryption keys configured. Set ENCRYPTION_KEY or ENCRYPTION_KEY_PRIMARY environment variable.');
+      if (process.env.KMS_WRAPPED_MASTER_KEY) {
+        // Master key lives (wrapped) in AWS KMS — unwrapped in-memory at boot
+        // via initializeFromKms(). Nothing key-shaped ever touches this disk.
+        this.awaitingKmsUnwrap = true;
+        logger.info('KeyManager awaiting KMS-wrapped master key unwrap');
+        return;
+      }
+      throw new Error('No encryption keys configured. Set ENCRYPTION_KEY, ENCRYPTION_KEY_PRIMARY or KMS_WRAPPED_MASTER_KEY.');
     }
 
     this.primaryKeyId = this.keys.has('primary') ? 'primary' : (this.keys.keys().next().value ?? 'legacy');
     logger.info(`KeyManager initialized with ${this.keys.size} key(s), primary: ${this.primaryKeyId}`);
+  }
+
+  /**
+   * Kill-switch mode: the primary master key was encrypted with AWS KMS
+   * (KMS_WRAPPED_MASTER_KEY = base64 CiphertextBlob). It is unwrapped ONCE at
+   * boot and kept only in memory. Revoking the IAM credential / KMS key policy
+   * makes stolen ciphertext permanently undecryptable — the server stores no
+   * usable key material.
+   */
+  async initializeFromKms(): Promise<void> {
+    if (!this.awaitingKmsUnwrap) return;
+
+    const wrapped = process.env.KMS_WRAPPED_MASTER_KEY!;
+    const keyId = process.env.AWS_KMS_KEY_ID || undefined; // optional explicit key id/alias
+
+    const { KMSClient, DecryptCommand } = await import('@aws-sdk/client-kms');
+    const client = new KMSClient({}); // region + credentials from the standard chain (env/instance profile)
+
+    const result = await client.send(new DecryptCommand({
+      CiphertextBlob: Buffer.from(wrapped, 'base64'),
+      ...(keyId ? { KeyId: keyId } : {}),
+    }));
+    if (!result.Plaintext) throw new Error('KMS returned empty plaintext for wrapped master key');
+
+    const hex = Buffer.from(result.Plaintext).toString('hex');
+    this.addKey('kms', hex, true);
+    this.awaitingKmsUnwrap = false;
+    this.primaryKeyId = 'kms';
+    logger.info('🔑 KMS-wrapped master key unwrapped (memory-only, version "kms")');
   }
 
   private addKey(id: string, hexKey: string, isPrimary: boolean): void {
@@ -83,6 +120,9 @@ export class KeyManager {
   }
 
   getPrimaryKey(): Buffer {
+    if (this.awaitingKmsUnwrap) {
+      throw new Error('KMS master key not unwrapped yet — initCrypto() must run at boot');
+    }
     const key = this.keys.get(this.primaryKeyId);
     if (!key) {
       throw new Error(`Primary key ${this.primaryKeyId} not found`);

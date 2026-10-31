@@ -580,6 +580,7 @@ export class SchemaValidatorService {
       sshPort: connection.sshPort ?? undefined,
       sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
       sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
+      sshPrivateKeyPath: connection.sshPrivateKeyPath ?? undefined,
       sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
     };
   }

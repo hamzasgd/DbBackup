@@ -4,11 +4,15 @@ import { logger } from './config/logger';
 import { connectRedis, disconnectRedis } from './config/redis';
 import { startWorkers, stopWorkers } from './queue/workers';
 import { prisma } from './config/database';
+import { initCrypto } from './services/crypto.service';
+import { ensureStorageDir, getStoragePath } from './services/storage.service';
 
 const PORT = process.env.PORT || 3001;
 
 async function bootstrap() {
   try {
+    await initCrypto();
+    ensureStorageDir(getStoragePath());
     await connectRedis();
     await startWorkers();
 
