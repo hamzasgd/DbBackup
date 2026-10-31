@@ -201,6 +201,7 @@ function BackupRow({
 export default function BackupsPage() {
   const qc = useQueryClient()
   const [selectedConnection, setSelectedConnection] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'ALL' | 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'>('ALL')
   const [triggerModal, setTriggerModal] = useState(false)
   const [restoreModal, setRestoreModal] = useState(false)
   const [selectedBackup, setSelectedBackup] = useState<string | null>(null)
@@ -227,8 +228,16 @@ export default function BackupsPage() {
       return backups.some(b => b.status === 'RUNNING' || b.status === 'PENDING') ? 5000 : false
     },
   })
-  const backups = data?.data.data.backups ?? []
+  const allBackups = data?.data.data.backups ?? []
   const total = data?.data.data.total ?? 0
+  const backups = statusFilter === 'ALL' ? allBackups : allBackups.filter(b => b.status === statusFilter)
+  const statusCounts = {
+    ALL: allBackups.length,
+    PENDING: allBackups.filter(b => b.status === 'PENDING').length,
+    RUNNING: allBackups.filter(b => b.status === 'RUNNING').length,
+    COMPLETED: allBackups.filter(b => b.status === 'COMPLETED').length,
+    FAILED: allBackups.filter(b => b.status === 'FAILED').length,
+  }
   const selectedBackupObj = backups.find(b => b.id === selectedBackup)
 
   const triggerMutation = useMutation({
@@ -327,6 +336,26 @@ export default function BackupsPage() {
         </div>
       )}
 
+      {/* Status filter chips */}
+      <div className="flex gap-2 flex-wrap">
+        {(['ALL', 'PENDING', 'RUNNING', 'COMPLETED', 'FAILED'] as const).map((s) => (
+          <button
+            key={s}
+            onClick={() => setStatusFilter(s)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+              statusFilter === s
+                ? 'bg-gray-900 text-white border-gray-900'
+                : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300 hover:text-gray-800'
+            }`}
+          >
+            {s === 'ALL' ? 'All' : s.charAt(0) + s.slice(1).toLowerCase()}
+            <span className={`ml-1.5 tabular-nums ${statusFilter === s ? 'text-gray-300' : 'text-gray-400'}`}>
+              {statusCounts[s]}
+            </span>
+          </button>
+        ))}
+      </div>
+
       {isLoading && <TableSkeleton rows={5} cols={5} />}
 
       {!isLoading && backups.length === 0 && (
@@ -344,7 +373,7 @@ export default function BackupsPage() {
           <CardHeader><CardTitle>Backup History</CardTitle></CardHeader>
           <div className="overflow-x-auto scroll-shadow-x">
             <table className="w-full text-sm">
-              <thead>
+              <thead className="sticky top-0 bg-white shadow-[0_1px_0_0_#e5e7eb] z-10">
                 <tr className="border-b border-gray-100 bg-gray-50">
                   <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Backup</th>
                   <th className="text-left px-6 py-3 text-xs font-medium text-gray-500 uppercase tracking-wider">Connection</th>
