@@ -257,3 +257,28 @@ export async function getHeartbeat(req: AuthRequest, res: Response, next: NextFu
     res.json({ success: true, data: { enabled: conn.heartbeatEnabled, ...summary } });
   } catch (err) { next(err); }
 }
+
+// ─── Config bundle (backup DbBackup itself) ─────────────────────────────────
+import { exportBundle, importBundle } from '../services/config-bundle.service';
+
+export async function exportConfigBundle(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { passphrase } = req.body as { passphrase: string };
+    if (!passphrase || passphrase.length < 8) throw new AppError('Passphrase (min 8 chars) is required to encrypt the bundle', 400);
+    const data = await exportBundle(req.user!.userId, passphrase);
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', `attachment; filename="dbbackup-config-bundle-${new Date().toISOString().slice(0, 10)}.dbbundle"`);
+    res.send(data);
+  } catch (err) { next(err); }
+}
+
+export async function importConfigBundle(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { passphrase } = req.body as { passphrase: string };
+    if (!passphrase) throw new AppError('Passphrase is required to decrypt the bundle', 400);
+    // The file comes as raw body (Content-Type: application/octet-stream)
+    const data = Buffer.from(req.body);
+    const result = await importBundle(req.user!.userId, data, passphrase);
+    res.json({ success: true, data: result, message: `Imported ${result.connections} connections and ${result.schedules} schedules` });
+  } catch (err) { next(err); }
+}
