@@ -1,5 +1,5 @@
 export function sanitizeConfig(config: Record<string, unknown>): Record<string, unknown> {
-  const sensitiveKeys = ['password', 'sshPrivateKey', 'sshPassphrase', 'secretAccessKey', 'accessKeyId'];
+  const sensitiveKeys = ['password', 'passphrase', 'sshPrivateKey', 'sshPassphrase', 'secretAccessKey', 'accessKeyId', 'sslCa', 'sslCert', 'sslKey', 'credential', 'privateKey'];
   const result: Record<string, unknown> = {};
   
   for (const [key, value] of Object.entries(config)) {

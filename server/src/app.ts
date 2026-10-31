@@ -58,7 +58,8 @@ app.set('json replacer', (_key: string, value: unknown) =>
 if (process.env.NODE_ENV !== 'test') {
   morgan.token('sanitized-url', (req) => {
     const url = (req as unknown as { originalUrl?: string }).originalUrl || req.url || '';
-    return url.replace(/[?&]token=[^&]*/g, (m: string) => m.startsWith('?') ? '?token=[REDACTED]' : '&token=[REDACTED]');
+    // Redact any query param whose name smells like a secret (token, password, key, secret, pass)
+    return url.replace(/([?&])([^=&]*?(?:token|pass|secret|key|auth)[^=&]*?)=[^&]*/gi, (m: string, p1: string) => `${p1}[REDACTED]`);
   });
   app.use(morgan(':remote-addr - :remote-user [:date[clf]] ":method :sanitized-url HTTP/:http-version" :status :res[content-length] ":referrer" ":user-agent"'));
 }

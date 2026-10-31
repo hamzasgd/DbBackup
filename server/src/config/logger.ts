@@ -3,6 +3,10 @@ import winston from 'winston';
 // Sensitive fields that should be redacted from logs
 const SENSITIVE_FIELDS = [
   'password',
+  'secret',      // generic: gdriveClientSecret, apiSecret, secretKey, …
+  'passphrase',
+  'refresh',
+  'bearer',
   'passwordHash',
   'sshPrivateKey',
   'sshPassphrase',
