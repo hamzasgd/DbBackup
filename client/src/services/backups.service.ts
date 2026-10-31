@@ -8,7 +8,7 @@ export interface Backup {
   connectionId: string | null
   connection?: { id: string; name: string; type: string } | null
   fileName: string
-  filePath: string
+  filePath?: string  // server-only, stripped from API responses
   fileSize: number
   dbType: string
   dbName: string

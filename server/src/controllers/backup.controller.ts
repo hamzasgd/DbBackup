@@ -43,7 +43,9 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
       prisma.backup.count({ where }),
     ]);
 
-    const withDrill = backups.map(({ drills, ...b }) => ({
+    // Strip server-internal fields — the client never needs the filesystem
+    // path or the S3/Drive object key; operations go through backup IDs.
+    const withDrill = backups.map(({ drills, filePath: _fp, storageKey: _sk, ...b }) => ({
       ...b,
       lastDrill: drills?.[0] ?? null,
     }));
@@ -101,10 +103,10 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
 
 export async function getBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const backup = await prisma.backup.findFirst({
+    const { filePath: _fp, storageKey: _sk, ...backup } = await prisma.backup.findFirst({
       where: { id: req.params.id, userId: req.user!.userId },
       include: { connection: { select: { id: true, name: true, type: true } } },
-    });
+    }) ?? {};
     if (!backup) throw new AppError('Backup not found', 404);
     res.json({ success: true, data: backup });
   } catch (err) { next(err); }
