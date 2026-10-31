@@ -49,6 +49,7 @@ function buildConnectionConfig(conn: {
   sshHost: string | null;
   sshUsername: string | null;
   sshPrivateKey: string | null;
+  sshPrivateKeyPath: string | null;
   sshPassphrase: string | null;
 }): ConnectionConfig {
   return {
@@ -64,6 +65,7 @@ function buildConnectionConfig(conn: {
     sshPort: conn.sshPort || 22,
     sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
     sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
     sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
   };
 }
@@ -81,12 +83,13 @@ export function createRestoreWorker(): Worker<RestoreJobData> {
       let tempPath: string | null = null;
       try {
         const backup = await prisma.backup.findFirst({
-          where: { id: backupId, connection: { userId } },
+          where: { id: backupId, userId },
         });
         if (!backup) throw new Error(`Backup not found: ${backupId}`);
         if (backup.status !== 'COMPLETED') throw new Error('Backup is not in completed state');
 
         const connId = targetConnectionId || backup.connectionId;
+        if (!connId) throw new Error('Backup has no source connection; a target connection is required');
         const conn = await prisma.connection.findFirst({
           where: { id: connId, userId },
         });
@@ -118,6 +121,9 @@ export function createRestoreWorker(): Worker<RestoreJobData> {
 
         await publishProgress(channel, { progress: 0, status: 'FAILED', error: errMsg });
         logger.error(`❌ Restore failed (restoreId=${jobId}):`, error);
+
+        const { logAudit } = await import('../services/audit.service');
+        await logAudit(userId, 'RESTORE_FAILED', 'backup', { backupId, targetConnectionId: targetConnectionId ?? null, error: errMsg });
 
         void notify(userId, {
           event: 'RESTORE_FAILED',
