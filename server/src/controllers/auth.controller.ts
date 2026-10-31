@@ -145,6 +145,12 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       throw new AppError('Invalid credentials', 401);
     }
 
+    if (user.passwordLoginDisabled) {
+      await logAudit(user.id, 'LOGIN_BLOCKED_PASSKEY_ONLY', 'user', { email: user.email }, req.ip, req.headers['user-agent']);
+      res.status(403).json({ success: false, message: 'Password sign-in is disabled for this account — use your passkey.' });
+      return;
+    }
+
     clearLoginFailures(req.ip);
 
     const lockMs = loginLockRemaining(user);
@@ -429,6 +435,12 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
       return;
     }
 
+    if (user.passwordLoginDisabled) {
+      await logAudit(user.id, 'LOGIN_BLOCKED_PASSKEY_ONLY', 'user', { email: user.email }, req.ip, req.headers['user-agent']);
+      res.status(403).json({ success: false, message: 'Password sign-in is disabled for this account — use your passkey.' });
+      return;
+    }
+
     clearLoginFailures(req.ip);
 
     const lockMs = loginLockRemaining(user);
@@ -456,4 +468,27 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
   } catch (err) {
     next(err);
   }
+}
+
+/** Toggle passkey-only mode (disable/enable password sign-in). */
+export async function togglePasswordLogin(req: Request & { user?: { userId: string } }, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { disabled } = req.body as { disabled: boolean };
+
+    // Safety: can't disable password login without at least one passkey
+    if (disabled) {
+      const count = await prisma.passkeyCredential.count({ where: { userId: req.user!.userId } });
+      if (count === 0) {
+        res.status(400).json({ success: false, message: 'Register a passkey first — you would lock yourself out' });
+        return;
+      }
+    }
+
+    await prisma.user.update({
+      where: { id: req.user!.userId },
+      data: { passwordLoginDisabled: disabled },
+    });
+    await logAudit(req.user!.userId, disabled ? 'PASSWORD_LOGIN_DISABLED' : 'PASSWORD_LOGIN_ENABLED', 'user', {}, req.ip, req.headers['user-agent']);
+    res.json({ success: true, message: disabled ? 'Password sign-in disabled — passkey only' : 'Password sign-in enabled' });
+  } catch (err) { next(err); }
 }

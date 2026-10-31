@@ -591,6 +591,37 @@ function SessionsTab() {
 }
 
 
+
+function PasswordLoginToggle() {
+  const [passkeyOnly, setPasskeyOnly] = useState(false)
+  const { data: pkData } = useQuery({ queryKey: ['passkeys'], queryFn: () => authApi.passkeys() })
+  const hasPasskeys = (pkData?.data.data.passkeys ?? []).length > 0
+
+  const mutation = useMutation({
+    mutationFn: (disabled: boolean) => authApi.togglePasswordLogin(disabled),
+    onSuccess: (res) => { setPasskeyOnly(res.data.message.includes('disabled')); toast.success(res.data.message) },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed'),
+  })
+
+  return (
+    <div className="border border-purple-100 bg-purple-50/50 rounded-lg p-4 space-y-2">
+      <Toggle
+        checked={passkeyOnly}
+        onChange={(v) => {
+          if (v && !hasPasskeys) { toast.error('Register a passkey first'); return }
+          mutation.mutate(v)
+        }}
+        label="Passkey-only mode — disable password sign-in entirely"
+      />
+      <p className="text-xs text-gray-400">
+        {hasPasskeys
+          ? 'When enabled, sign-in requires a passkey (Touch ID / Face ID / security key). Password attempts are rejected.'
+          : 'Register at least one passkey above before enabling this.'}
+      </p>
+    </div>
+  )
+}
+
 function PasskeysCard() {
   const qc = useQueryClient()
   const [busy, setBusy] = useState(false)
@@ -999,6 +1030,7 @@ export default function SettingsPage() {
         <>
           <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400 pt-2">Passkeys</h3>
           <PasskeysCard />
+          <PasswordLoginToggle />
         </>
       )}
       {activeTab === 'notifications' && <NotificationsTab />}

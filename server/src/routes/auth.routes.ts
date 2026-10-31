@@ -4,7 +4,7 @@ import {
   register, login, refreshToken, logout, getMe, changePassword,
   getSessions, revokeSession, revokeAllSessions,
   passkeyRegisterOptions, passkeyRegisterVerify, passkeyList, passkeyDelete,
-  passkeyLoginOptions, passkeyLoginVerify,
+  passkeyLoginOptions, passkeyLoginVerify, togglePasswordLogin,
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
@@ -30,6 +30,7 @@ router.put('/change-password', authenticate, validate(changePasswordSchema), cha
 
 // Active sessions (refresh tokens) — view + revoke
 router.get('/sessions', authenticate, getSessions);
+router.put('/password-login', authenticate, togglePasswordLogin);
 router.delete('/sessions', authenticate, revokeAllSessions);
 router.delete('/sessions/:id', authenticate, revokeSession);
 

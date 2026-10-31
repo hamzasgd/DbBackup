@@ -9,6 +9,8 @@ export const authApi = {
     api.post('/auth/login', data),
   logout: () => api.post('/auth/logout', { refreshToken: useAuthStore.getState().refreshToken }),
   me: () => api.get('/auth/me'),
+  togglePasswordLogin: (disabled: boolean) =>
+    api.put<{ success: boolean; message: string }>('/auth/password-login', { disabled }),
   changePassword: (data: { currentPassword: string; newPassword: string }) =>
     api.put('/auth/change-password', data),
 
