@@ -668,6 +668,82 @@ function PasskeysCard() {
 }
 
 
+
+const MCP_AGENTS: { id: string; label: string; file: string; wrap: (url: string, key: string) => string }[] = [
+  {
+    id: 'claude-desktop', label: 'Claude Desktop',
+    file: 'claude_desktop_config.json — macOS: ~/Library/Application Support/Claude/ · Windows: %APPDATA%\\Claude\\',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { type: 'http', url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'claude-code', label: 'Claude Code',
+    file: 'Terminal (one-liner, no JSON needed)',
+    wrap: (url, key) => `claude mcp add --transport http dbbackup ${url} --header "Authorization: Bearer ${key}"`,
+  },
+  {
+    id: 'cursor', label: 'Cursor',
+    file: '~/.cursor/mcp.json (global) or .cursor/mcp.json (project)',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'windsurf', label: 'Windsurf',
+    file: '~/.codeium/windsurf/mcp_config.json',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { serverUrl: url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'vscode', label: 'VS Code (Copilot)',
+    file: '.vscode/mcp.json in your workspace',
+    wrap: (url, key) => JSON.stringify({ servers: { dbbackup: { type: 'http', url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'cline', label: 'Cline (VS Code)',
+    file: 'Cline: MCP Servers → Configure → cline_mcp_settings.json',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'zed', label: 'Zed',
+    file: 'settings.json (~/.config/zed/settings.json)',
+    wrap: (url, key) => JSON.stringify({ context_servers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'goose', label: 'Goose',
+    file: '~/.config/goose/config.yaml',
+    wrap: (url, key) => `mcpservers:\n  dbbackup:\n    url: ${url}\n    headers:\n      Authorization: Bearer ${key}`,
+  },
+]
+
+function ConnectAgentHelper({ endpoint }: { endpoint: string }) {
+  const [agentId, setAgentId] = useState('claude-desktop')
+  const agent = MCP_AGENTS.find((a) => a.id === agentId) ?? MCP_AGENTS[0]
+  const snippet = agent.wrap(endpoint, 'dbbk_mcp_PASTE_YOUR_KEY')
+
+  return (
+    <div className="border-t pt-4 space-y-2">
+      <p className="text-sm font-medium text-gray-700">Connect your agent</p>
+      <div className="flex gap-2 flex-wrap">
+        {MCP_AGENTS.map((a) => (
+          <button
+            key={a.id}
+            onClick={() => setAgentId(a.id)}
+            className={`px-3 py-1.5 rounded-full text-xs font-medium border transition-colors ${
+              agentId === a.id ? 'bg-gray-900 text-white border-gray-900' : 'bg-white text-gray-600 border-gray-200 hover:border-gray-300'
+            }`}
+          >
+            {a.label}
+          </button>
+        ))}
+      </div>
+      <p className="text-xs text-gray-400">{agent.file}</p>
+      <div className="flex gap-2 items-start">
+        <pre className="flex-1 text-xs font-mono bg-gray-900 text-gray-100 rounded-lg p-3 overflow-x-auto">{snippet}</pre>
+        <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(snippet); toast.success('Config copied') }}>
+          <Copy className="h-3.5 w-3.5" />
+        </Button>
+      </div>
+    </div>
+  )
+}
+
 function McpTab() {
   const qc = useQueryClient()
   const [name, setName] = useState('')
@@ -715,6 +791,8 @@ function McpTab() {
             <div>Header: Authorization: Bearer dbbk_mcp_…</div>
             <div>Transport: Streamable HTTP (JSON-RPC 2.0)</div>
           </div>
+
+          <ConnectAgentHelper endpoint={endpoint} />
 
           <div className="border-t pt-4 space-y-3">
             <Input label="Key name" placeholder="e.g. Claude Desktop" value={name} onChange={(e) => setName(e.target.value)} />
