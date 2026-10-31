@@ -10,6 +10,7 @@ import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
 
 const schema = z.object({
+  acceptTerms: z.literal(true, { message: 'You must accept the Terms of Service' }),
   name: z.string().min(2, 'Name must be at least 2 characters'),
   email: z.string().email('Enter a valid email'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
@@ -49,6 +50,22 @@ export default function RegisterPage() {
 
         <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
           <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <div className="flex items-start gap-2">
+              <input
+                type="checkbox"
+                id="acceptTerms"
+                {...register('acceptTerms')}
+                className="rounded mt-1"
+              />
+              <label htmlFor="acceptTerms" className="text-sm text-gray-600">
+                I have read and accept the{' '}
+                <Link to="/terms" className="text-blue-600 font-medium hover:underline">Terms of Service</Link>
+                {' '}— I understand this software is provided "as is" with no warranty and I use it at my own risk.
+              </label>
+            </div>
+            {errors.acceptTerms && (
+              <p className="text-sm text-red-600">{errors.acceptTerms.message}</p>
+            )}
             <Input label="Full name" placeholder="John Doe" error={errors.name?.message} {...register('name')} />
             <Input label="Email" type="email" placeholder="you@example.com" error={errors.email?.message} {...register('email')} />
             <Input label="Password" type="password" placeholder="Min. 8 characters" error={errors.password?.message} {...register('password')} />

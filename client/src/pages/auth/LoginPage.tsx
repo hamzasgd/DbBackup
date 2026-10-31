@@ -1,8 +1,10 @@
+import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Link, useNavigate } from 'react-router-dom'
-import { HardDrive } from 'lucide-react'
+import { HardDrive, KeyRound } from 'lucide-react'
+import { startAuthentication } from '@simplewebauthn/browser'
 import { authApi } from '../../services/auth.service'
 import { useAuthStore } from '../../store/auth.store'
 import { toast } from '../../store/toast.store'
@@ -34,6 +36,29 @@ export default function LoginPage() {
     } catch (err: unknown) {
       const msg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Login failed'
       toast.error(msg)
+    }
+  }
+
+  const [passkeyBusy, setPasskeyBusy] = useState(false)
+
+  const loginWithPasskey = async () => {
+    setPasskeyBusy(true)
+    try {
+      const opts = await authApi.passkeyLoginOptions()
+      const assertion = await startAuthentication({ optionsJSON: opts.data.data.options })
+      const res = await authApi.passkeyLoginVerify(assertion)
+      const { user, accessToken, refreshToken } = res.data.data
+      queryClient.clear()
+      setAuth(user, accessToken, refreshToken)
+      toast.success(`Welcome back, ${user.name}!`)
+      navigate('/dashboard')
+    } catch (err: unknown) {
+      const apiMsg = (err as { response?: { data?: { message?: string } } })?.response?.data?.message
+      if (apiMsg) toast.error(apiMsg)
+      else if ((err as Error)?.name === 'NotAllowedError') { /* user cancelled the browser prompt */ }
+      else toast.error('Passkey login failed')
+    } finally {
+      setPasskeyBusy(false)
     }
   }
 
@@ -69,7 +94,21 @@ export default function LoginPage() {
             </Button>
           </form>
 
-          <p className="text-center text-sm text-gray-500 mt-6">
+          <div className="flex items-center gap-3 my-4">
+            <div className="flex-1 h-px bg-gray-200" />
+            <span className="text-xs text-gray-400 uppercase">or</span>
+            <div className="flex-1 h-px bg-gray-200" />
+          </div>
+          <Button variant="outline" className="w-full" onClick={loginWithPasskey} disabled={passkeyBusy}>
+            <KeyRound className="h-4 w-4" />{passkeyBusy ? 'Waiting for passkey…' : 'Sign in with passkey'}
+          </Button>
+
+          <p className="text-center text-xs text-gray-400 mt-4">
+            Use at your own risk — no warranty.{' '}
+            <Link to="/terms" className="underline hover:text-gray-600">Terms of Service</Link>
+          </p>
+
+          <p className="text-center text-sm text-gray-500 mt-4">
             Don't have an account?{' '}
             <Link to="/register" className="text-blue-600 font-medium hover:underline">
               Create one

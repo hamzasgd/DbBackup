@@ -4,6 +4,7 @@ import { DashboardLayout } from './components/layout/DashboardLayout'
 import { ProtectedRoute } from './components/layout/ProtectedRoute'
 import { Toaster } from './components/ui/Toaster'
 import LoginPage from './pages/auth/LoginPage'
+import TermsPage from './pages/auth/TermsPage'
 import RegisterPage from './pages/auth/RegisterPage'
 import DashboardPage from './pages/dashboard/DashboardPage'
 import ConnectionsPage from './pages/connections/ConnectionsPage'
@@ -15,6 +16,7 @@ import SettingsPage from './pages/settings/SettingsPage'
 import MigrationsPage from './pages/migrations/MigrationsPage'
 import SyncConfigurationsPage from './pages/sync/SyncConfigurationsPage'
 import SyncDetailPage from './pages/sync/SyncDetailPage'
+import AuditLogsPage from './pages/audit/AuditLogsPage'
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -28,6 +30,7 @@ function App() {
       <BrowserRouter>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
+          <Route path="/terms" element={<TermsPage />} />
           <Route path="/register" element={<RegisterPage />} />
           <Route element={<ProtectedRoute />}>
             <Route element={<DashboardLayout />}>
@@ -41,6 +44,7 @@ function App() {
               <Route path="/sync" element={<SyncConfigurationsPage />} />
               <Route path="/sync/:id" element={<SyncDetailPage />} />
               <Route path="/settings" element={<SettingsPage />} />
+              <Route path="/audit" element={<AuditLogsPage />} />
             </Route>
           </Route>
           <Route path="*" element={<Navigate to="/dashboard" replace />} />

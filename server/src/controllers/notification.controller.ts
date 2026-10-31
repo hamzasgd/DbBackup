@@ -31,7 +31,7 @@ export async function upsertNotificationSettings(req: AuthRequest, res: Response
     const {
       emailEnabled, emailAddress, smtpHost, smtpPort, smtpUser, smtpPass,
       smtpSecure, slackEnabled, slackWebhookUrl,
-      notifyOnSuccess, notifyOnFailure, notifyOnRetention,
+      notifyOnSuccess, notifyOnFailure, notifyOnRetention, notifyOnLogin, notifyOnStorage,
     } = req.body;
 
     // Only encrypt if a real value (not the masked placeholder) is provided
@@ -52,6 +52,8 @@ export async function upsertNotificationSettings(req: AuthRequest, res: Response
     if (notifyOnSuccess !== undefined) data.notifyOnSuccess = notifyOnSuccess;
     if (notifyOnFailure !== undefined) data.notifyOnFailure = notifyOnFailure;
     if (notifyOnRetention !== undefined) data.notifyOnRetention = notifyOnRetention;
+    if (notifyOnLogin !== undefined) data.notifyOnLogin = notifyOnLogin;
+    if (notifyOnStorage !== undefined) data.notifyOnStorage = notifyOnStorage;
 
     const settings = await prisma.notificationSettings.upsert({
       where: { userId: req.user!.userId },

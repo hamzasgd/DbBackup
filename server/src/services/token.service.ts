@@ -33,12 +33,17 @@ export function verifyRefreshToken(token: string): TokenPayload {
   return jwt.verify(token, JWT_REFRESH_SECRET) as unknown as TokenPayload;
 }
 
-export async function saveRefreshToken(userId: string, token: string): Promise<void> {
+export async function saveRefreshToken(
+  userId: string,
+  token: string,
+  ipAddress?: string,
+  userAgent?: string,
+): Promise<void> {
   const expiresAt = new Date();
   expiresAt.setDate(expiresAt.getDate() + 7);
 
   await prisma.refreshToken.create({
-    data: { id: uuidv4(), token, userId, expiresAt },
+    data: { id: uuidv4(), token, userId, expiresAt, ipAddress, userAgent },
   });
 }
 
