@@ -21,6 +21,21 @@
 
 ---
 
+## ⚠️ USE AT YOUR OWN RISK — NO WARRANTY, NO RESPONSIBILITY
+
+> **This software is provided "AS IS" without warranty of any kind.** The authors are **NOT responsible — under any circumstances — for any data loss, data corruption, data leakage, failed backups, failed restores, broken databases, downtime, lost profits, or any other damage** arising from the use of this software. This includes situations involving the software's security features — see [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md) (you accept these terms by using the software).
+>
+> **You are the operator.** DbBackup is self-hosted software that *you* deploy and manage. Before trusting it with production data:
+> - **Never rely on it as your only backup** — keep an independent backup strategy.
+> - **Verify backups and test restores** regularly (a backup you haven't restored is not a backup).
+> - **Secure your own infrastructure** — server, encryption keys, and third-party accounts are your responsibility.
+>
+> The project takes security seriously (see [SECURITY.md](SECURITY.md)) — but security features **reduce** risk, they do **not** guarantee outcomes, and they create **no liability** for the authors. See the [LICENSE](LICENSE) for the full MIT disclaimer.
+>
+> 📄 Legal: [Terms of Service](TERMS_OF_SERVICE.md) · [Security Policy & vulnerability reporting](SECURITY.md) · [Incident response runbook](INCIDENT_RESPONSE.md) · [License](LICENSE)
+
+---
+
 ## ✨ Features
 
 ### Core
@@ -30,41 +45,46 @@
 - **Scheduled Backups** — Cron-based automation (hourly, daily, weekly, monthly, or custom cron expressions)
 - **Cross-Engine Migration** — Migrate data between databases of different types (e.g., MySQL → PostgreSQL)
 - **Data Export** — Export individual tables as JSON, CSV, or SQL
+- **Retention Policies** — Age + "keep last N" rules per schedule, daily global sweep, and an on-demand **Purge Now** button
+- **Safe Connection Deletion** — Delete a connection while keeping its backup history & files (or clean everything)
 
-### Reliability & Monitoring
+### Storage & Encryption
 
-- **Real-Time Progress** — Server-Sent Events (SSE) for live backup and migration progress
+- **Local Disk** — Backups stored with owner-only (`0700`) permissions; never served publicly
+- **Amazon S3 / S3-compatible** — AWS S3, DigitalOcean Spaces, MinIO, Backblaze B2, with a **bucket-privacy probe** on Test Connection (warns if the bucket is publicly accessible)
+- **Google Drive** — OAuth refresh-token uploads into a `DbBackups` folder, quota-aware
+- **🔐 Encrypted Backups at Rest** — Optional AES-256-GCM encryption (`.enc`) with a user passphrase. Plaintext is hashed, encrypted, **decrypted back and hash-verified before the plaintext is deleted** — a corrupt encrypted copy can never replace good data. Downloads/restores/verification decrypt transparently; passphrase rotation keeps old backups readable (history + current-passphrase confirmation)
+
+### Monitoring & Alerts
+
+- **DB Heartbeat** — Per-connection `SELECT 1` health checks every 5 minutes (SSH-tunnel aware) with uptime %, latency, 7-day history, and **down/recovery alerts**
+- **Storage Threshold Alerts** — Email/Slack when local disk, Google Drive quota, or your S3 budget crosses a threshold (default 80%); live usage bars on the Storage page
+- **Login Alerts** — Email/Slack on every sign-in and wrong-password attempt (device + IP)
+- **Activity Logs** — Complete audit trail of every action: logins, connections, backups, restores, storage changes, passkeys, sessions — with IP and device
+- **Real-Time Progress** — SSE for live backup/restore/migration progress
 - **Backup Verification** — SHA-256 integrity checks with one-click verify
-- **Retention Policies** — Automatic cleanup of old backups based on configurable age rules
-- **Audit Log** — Full activity trail for all user and system operations
 
-### Security
+### Security & Access
 
-- **JWT Authentication** — Access + refresh token rotation with race-condition-safe refresh
-- **Encryption at Rest** — AES-256-GCM encryption for all stored credentials and SSH keys
-- **Key Rotation** — Support for multiple encryption keys with version prefixes for seamless rotation
-- **Cloud KMS Integration** — Optional AWS KMS, Azure Key Vault, GCP KMS, or HashiCorp Vault for key management
-- **Credential Access Logging** — Full audit trail of credential access (decrypt, test, backup, restore, sync, migration)
-- **Rate Limiting** — Brute-force protection on auth endpoints + credential access rate limiting
-- **Sensitive Data Redaction** — Logger automatically redacts passwords, tokens, keys, and other secrets
-- **SSL/TLS Enforcement** — Connection validator warns/enforces SSL in production
-- **SSH Key Validation** — Validates SSH private key format and minimum length
-- **Secure Memory Handling** — Credentials cleared from memory after use
-- **SSH Tunnels** — Connect to remote databases through SSH bastion hosts
-- **Helmet & CORS** — Standard Express security hardening
+- **Passkey (WebAuthn) Login** — Passwordless sign-in with Touch ID / Face ID / Windows Hello / security keys
+- **Active Session Management** — See every logged-in device (browser, OS, IP, login time) and revoke individually or all at once
+- **Password Change Lockdown** — Optional 2-hour sign-in cool-down after a password change (bank-style anti-takeover)
+- **Credential Encryption** — All stored credentials and SSH keys encrypted with AES-256-GCM; versioned keys with rotation support
+- **KMS Kill Switch** — Optional AWS KMS-wrapped master key: the encryption key **never touches the server disk**; revoking IAM/KMS makes stolen ciphertext permanently undecryptable
+- **SSH Keys Out of the DB** — Reference a server-side key file instead of storing the PEM in the database
+- **SSH Tunnels** — Connect to private databases through bastion hosts
+- **JWT + refresh rotation**, **rate limiting**, **secret redaction in logs**, **Helmet/CORS**, **SSL/TLS enforcement**, **secure memory handling**
 
 ### Integrations
 
-- **S3-Compatible Storage** — Upload backups to AWS S3, DigitalOcean Spaces, MinIO, Backblaze B2, etc.
-- **Email Notifications** — SMTP alerts on backup success, failure, and retention events
-- **Slack Notifications** — Webhook-based alerts to Slack channels
+- **Email Notifications** — SMTP alerts on success, failure, retention, heartbeat, storage, and login events
+- **Slack Notifications** — Webhook alerts for all of the above
 
 ### UI/UX
 
 - **Responsive Dashboard** — Mobile-friendly layout with collapsible sidebar
 - **Loading Skeletons** — Smooth loading states across all pages
 - **Confirmation Dialogs** — Styled confirmation prompts for destructive actions
-- **Dark-Ready Components** — Built with shadcn/ui primitives
 
 ---
 
@@ -76,10 +96,10 @@
 | **Backend** | Node.js, Express.js 4, TypeScript, tsx (dev) |
 | **Database** | PostgreSQL 16 via Prisma ORM 5 |
 | **Queue** | BullMQ 5 + Redis 7 (via ioredis) |
-| **Auth** | JWT (access + refresh tokens), bcryptjs |
+| **Auth** | JWT (access + refresh tokens), bcryptjs, WebAuthn passkeys (@simplewebauthn) |
 | **Encryption** | AES-256-GCM (Node.js `crypto`), Key Manager with rotation support, Cloud KMS providers (AWS, Azure, GCP, Vault) |
 | **SSH** | ssh2 library |
-| **Storage** | Local filesystem + AWS S3 SDK v3 |
+| **Storage** | Local filesystem + AWS S3 SDK v3 + Google Drive (REST) |
 | **Notifications** | Nodemailer (SMTP) + Slack webhooks |
 | **Logging** | Winston + Morgan |
 
@@ -245,45 +265,40 @@ Open http://localhost:5173 and register your first user.
 
 ## ⚙️ Environment Variables
 
+Key variables (full annotated list in [`server/.env.example`](server/.env.example)):
+
 | Variable | Description | Default |
 |---|---|---|
 | `PORT` | API server port | `3001` |
 | `DATABASE_URL` | PostgreSQL connection string | — |
-| `JWT_ACCESS_SECRET` | Secret for signing access tokens | — |
-| `JWT_REFRESH_SECRET` | Secret for signing refresh tokens | — |
-| `JWT_ACCESS_EXPIRES_IN` | Access token TTL | `15m` |
-| `JWT_REFRESH_EXPIRES_IN` | Refresh token TTL | `7d` |
-| `ENCRYPTION_KEY` | Legacy AES-256 encryption key (64 hex characters) | — |
-| `ENCRYPTION_KEY_PRIMARY` | Primary AES-256 encryption key (64 hex characters) | — |
-| `ENCRYPTION_KEY_V1, V2...` | Additional keys for key rotation | — |
-| `ENCRYPTION_PROVIDER` | Crypto provider: `local`, `aws-kms`, `azure-keyvault`, `gcp-kms`, `hashicorp-vault` | `local` |
-| `AWS_KMS_KEY_ID` | AWS KMS key ID (when provider is `aws-kms`) | — |
-| `AWS_REGION` | AWS region | `us-east-1` |
-| `AZURE_KEYVAULT_URL` | Azure Key Vault URL (when provider is `azure-keyvault`) | — |
-| `AZURE_KEYVAULT_KEY_NAME` | Key name | `dbbackup-encryption` |
-| `GCP_PROJECT_ID` | GCP project ID (when provider is `gcp-kms`) | — |
-| `GCP_KMS_LOCATION` | KMS location | `global` |
-| `GCP_KMS_KEY_RING` | KMS key ring | `dbbackup` |
-| `GCP_KMS_KEY_NAME` | Key name | `dbbackup-encryption` |
-| `VAULT_ADDR` | HashiCorp Vault address (when provider is `hashicorp-vault`) | `http://localhost:8200` |
-| `VAULT_TOKEN` | Vault token | — |
-| `VAULT_KEY_NAME` | Transit key name | `dbbackup-encryption` |
-| `VAULT_MOUNT_PATH` | Transit mount path | `transit` |
-| `ENFORCE_SSL` | Enforce SSL for database connections in production | `false` |
-| `REDIS_HOST` | Redis host | `localhost` |
-| `REDIS_PORT` | Redis port | `6379` |
-| `REDIS_PASSWORD` | Redis password | — |
-| `BACKUP_STORAGE_PATH` | Local backup directory | `./backups` |
-| `DEFAULT_RETENTION_DAYS` | Fallback retention (days) for connections without a schedule (0 = disabled) | `30` |
-| `DEFAULT_RETENTION_COUNT` | Fallback "keep last N" for connections without a schedule (0 = disabled) | — |
-| `RETENTION_SWEEP_CRON` | Cron pattern for the global retention sweep | `30 3 * * *` |
-| `STORAGE_TYPE` | Storage backend (`local` or `s3`) | `local` |
-| `CLIENT_URL` | Frontend URL (for CORS) | `http://localhost:5173` |
-| `S3_BUCKET` | S3 bucket name | — |
-| `S3_REGION` | S3 region | — |
-| `S3_ACCESS_KEY` | S3 access key ID | — |
-| `S3_SECRET_KEY` | S3 secret access key | — |
-| `S3_ENDPOINT` | Custom S3 endpoint (for MinIO, DO Spaces, etc.) | — |
+| `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` | Token signing secrets | — |
+| `ENCRYPTION_KEY` | Legacy encryption key (still decrypts existing rows) | — |
+| `ENCRYPTION_KEY_PRIMARY` + `ENCRYPTION_KEY_V1...` | Versioned keys for rotation | — |
+| `KMS_WRAPPED_MASTER_KEY` | **Kill-switch mode**: master key wrapped by AWS KMS, unwrapped in memory at boot — never on disk | — |
+| `AWS_KMS_KEY_ID` / `AWS_REGION` | KMS settings for the above | — |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis (queues) | `localhost:6379` |
+| `BACKUP_STORAGE_PATH` | Local backup dir — keep it **outside the web root**, `0700` (enforced by the app) | `./backups` |
+| `HEARTBEAT_INTERVAL_MINUTES` | DB heartbeat check interval | `5` |
+| `STORAGE_ALERT_THRESHOLD_PERCENT` | Storage usage alert threshold | `80` |
+| `S3_STORAGE_BUDGET_GB` | S3 budget for threshold alerts (S3 has no quota) | — |
+| `PASSWORD_CHANGE_LOCKDOWN_HOURS` | Sign-in lock after password change (`0` disables) | `2` |
+| `PASSKEY_RP_ID` / `PASSKEY_EXTRA_ORIGINS` | WebAuthn relying-party config (auto-derived if unset) | — |
+| `DEFAULT_RETENTION_DAYS` / `DEFAULT_RETENTION_COUNT` | Fallback retention for schedule-less connections | `30` / off |
+| `RETENTION_SWEEP_CRON` | Daily global retention sweep | `30 3 * * *` |
+| `CLIENT_URL` | Frontend URL (CORS) | `http://localhost:5173` |
+
+> Storage backends (S3 / Google Drive), notification channels, and the **backup encryption passphrase** are configured in the app's Settings UI — not env vars — and are stored encrypted in the database.
+
+---
+
+## 🔐 Security & Data Safety — read this before production
+
+1. **Backup encryption is passphrase-based.** If you lose the passphrase *and* the app database, encrypted backups are **unrecoverable by design**. Keep an offline copy of the passphrase.
+2. **Never rely on DbBackup as your only backup.** Keep an independent copy of critical data and periodically test restores.
+3. **KMS kill switch** protects *credentials*: if the KMS key/IAM is revoked, stored credentials cannot be decrypted anywhere — but backup files encrypted with your passphrase remain recoverable with the passphrase.
+4. **Lock down the host**: backups directory must never be web-accessible (see the nginx notes in `.env.example`), and the backup encryption passphrase should differ from your login password.
+
+Despite all of this, **security features reduce risk — they do not guarantee outcomes, and they create no liability for the authors.** See [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md) and [SECURITY.md](SECURITY.md).
 
 ---
 
@@ -298,7 +313,14 @@ Open http://localhost:5173 and register your first user.
 | `POST` | `/api/auth/logout` | Revoke refresh token |
 | `POST` | `/api/auth/refresh` | Refresh access token |
 | `GET` | `/api/auth/me` | Get current user |
-| `POST` | `/api/auth/change-password` | Change password |
+| `POST` | `/api/auth/change-password` | Change password (starts the sign-in cool-down) |
+| `GET` | `/api/auth/sessions` | List active sessions (device, IP, login time) |
+| `DELETE` | `/api/auth/sessions/:id` | Revoke one session |
+| `DELETE` | `/api/auth/sessions` | Revoke all sessions (log out everywhere) |
+| `GET` | `/api/auth/passkey/list` | List registered passkeys |
+| `POST` | `/api/auth/passkey/register/options` + `/verify` | Register a passkey |
+| `DELETE` | `/api/auth/passkey/:id` | Remove a passkey |
+| `POST` | `/api/auth/passkey/login/options` + `/verify` | Passwordless passkey login |
 
 ### Connections
 
@@ -361,8 +383,25 @@ Open http://localhost:5173 and register your first user.
 |---|---|---|
 | `GET/PUT` | `/api/notifications` | Notification settings |
 | `POST` | `/api/notifications/test` | Send test notification |
-| `GET/PUT` | `/api/storage` | Storage settings |
-| `GET` | `/api/audit` | View audit log |
+| `GET/PUT` | `/api/storage` | Storage settings (S3 / Google Drive / backup encryption passphrase) |
+| `POST` | `/api/storage/test` | Test storage connection (+ S3 bucket privacy probe) |
+| `GET` | `/api/storage/usage` | Local / Drive / S3 usage vs threshold |
+| `GET` | `/api/audit` | Activity log (filter by action / resource / date) |
+| `GET` | `/api/connections/:id/heartbeat` | Heartbeat status, uptime %, history |
+
+---
+
+## 🔄 Updating an existing deployment
+
+```bash
+git pull
+npm run install:all          # new dependencies (e.g. @simplewebauthn, @aws-sdk/client-kms)
+npm run build                # client + server
+cd server && npx prisma migrate deploy   # apply pending migrations (required)
+# restart the process (pm2 / panel) — queue workers register at boot
+```
+
+Backwards compatibility: existing connections, backups, and unencrypted backups keep working; legacy encryption keys still decrypt existing rows; unencrypted backups remain readable alongside encrypted ones.
 
 ---
 
