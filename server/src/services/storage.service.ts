@@ -9,16 +9,60 @@ import {
   GetObjectCommand,
   DeleteObjectCommand,
   HeadObjectCommand,
+  GetBucketPolicyStatusCommand,
+  GetPublicAccessBlockCommand,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { prisma } from '../config/database';
 import { decrypt } from './crypto.service';
 import { logger } from '../config/logger';
+import { uploadToGdrive, downloadFromGdrive, deleteFromGdrive } from './gdrive.service';
+import { isEncryptedFile, decryptBackupFile } from './backup-crypto.service';
+
+export type StorageProviderType = 'LOCAL' | 'S3' | 'GOOGLE_DRIVE';
 
 export interface StorageUploadResult {
   storageKey: string;
-  provider: 'LOCAL' | 'S3';
+  provider: StorageProviderType;
+}
+
+/**
+ * Upload a backup artifact to the user's configured remote storage
+ * (S3 or Google Drive). Returns null when no remote provider is active.
+ */
+export async function uploadBackupFile(
+  userId: string,
+  localPath: string,
+  fileName: string,
+): Promise<StorageUploadResult | null> {
+  const settings = await prisma.storageSettings.findUnique({ where: { userId } });
+  if (!settings) return null;
+
+  if (settings.provider === 'S3') {
+    return uploadToS3(userId, localPath, fileName);
+  }
+  if (settings.provider === 'GOOGLE_DRIVE') {
+    const uploaded = await uploadToGdrive(userId, localPath, fileName);
+    if (!uploaded) return null;
+
+    // Honor deleteLocal the same way the S3 path does
+    if (settings.deleteLocal) {
+      try {
+        if (fs.statSync(localPath).isDirectory()) {
+          fs.rmSync(localPath, { recursive: true, force: true });
+        } else {
+          fs.unlinkSync(localPath);
+        }
+        logger.info(`🗑️  Deleted local copy: ${localPath}`);
+      } catch (err) {
+        logger.warn(`Failed to delete local copy: ${err}`);
+      }
+    }
+
+    return { storageKey: uploaded.storageKey, provider: 'GOOGLE_DRIVE' };
+  }
+  return null;
 }
 
 // Cache S3 clients by credentials fingerprint to avoid creating new clients per operation
@@ -229,6 +273,14 @@ export async function deleteBackupArtifact(userId: string, backup: BackupArtifac
     }
   }
 
+  if (backup.storageType === 'GOOGLE_DRIVE' && backup.storageKey) {
+    try {
+      await deleteFromGdrive(userId, backup.storageKey);
+    } catch (err) {
+      logger.warn(`Failed to delete Google Drive file ${backup.storageKey}:`, err);
+    }
+  }
+
   if (!backup.filePath || backup.filePath === 'pending') return;
   try {
     const stat = fs.statSync(backup.filePath);
@@ -253,17 +305,68 @@ export async function ensureLocalBackupFile(
   backup: BackupArtifact & { fileName?: string | null },
 ): Promise<{ localPath: string; downloaded: boolean }> {
   if (backup.filePath && backup.filePath !== 'pending' && fs.existsSync(backup.filePath)) {
+    if (isEncryptedFile(backup.filePath)) {
+      const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-decrypt-'));
+      return maybeDecrypt(userId, backup.filePath, tempDir);
+    }
     return { localPath: backup.filePath, downloaded: false };
   }
-  if (backup.storageType !== 'S3' || !backup.storageKey) {
+  if (!backup.storageKey || (backup.storageType !== 'S3' && backup.storageType !== 'GOOGLE_DRIVE')) {
     throw new Error('Backup file not found on disk');
   }
 
   const name = backup.fileName || path.basename(backup.storageKey);
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-restore-'));
   const destPath = path.join(tempDir, name.endsWith('.tar') || name.includes('.') ? name : `${name}.dump`);
-  await downloadFromS3(userId, backup.storageKey, destPath);
-  return { localPath: destPath, downloaded: true };
+  if (backup.storageType === 'GOOGLE_DRIVE') {
+    await downloadFromGdrive(userId, backup.storageKey, destPath);
+  } else {
+    await downloadFromS3(userId, backup.storageKey, destPath);
+  }
+  return maybeDecrypt(userId, destPath, tempDir);
+}
+
+/**
+ * At-rest encryption: local artifacts may be .enc files. Decrypt into the same
+ * temp dir so every consumer (restore / verify / download) gets plaintext and
+ * the existing cleanup removes it.
+ */
+async function maybeDecrypt(userId: string, filePath: string, tempDir: string): Promise<{ localPath: string; downloaded: boolean }> {
+  if (!isEncryptedFile(filePath)) {
+    return { localPath: filePath, downloaded: filePath.startsWith(tempDir) };
+  }
+
+  const settings = await prisma.storageSettings.findUnique({ where: { userId } });
+  const candidates = [
+    settings?.backupPassphrase,
+    ...(Array.isArray(settings?.backupPassphraseHistory) ? (settings!.backupPassphraseHistory as string[]) : []),
+  ].filter((p): p is string => Boolean(p));
+  if (candidates.length === 0) {
+    throw new Error('Backup file is encrypted but no backup passphrase is configured');
+  }
+
+  const plainPath = path.join(tempDir, path.basename(filePath).replace(/\.enc$/, ''));
+  let lastErr: unknown = null;
+  let decrypted = false;
+  for (const candidate of candidates) {
+    try {
+      await decryptBackupFile(filePath, plainPath, decrypt(candidate));
+      decrypted = true;
+      break;
+    } catch (err) {
+      lastErr = err; // wrong passphrase (old rotation) — try the next one
+    }
+  }
+  if (!decrypted) {
+    throw new Error(`Could not decrypt backup with any known passphrase: ${lastErr instanceof Error ? lastErr.message : lastErr}`);
+  }
+  // If the encrypted copy was itself a temp download, drop it; if it was the
+  // local artifact on disk, leave it (that's the at-rest copy).
+  if (filePath.startsWith(os.tmpdir())) {
+    try { fs.unlinkSync(filePath); } catch { /* best effort */ }
+  }
+  logger.info(`🔒 Decrypted backup artifact for use: ${path.basename(plainPath)}`);
+  return { localPath: plainPath, downloaded: true };
 }
 
 /** Remove the temp dir produced by ensureLocalBackupFile */
@@ -276,7 +379,29 @@ export function cleanupTempFile(tempPath: string): void {
 }
 
 /**
- * Test S3 connection by trying to HeadObject on the bucket root.
+ * Create (or tighten) the local backup storage directory with owner-only
+ * permissions. Backup dumps contain full database contents — the directory
+ * must never be readable by other users on the host (or a static-file server
+ * running as another user).
+ */
+export function ensureStorageDir(dir: string): void {
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    const mode = fs.statSync(dir).mode & 0o777;
+    if (mode !== 0o700) fs.chmodSync(dir, 0o700);
+  } catch (err) {
+    logger.warn(`Could not verify permissions on backup dir ${dir}:`, err);
+  }
+}
+
+/** Resolve the configured local backup dir (env override or <cwd>/backups). */
+export function getStoragePath(): string {
+  return process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
+}
+
+/**
+ * Test S3 connection by trying to HeadObject on the bucket root, then verify
+ * the bucket is NOT publicly accessible (anonymous probe + policy checks).
  */
 export async function testS3Connection(settings: {
   region: string;
@@ -284,17 +409,81 @@ export async function testS3Connection(settings: {
   accessKeyId: string;
   secretAccessKey: string;
   endpoint?: string | null;
-}): Promise<{ success: boolean; error?: string }> {
+}): Promise<{ success: boolean; error?: string; warning?: string }> {
+  const s3 = buildS3Client(settings);
   try {
-    const s3 = buildS3Client(settings);
     await s3.send(new HeadObjectCommand({ Bucket: settings.bucket, Key: '.dbbackup-test' }));
-    return { success: true };
   } catch (err: unknown) {
     // 404 means the bucket is accessible (object just doesn't exist)
     if (err && typeof err === 'object' && '$metadata' in err) {
       const meta = (err as { $metadata?: { httpStatusCode?: number } }).$metadata;
-      if (meta?.httpStatusCode === 404) return { success: true };
+      if (meta?.httpStatusCode !== 404) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    } else {
+      return { success: false, error: err instanceof Error ? err.message : String(err) };
     }
-    return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
+
+  const warning = await checkS3PublicAccess(s3, settings);
+  return { success: true, warning };
+}
+
+/**
+ * Privacy probe for an S3 bucket. Backup dumps must never be fetchable
+ * without authentication, so the test connection warns when:
+ *  - anonymous HTTP access to the bucket succeeds (public listing), or
+ *  - the bucket policy grants public access, or
+ *  - Block Public Access is not fully enabled.
+ */
+async function checkS3PublicAccess(
+  s3: S3Client,
+  settings: { bucket: string; region: string; endpoint?: string | null },
+): Promise<string | undefined> {
+  const problems: string[] = [];
+
+  // 1. Anonymous probe — no credentials sent; a plain fetch that succeeds
+  //    means the bucket (and likely its objects) are world-readable.
+  try {
+    const base = settings.endpoint
+      ? `${settings.endpoint.replace(/\/$/, '')}/${settings.bucket}` // path-style (custom endpoints)
+      : `https://${settings.bucket}.s3.${settings.region}.amazonaws.com`;
+    const res = await fetch(base, { method: 'GET' });
+    if (res.ok) {
+      problems.push('anonymous listing of the bucket succeeded — objects may be world-readable');
+    }
+  } catch {
+    /* network issues on the probe are not conclusive — ignore */
+  }
+
+  // 2. Bucket policy status (requires s3:GetBucketPolicyStatus)
+  try {
+    const { PolicyStatus } = await s3.send(new GetBucketPolicyStatusCommand({ Bucket: settings.bucket }));
+    if (PolicyStatus?.IsPublic === true) {
+      problems.push('bucket policy grants public access');
+    }
+  } catch {
+    /* permission not granted for the check — skip */
+  }
+
+  // 3. Block Public Access configuration (requires s3:GetPublicAccessBlock)
+  try {
+    const { PublicAccessBlockConfiguration: conf } = await s3.send(
+      new GetPublicAccessBlockCommand({ Bucket: settings.bucket }),
+    );
+    const off = [
+      !conf?.BlockPublicAcls && 'BlockPublicAcls',
+      !conf?.IgnorePublicAcls && 'IgnorePublicAcls',
+      !conf?.BlockPublicPolicy && 'BlockPublicPolicy',
+      !conf?.RestrictPublicBuckets && 'RestrictPublicBuckets',
+    ].filter((v): v is string => Boolean(v));
+    if (off.length > 0) {
+      problems.push(`Block Public Access not fully enabled (off: ${off.join(', ')})`);
+    }
+  } catch {
+    /* permission not granted for the check — skip */
+  }
+
+  if (problems.length === 0) return undefined;
+  return `⚠️ Bucket privacy: ${problems.join('; ')}. Enable "Block all public access" on the bucket.`;
 }
