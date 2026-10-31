@@ -46,6 +46,9 @@ export function getWebAuthnEnv(req: { headers: Record<string, string | string[] 
 
   const rpID = process.env.PASSKEY_RP_ID || host.split(':')[0];
   const origins = new Set<string>([`${proto}://${host}`]);
+  // An explicit RP ID implies its https origin — covers reverse proxies that
+  // don't forward Host/X-Forwarded-Proto correctly (host resolves to localhost).
+  if (process.env.PASSKEY_RP_ID) origins.add(`https://${process.env.PASSKEY_RP_ID}`);
   for (const o of (process.env.PASSKEY_EXTRA_ORIGINS ?? '').split(',')) {
     if (o.trim()) origins.add(o.trim());
   }
