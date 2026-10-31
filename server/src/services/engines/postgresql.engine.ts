@@ -4,7 +4,7 @@ import { createGunzip, createGzip } from 'zlib';
 import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
-import { Pool } from 'pg';
+import { Pool, Client } from 'pg';
 
 export class PostgreSQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
@@ -494,6 +494,41 @@ export class PostgreSQLEngine extends BaseEngine {
       };
     } finally {
       await pool?.end();
+      tunnel?.close();
+    }
+  }
+
+  /** Lightweight health probe — connect + SELECT 1 with a short timeout. */
+  async ping(timeoutMs = 5000): Promise<{ up: boolean; latencyMs: number; error?: string }> {
+    let tunnel: SSHTunnel | null = null;
+    let client: Client | null = null;
+    const started = Date.now();
+    try {
+      if (this.config.sshEnabled) {
+        tunnel = new SSHTunnel(this.config);
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
+      }
+
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+
+      client = new Client({
+        host,
+        port,
+        user: this.config.username,
+        password: this.config.password ?? undefined,
+        database: this.config.database,
+        ssl: this.getSslOptions(),
+        connectionTimeoutMillis: timeoutMs,
+      });
+      await client.connect();
+      await client.query('SELECT 1');
+      return { up: true, latencyMs: Date.now() - started };
+    } catch (e) {
+      return { up: false, latencyMs: Date.now() - started, error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      if (client) await client.end().catch(() => undefined);
       tunnel?.close();
     }
   }

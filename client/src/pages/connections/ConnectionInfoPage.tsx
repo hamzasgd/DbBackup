@@ -210,6 +210,56 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
   )
 }
 
+
+function HeartbeatCard({ connectionId }: { connectionId: string }) {
+  const { data } = useQuery({
+    queryKey: ['heartbeat', connectionId],
+    queryFn: () => connectionsApi.heartbeat(connectionId),
+    refetchInterval: 60_000,
+  })
+
+  const hb = data?.data.data
+  if (!hb || !hb.enabled) return null
+
+  const latest = hb.latest
+  const up = latest?.status === 'UP'
+
+  return (
+    <div className="bg-white rounded-xl border border-gray-200 p-4 flex flex-wrap items-center gap-x-6 gap-y-2">
+      <div className="flex items-center gap-2">
+        <span className={`h-2.5 w-2.5 rounded-full ${up ? 'bg-green-500' : 'bg-red-500'}`} />
+        <span className={`text-sm font-medium ${up ? 'text-green-600' : 'text-red-600'}`}>
+          {up ? 'Database up' : 'Database down'}
+        </span>
+        {up && latest?.latencyMs != null && (
+          <span className="text-sm text-gray-500">{latest.latencyMs} ms</span>
+        )}
+      </div>
+      <div className="text-sm text-gray-500">
+        Uptime 24h:{' '}
+        <span className="font-medium text-gray-700">
+          {hb.stats24h.uptimePercent != null ? `${hb.stats24h.uptimePercent.toFixed(1)}%` : '—'}
+        </span>
+        {' '}({hb.stats24h.upChecks}/{hb.stats24h.checks} checks)
+      </div>
+      <div className="text-sm text-gray-500">
+        Avg latency 24h:{' '}
+        <span className="font-medium text-gray-700">
+          {hb.stats24h.avgLatencyMs != null ? `${hb.stats24h.avgLatencyMs} ms` : '—'}
+        </span>
+      </div>
+      {latest?.checkedAt && (
+        <div className="text-xs text-gray-400 ml-auto">last check {new Date(latest.checkedAt).toLocaleString()}</div>
+      )}
+      {!up && latest?.error && (
+        <div className="w-full text-xs text-red-500 font-mono bg-red-50 border border-red-100 rounded p-2 truncate" title={latest.error}>
+          {latest.error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function ConnectionInfoPage() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -284,6 +334,8 @@ export default function ConnectionInfoPage() {
           Refresh
         </button>
       </div>
+
+      <HeartbeatCard connectionId={id!} />
 
       {/* Stats bar */}
       {info && (

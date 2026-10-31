@@ -10,6 +10,7 @@ import {
   deleteConnection,
   testConnection,
   getDbInfo,
+  getHeartbeat,
 } from '../controllers/connection.controller';
 
 const router = Router();
@@ -23,5 +24,6 @@ router.put('/:id', validate(connectionSchema), updateConnection);
 router.delete('/:id', deleteConnection);
 router.post('/:id/test', testConnection);
 router.get('/:id/info', getDbInfo);
+router.get('/:id/heartbeat', getHeartbeat);
 
 export default router;

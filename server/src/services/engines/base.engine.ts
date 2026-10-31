@@ -15,6 +15,7 @@ export interface ConnectionConfig {
   sshPort?: number | null;
   sshUsername?: string | null;
   sshPrivateKey?: string | null;
+  sshPrivateKeyPath?: string | null;
   sshPassphrase?: string | null;
 }
 
@@ -114,4 +115,7 @@ export abstract class BaseEngine {
   abstract restore(backupFilePath: string, targetDatabase?: string): Promise<void>;
   abstract listDatabases(): Promise<string[]>;
   abstract getDbInfo(): Promise<DbInfo>;
+
+  /** Lightweight health probe — SELECT 1 with a short timeout. */
+  abstract ping(timeoutMs?: number): Promise<{ up: boolean; latencyMs: number; error?: string }>;
 }

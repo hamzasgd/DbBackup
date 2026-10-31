@@ -227,7 +227,6 @@ export class MySQLEngine extends BaseEngine {
         ssl: this.getSslOptions(),
         connectTimeout: this.config.connectionTimeout || 30000,
       });
-
       // Version
       const [[versionRow]] = await conn.query<mysql2.RowDataPacket[]>('SELECT VERSION() AS v');
       const version = (versionRow as mysql2.RowDataPacket)['v'] as string;
@@ -396,6 +395,39 @@ export class MySQLEngine extends BaseEngine {
       };
     } finally {
       await conn?.end();
+      tunnel?.close();
+    }
+  }
+
+  /** Lightweight health probe — connect + SELECT 1 with a short timeout. */
+  async ping(timeoutMs = 5000): Promise<{ up: boolean; latencyMs: number; error?: string }> {
+    let tunnel: SSHTunnel | null = null;
+    let conn: mysql2.Connection | null = null;
+    const started = Date.now();
+    try {
+      if (this.config.sshEnabled) {
+        tunnel = new SSHTunnel(this.config);
+        const localPort = await tunnel.connect();
+        (this.config as any)._localPort = localPort;
+      }
+
+      const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+      const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+
+      conn = await mysql2.createConnection({
+        host,
+        port,
+        user: this.config.username,
+        password: this.config.password ?? undefined,
+        ssl: this.getSslOptions(),
+        connectTimeout: timeoutMs,
+      });
+      await conn.query('SELECT 1');
+      return { up: true, latencyMs: Date.now() - started };
+    } catch (e) {
+      return { up: false, latencyMs: Date.now() - started, error: e instanceof Error ? e.message : String(e) };
+    } finally {
+      if (conn) await conn.end().catch(() => undefined);
       tunnel?.close();
     }
   }
