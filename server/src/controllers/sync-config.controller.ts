@@ -1,5 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { AppError } from '../middleware/errorHandler';
+import { logAudit } from '../services/audit.service';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
 import { SyncDirection, SyncMode, ConflictStrategy } from '@prisma/client';
@@ -84,6 +85,8 @@ export async function createSyncConfiguration(
       batchSize,
       parallelTables,
     });
+
+    await logAudit(req.user!.userId, 'CREATE', 'sync_config', { syncConfigId: syncConfig.id, name: syncConfig.name }, req.ip, req.headers['user-agent']);
 
     res.status(201).json({
       success: true,
@@ -234,6 +237,8 @@ export async function updateSyncConfiguration(
       parallelTables,
     });
 
+    await logAudit(req.user!.userId, 'UPDATE', 'sync_config', { syncConfigId: updatedConfig.id, name: updatedConfig.name }, req.ip, req.headers['user-agent']);
+
     res.json({
       success: true,
       data: updatedConfig,
@@ -271,6 +276,8 @@ export async function deleteSyncConfiguration(
     }
 
     await syncEngineService.deleteSyncConfiguration(id);
+
+    await logAudit(req.user!.userId, 'DELETE', 'sync_config', { syncConfigId: id, name: existingConfig.name }, req.ip, req.headers['user-agent']);
 
     res.json({
       success: true,

@@ -14,7 +14,14 @@ export type NotificationEventType =
   | 'RESTORE_COMPLETED'
   | 'RESTORE_FAILED'
   | 'SYNC_COMPLETED'
-  | 'SYNC_FAILED';
+  | 'SYNC_FAILED'
+  | 'HEARTBEAT_DOWN'
+  | 'HEARTBEAT_RECOVERED'
+  | 'LOGIN'
+  | 'LOGIN_FAILED'
+  | 'PASSKEY_LOGIN'
+  | 'STORAGE_THRESHOLD'
+  | 'ENCRYPTION_FAILED';
 
 export interface NotificationPayload {
   event: NotificationEventType;
@@ -138,14 +145,17 @@ export async function notify(userId: string, payload: NotificationPayload): Prom
     const settings = await prisma.notificationSettings.findUnique({ where: { userId } });
     if (!settings) return;
 
-    const isFailure = payload.event.includes('FAILED');
-    const isSuccess = payload.event.includes('COMPLETED');
+    const isFailure = payload.event.includes('FAILED') || payload.event === 'HEARTBEAT_DOWN';
+    const isSuccess = payload.event.includes('COMPLETED') || payload.event === 'HEARTBEAT_RECOVERED';
     const isRetention = payload.event === 'RETENTION_CLEANUP';
+    const isLogin = payload.event === 'LOGIN' || payload.event === 'PASSKEY_LOGIN';
+    const isStorage = payload.event === 'STORAGE_THRESHOLD';
 
     const shouldSend =
       (isFailure && settings.notifyOnFailure) ||
       (isSuccess && settings.notifyOnSuccess) ||
-      (isRetention && settings.notifyOnRetention);
+      (isRetention && settings.notifyOnRetention) ||
+      (isLogin && settings.notifyOnLogin);
 
     if (!shouldSend) return;
 

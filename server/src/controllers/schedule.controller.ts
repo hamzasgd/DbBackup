@@ -123,6 +123,11 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
     await removeScheduleJob(req.params.id);
     if (updated.isActive) await addScheduleJob(updated);
 
+    await logAudit(req.user!.userId, 'UPDATE', 'schedule', {
+      scheduleId: updated.id, name: updated.name,
+      isActive: updated.isActive,
+    }, req.ip, req.headers['user-agent']);
+
     res.json({ success: true, data: updated });
   } catch (err) { next(err); }
 }
