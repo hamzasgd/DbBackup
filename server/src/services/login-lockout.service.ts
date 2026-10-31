@@ -49,3 +49,49 @@ export function recordLoginFailure(ip: string | undefined): boolean {
 export function clearLoginFailures(ip: string | undefined): void {
   if (ip) state.delete(ip);
 }
+
+/**
+ * Cross-IP brute-force detection: IP-hopping attackers defeat the per-IP
+ * lock, so failures are ALSO counted per targeted account across all IPs.
+ * Crossing the threshold from 2+ distinct IPs raises one consolidated
+ * alert (visibility, not an account lock — a lock would let the attacker
+ * grief-lock the owner).
+ */
+const ACCT_WINDOW_MS = 15 * 60 * 1000;
+const ACCT_THRESHOLD = Math.max(2, parseInt(process.env.LOGIN_CROSS_IP_ALERT_THRESHOLD ?? '10', 10) || 10);
+
+interface AcctState { windowStart: number; count: number; ips: Set<string>; lastAlertAt: number }
+const acctState = new Map<string, AcctState>();
+
+/** Record a failed attempt against a known account. True when the cross-IP threshold just tripped. */
+export function recordAccountFailure(email: string, ip: string | undefined): boolean {
+  const now = Date.now();
+  let s = acctState.get(email);
+  if (!s || now - s.windowStart > ACCT_WINDOW_MS) {
+    s = { windowStart: now, count: 0, ips: new Set(), lastAlertAt: 0 };
+    acctState.set(email, s);
+  }
+  s.count += 1;
+  if (ip) s.ips.add(ip);
+
+  if (s.count >= ACCT_THRESHOLD && s.ips.size >= 2 && now - s.lastAlertAt > ACCT_WINDOW_MS) {
+    // trip once per window — reset so the next wave alerts again
+    acctState.set(email, { windowStart: now, count: 0, ips: new Set(), lastAlertAt: now });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Throttle for per-attempt failure emails: during a distributed attack
+ * every wrong password would otherwise send an email. One per 5 minutes.
+ */
+const FAILURE_NOTIFY_INTERVAL_MS = 5 * 60 * 1000;
+const lastFailureNotify = new Map<string, number>();
+
+export function shouldNotifyFailure(email: string): boolean {
+  const last = lastFailureNotify.get(email) ?? 0;
+  if (Date.now() - last < FAILURE_NOTIFY_INTERVAL_MS) return false;
+  lastFailureNotify.set(email, Date.now());
+  return true;
+}

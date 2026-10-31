@@ -14,7 +14,7 @@ import {
 import { AppError } from '../middleware/errorHandler';
 import { logAudit } from '../services/audit.service';
 import { notify } from '../services/notification.service';
-import { isLoginLocked, recordLoginFailure, clearLoginFailures } from '../services/login-lockout.service';
+import { isLoginLocked, recordLoginFailure, clearLoginFailures, recordAccountFailure, shouldNotifyFailure } from '../services/login-lockout.service';
 
 
 /** Fire-and-forget login alert (email/Slack) respecting the user's notifyOnLogin toggle. */
@@ -124,12 +124,24 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     if (!isValid) {
       await logAudit(null, 'LOGIN_FAILED', 'user', { email, reason: 'wrong password' }, req.ip, req.headers['user-agent']);
       maybeLockout(req.ip);
-      void notify(user.id, {
-        event: 'LOGIN_FAILED',
-        title: '🚨 Failed Login Attempt',
-        message: `Wrong password for ${user.email} from ${req.ip ?? 'unknown IP'}`,
-        details: { Account: user.email, IP: req.ip ?? 'unknown', Time: new Date().toISOString() },
-      }).catch(() => undefined);
+
+      // Cross-IP brute force? (IP-hopping defeats the per-IP lock)
+      if (recordAccountFailure(user.email, req.ip)) {
+        await logAudit(null, 'LOGIN_BRUTE_FORCE_SUSPECT', 'user', { email: user.email, note: 'cross-IP threshold exceeded' }, req.ip, req.headers['user-agent']);
+        await notifyOwner({
+          event: 'LOGIN_BRUTE_FORCE_SUSPECT',
+          title: '🚨 Coordinated Brute-Force Suspected',
+          message: `Many failed sign-ins for ${user.email} from multiple addresses within 15 minutes. Per-attempt emails are paused for 5 minutes. If this is not you, consider a passkey-only setup.`,
+          details: { Account: user.email, Window: '15 minutes', Time: new Date().toISOString() },
+        });
+      } else if (shouldNotifyFailure(user.email)) {
+        void notify(user.id, {
+          event: 'LOGIN_FAILED',
+          title: '🚨 Failed Login Attempt',
+          message: `Wrong password for ${user.email} from ${req.ip ?? 'unknown IP'}`,
+          details: { Account: user.email, IP: req.ip ?? 'unknown', Time: new Date().toISOString() },
+        }).catch(() => undefined);
+      }
       throw new AppError('Invalid credentials', 401);
     }
 
