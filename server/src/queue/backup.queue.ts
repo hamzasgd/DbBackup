@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import fs from 'fs';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { engineFactory } from '../services/engines/engine.factory';
@@ -7,10 +8,12 @@ import { logger } from '../config/logger';
 import { verifyBackup } from '../services/verification.service';
 import { publishProgress, BACKUP_PROGRESS_CHANNEL } from '../services/sse.service';
 import { notify } from '../services/notification.service';
-import { uploadToS3 } from '../services/storage.service';
+import { uploadBackupFile } from '../services/storage.service';
+import { encryptBackupFile, decryptBackupFile, sha256File } from '../services/backup-crypto.service';
 import { enforceRetentionForConnection, getRetentionPolicy } from '../services/retention.service';
 import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { sanitizeConfig } from '../utils/sanitize';
+import { logAudit } from '../services/audit.service';
 
 export const BACKUP_QUEUE_NAME = 'backups';
 
@@ -38,6 +41,7 @@ async function decryptConn(connectionId: string): Promise<ConnectionConfig> {
     sshPort: conn.sshPort || 22,
     sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
     sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
     sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
   };
 }
@@ -71,13 +75,13 @@ export function createBackupWorker(): Worker<BackupJobData> {
       const config = await decryptConn(connId);
       logger.info(`Backup worker picked job ${job.id} (backupId=${backupId}, db=${config.database})`, sanitizeConfig(config as unknown as Record<string, unknown>));
 
-      // Fetch connection to get userId for notifications/retention
+      // Fetch backup row for userId (denormalized) for notifications/retention
       const backupRecord = await prisma.backup.findUnique({
         where: { id: backupId },
-        include: { connection: { select: { userId: true, id: true } } },
+        select: { userId: true, connectionId: true },
       });
-      const userId = backupRecord?.connection.userId ?? '';
-      const connectionId = backupRecord?.connection.id ?? '';
+      const userId = backupRecord?.userId ?? '';
+      const connectionId = backupRecord?.connectionId ?? connId;
 
       await prisma.backup.update({
         where: { id: backupId },
@@ -105,19 +109,64 @@ export function createBackupWorker(): Worker<BackupJobData> {
           onProgress: (pct) => { void onProgress(pct); },
         });
 
-        // ── Step 1: Verify integrity ──
+        // ── Step 1: Verify integrity (plaintext) ──
         const verification = await verifyBackup(result.filePath, config.type, resolvedFormat);
 
-        // ── Step 2: Upload to S3 if configured ──
-        let storageType: 'LOCAL' | 'S3' = 'LOCAL';
+        // ── Step 1.5: Encrypt at rest (AES-256-GCM) when enabled ──
+        // The plaintext is only deleted AFTER the encrypted copy is decrypted
+        // back and hash-matched — a corrupt .enc can never replace good data.
+        // If encryption fails verification twice, the plaintext backup is kept
+        // (data safety wins over encryption) and an alert is sent.
+        if (userId) {
+          const settings = await prisma.storageSettings.findUnique({ where: { userId } });
+          if (settings?.backupEncryptionEnabled && settings.backupPassphrase) {
+            const { decrypt } = await import('../services/crypto.service');
+            const passphrase = decrypt(settings.backupPassphrase);
+            const encPath = `${result.filePath}.enc`;
+            const plainHash = await sha256File(result.filePath);
+
+            let encryptedOk = false;
+            for (let attempt = 1; attempt <= 2 && !encryptedOk; attempt++) {
+              try {
+                await encryptBackupFile(result.filePath, encPath, passphrase);
+                const verifyCopy = `${encPath}.verify`;
+                await decryptBackupFile(encPath, verifyCopy, passphrase);
+                const roundTripOk = (await sha256File(verifyCopy)) === plainHash;
+                fs.rmSync(verifyCopy, { force: true });
+                if (!roundTripOk) throw new Error('decrypted copy does not match plaintext');
+                encryptedOk = true;
+              } catch (encErr) {
+                logger.warn(`Backup encryption attempt ${attempt} failed:`, encErr);
+                try { fs.rmSync(encPath, { force: true }); } catch { /* already gone */ }
+              }
+            }
+
+            if (encryptedOk) {
+              fs.rmSync(result.filePath, { force: true });
+              result.filePath = encPath;
+              result.fileName = `${result.fileName}.enc`;
+            } else {
+              logger.error('⚠️  Backup could NOT be safely encrypted — keeping UNENCRYPTED copy (no data loss)');
+              void notify(userId, {
+                event: 'ENCRYPTION_FAILED',
+                title: '⚠️ Backup Stored Unencrypted',
+                message: `Encryption of "${result.fileName}" failed verification twice. The backup was kept unencrypted so no data is lost — check disk space and settings.`,
+                details: { File: result.fileName, Action: 'kept plaintext' },
+              }).catch(() => undefined);
+            }
+          }
+        }
+
+        // ── Step 2: Upload to remote storage (S3 / Google Drive) if configured ──
+        let storageType: 'LOCAL' | 'S3' | 'GOOGLE_DRIVE' = 'LOCAL';
         let storageKey: string | undefined;
         if (userId) {
-          const uploaded = await uploadToS3(userId, result.filePath, result.fileName).catch((err) => {
-            logger.warn('S3 upload failed (keeping local):', err);
+          const uploaded = await uploadBackupFile(userId, result.filePath, result.fileName).catch((err) => {
+            logger.warn('Remote upload failed (keeping local):', err);
             return null;
           });
           if (uploaded) {
-            storageType = 'S3';
+            storageType = uploaded.provider;
             storageKey = uploaded.storageKey;
           }
         }
@@ -148,6 +197,17 @@ export function createBackupWorker(): Worker<BackupJobData> {
         });
 
         logger.info(`✅ Backup completed: ${result.fileName} (verified: ${verification.valid})`);
+
+        if (userId) {
+          await logAudit(userId, 'BACKUP_COMPLETED', 'backup', {
+            backupId,
+            connectionId,
+            fileName: result.fileName,
+            sizeBytes: Number(result.fileSize),
+            storageType,
+            verified: verification.valid,
+          });
+        }
 
         // ── Step 5: Notify on completion ──
         if (userId) {
@@ -190,6 +250,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         logger.error(`❌ Backup failed for ${backupId}:`, error);
 
         if (userId) {
+          await logAudit(userId, 'BACKUP_FAILED', 'backup', { backupId, connectionId, error: errMsg });
           void notify(userId, {
             event: 'BACKUP_FAILED',
             title: '❌ Backup Failed',
