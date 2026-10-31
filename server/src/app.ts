@@ -86,7 +86,7 @@ app.use('/api/sync/conflicts', syncConflictRoutes);
 // Serve React frontend in production
 if (process.env.NODE_ENV === 'production') {
   const clientPath = path.join(__dirname, '../../client/dist');
-  app.use(express.static(clientPath));
+  app.use(express.static(clientPath, { dotfiles: 'deny' }));
   app.get(/^(?!\/api\/).*/, (_req, res) => {
     res.sendFile(path.join(clientPath, 'index.html'));
   });
