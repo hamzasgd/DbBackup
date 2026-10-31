@@ -160,7 +160,7 @@ keysRouter.get('/', async (req: AuthRequest, res, next) => {
     const keys = await prisma.mcpApiKey.findMany({
       where: { userId: req.user!.userId, revokedAt: null },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, name: true, keyPrefix: true, scopes: true, lastUsedAt: true, expiresAt: true, createdAt: true, approvalRequired: true },
+      select: { id: true, name: true, keyPrefix: true, scopes: true, lastUsedAt: true, expiresAt: true, createdAt: true, approvalRequired: true, dailyCallLimit: true, callsToday: true },
     });
     res.json({ success: true, data: { keys } });
   } catch (err) { next(err); }
@@ -168,7 +168,7 @@ keysRouter.get('/', async (req: AuthRequest, res, next) => {
 
 keysRouter.post('/', async (req: AuthRequest, res, next) => {
   try {
-    const { name, scopes, expiresInDays, approvalRequired } = req.body as { name?: string; scopes?: string[]; expiresInDays?: number; approvalRequired?: boolean };
+    const { name, scopes, expiresInDays, approvalRequired, dailyCallLimit } = req.body as { name?: string; scopes?: string[]; expiresInDays?: number; approvalRequired?: boolean; dailyCallLimit?: number };
     if (!name || typeof name !== 'string' || name.length > 60) throw new AppError('Key name is required (max 60 chars)', 400);
     const valid: McpScope[] = ['read', 'write', 'admin'];
     const requested = Array.isArray(scopes) && scopes.length > 0 ? scopes : ['read'];
@@ -195,6 +195,7 @@ keysRouter.post('/', async (req: AuthRequest, res, next) => {
         scopes: [...finalScopes],
         expiresAt,
         approvalRequired: !!approvalRequired,
+        dailyCallLimit: dailyCallLimit ? Math.max(1, Number(dailyCallLimit)) : null,
       },
     });
     await logAudit(req.user!.userId, 'MCP_KEY_CREATE', 'mcp', { keyId: key.id, name, scopes: [...finalScopes], expiresAt }, req.ip, req.headers['user-agent']);

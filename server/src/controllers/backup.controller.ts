@@ -234,3 +234,70 @@ export async function cancelDrill(req: AuthRequest, res: Response, next: NextFun
     next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Cancel failed', 400));
   }
 }
+
+/**
+ * Restore dry-run — preview what WOULD be restored without touching anything.
+ */
+export async function restoreDryRun(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const backup = await prisma.backup.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+    });
+    if (!backup) throw new AppError('Backup not found', 404);
+    if (backup.status !== 'COMPLETED') throw new AppError('Only completed backups can be previewed', 400);
+
+    const { localPath, downloaded } = await ensureLocalBackupFile(req.user!.userId, backup);
+    try {
+      const { execFileSync } = await import('child_process');
+      const fs = await import('fs');
+      const { createGunzip } = await import('zlib');
+      const { pipeline } = await import('stream/promises');
+
+      let content = '';
+      if (localPath.endsWith('.gz')) {
+        const tmpPlain = localPath.replace(/\.gz$/, '');
+        await pipeline(fs.createReadStream(localPath), createGunzip(), fs.createWriteStream(tmpPlain));
+        content = fs.readFileSync(tmpPlain, 'utf8').slice(0, 5 * 1024 * 1024);
+        fs.unlinkSync(tmpPlain);
+      } else if (backup.format === 'CUSTOM' || localPath.endsWith('.dump')) {
+        try {
+          content = execFileSync('pg_restore', ['--list', localPath], { encoding: 'utf8', timeout: 30000 });
+        } catch { content = ''; }
+      } else {
+        content = fs.readFileSync(localPath, 'utf8').slice(0, 5 * 1024 * 1024);
+      }
+
+      const tables = new Set<string>();
+      let createCount = 0;
+      let insertCount = 0;
+
+      for (const line of content.split('\n')) {
+        const cm = /CREATE TABLE\s+(?:IF NOT EXISTS\s+)?[`"']?([\w.]+)[`"']?/i.exec(line);
+        if (cm) { tables.add(cm[1]); createCount++; continue; }
+        const im = /INSERT INTO\s+[`"']?([\w.]+)[`"']?/i.exec(line);
+        if (im) { tables.add(im[1]); insertCount++; }
+        const pl = /TABLE DATA\s+(\S+)\s+(\S+)/.exec(line);
+        if (pl) { tables.add(pl[1] + '.' + pl[2]); }
+      }
+
+      const result = {
+        fileName: backup.fileName,
+        dbName: backup.dbName,
+        fileSizeBytes: Number(backup.fileSize),
+        format: backup.format,
+        encrypted: backup.fileName.endsWith('.enc'),
+        estimatedTables: tables.size,
+        estimatedRows: insertCount,
+        createStatements: createCount,
+        insertStatements: insertCount,
+        tableNames: [...tables].sort().slice(0, 50),
+        warning: 'This is a preview — actual restore will overwrite the target database',
+      };
+
+      await logAudit(req.user!.userId, 'RESTORE_DRY_RUN', 'backup', { backupId: backup.id, tables: tables.size }, req.ip, req.headers['user-agent']);
+      res.json({ success: true, data: result });
+    } finally {
+      if (downloaded) cleanupTempFile(localPath);
+    }
+  } catch (err) { next(err); }
+}

@@ -334,6 +334,28 @@ export async function dispatchTool(name: string, args: Record<string, unknown>, 
   }
 
   try {
+    // Per-key daily quota
+    const key = await prisma.mcpApiKey.findUnique({ where: { id: ctx.keyId }, select: { dailyCallLimit: true, callsToday: true, callsResetAt: true } });
+    if (key?.dailyCallLimit && key.dailyCallLimit > 0) {
+      const now = new Date();
+      const needsReset = !key.callsResetAt || new Date(key.callsResetAt) < now;
+      const todayCount = needsReset ? 0 : key.callsToday;
+
+      if (todayCount >= key.dailyCallLimit) {
+        return {
+          text: `Daily call limit reached (${key.dailyCallLimit}). Resets at midnight UTC. Current key: "${ctx.keyName}".`,
+          isError: true,
+        };
+      }
+
+      const nextReset = new Date(now);
+      nextReset.setUTCHours(24, 0, 0, 0);
+      await prisma.mcpApiKey.update({
+        where: { id: ctx.keyId },
+        data: { callsToday: todayCount + 1, callsResetAt: nextReset },
+      });
+    }
+
     const text = await tool.handler(args, ctx);
     await prisma.mcpApiKey.update({ where: { id: ctx.keyId }, data: { lastUsedAt: new Date() } });
     return { text, isError: false };

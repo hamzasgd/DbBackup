@@ -257,6 +257,10 @@ model McpApiKey {
   scopes     String[]
   // When true, write/admin tools pause for human approval before executing
   approvalRequired Boolean @default(false)
+  // Per-key daily call quota (0/null = unlimited)
+  dailyCallLimit Int?     // e.g. 100
+  callsToday    Int       @default(0)
+  callsResetAt  DateTime? // UTC midnight counter reset
   expiresAt  DateTime?
   revokedAt  DateTime?
   lastUsedAt DateTime?
