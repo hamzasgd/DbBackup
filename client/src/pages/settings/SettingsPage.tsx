@@ -3,10 +3,10 @@ import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { User, Lock, Save, Bell, Cloud, Mail, MessageSquare, CheckCircle, AlertCircle, Loader2, Monitor, Globe, KeyRound } from 'lucide-react'
+import { User, Lock, Save, Bell, Cloud, Mail, MessageSquare, CheckCircle, AlertCircle, Loader2, Monitor, Globe, KeyRound, Bot, Copy } from 'lucide-react'
 import { useAuthStore } from '../../store/auth.store'
 import { authApi, type ActiveSession, type Passkey } from '../../services/auth.service'
-import { notificationsApi, storageApi } from '../../services/settings.service'
+import { notificationsApi, storageApi, mcpApi, type McpKey } from '../../services/settings.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
@@ -476,7 +476,7 @@ function StorageTab() {
   )
 }
 
-type Tab = 'profile' | 'security' | 'notifications' | 'storage'
+type Tab = 'profile' | 'security' | 'notifications' | 'storage' | 'mcp'
 
 
 function SessionsTab() {
@@ -667,11 +667,137 @@ function PasskeysCard() {
   )
 }
 
+
+function McpTab() {
+  const qc = useQueryClient()
+  const [name, setName] = useState('')
+  const [scopes, setScopes] = useState<string[]>(['read'])
+  const [createdKey, setCreatedKey] = useState<string | null>(null)
+  const [endpoint, setEndpoint] = useState('')
+
+  useEffect(() => { setEndpoint(`${window.location.origin}/mcp`) }, [])
+
+  const { data, isLoading } = useQuery({ queryKey: ['mcp-keys'], queryFn: () => mcpApi.list() })
+  const keys: McpKey[] = data?.data.data.keys ?? []
+
+  const createMutation = useMutation({
+    mutationFn: () => mcpApi.create({ name, scopes }),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['mcp-keys'] })
+      setCreatedKey(res.data.data.key)
+      setName('')
+      toast.success('API key created — copy it now')
+    },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to create key'),
+  })
+
+  const revokeMutation = useMutation({
+    mutationFn: (id: string) => mcpApi.revoke(id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['mcp-keys'] }); toast.success('Key revoked') },
+    onError: () => toast.error('Failed to revoke key'),
+  })
+
+  const toggleScope = (s: string) =>
+    setScopes((prev) => (prev.includes(s) ? prev.filter((x) => x !== s) : [...prev, s]))
+
+  return (
+    <div className="space-y-4">
+      <Card>
+        <CardHeader><CardTitle><span className="flex items-center gap-2"><Bot className="h-4 w-4" />AI Agent Access (MCP)</span></CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-gray-500">
+            Let AI agents (Claude, Cursor, …) operate DbBackup via the Model Context Protocol —
+            with scoped API keys, per-call audit logging and instant revocation.
+          </p>
+
+          <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 text-xs font-mono text-gray-600 space-y-1">
+            <div>Endpoint: <span className="font-bold">{endpoint}</span></div>
+            <div>Header: Authorization: Bearer dbbk_mcp_…</div>
+            <div>Transport: Streamable HTTP (JSON-RPC 2.0)</div>
+          </div>
+
+          <div className="border-t pt-4 space-y-3">
+            <Input label="Key name" placeholder="e.g. Claude Desktop" value={name} onChange={(e) => setName(e.target.value)} />
+            <div>
+              <p className="text-sm font-medium text-gray-700 mb-1">Scopes</p>
+              <div className="flex gap-4 flex-wrap">
+                {[
+                  { id: 'read', label: 'Read (list, status, heartbeat, logs)' },
+                  { id: 'write', label: 'Write (+ trigger backup, verify)' },
+                  { id: 'admin', label: 'Admin (+ delete backups)' },
+                ].map((s) => (
+                  <label key={s.id} className="flex items-center gap-2 text-sm text-gray-600">
+                    <input
+                      type="checkbox"
+                      className="rounded"
+                      checked={scopes.includes(s.id)}
+                      onChange={() => toggleScope(s.id)}
+                    />
+                    {s.label}
+                  </label>
+                ))}
+              </div>
+              <p className="text-xs text-gray-400 mt-1">admin ⊃ write ⊃ read (implied automatically)</p>
+            </div>
+            <Button onClick={() => createMutation.mutate()} disabled={!name.trim() || scopes.length === 0} loading={createMutation.isPending}>
+              <KeyRound className="h-4 w-4" />Create API key
+            </Button>
+          </div>
+
+          {createdKey && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 space-y-2">
+              <p className="text-sm font-medium text-yellow-800">Copy this key now — it cannot be shown again:</p>
+              <div className="flex gap-2 items-center">
+                <code className="flex-1 text-xs font-mono bg-white border rounded p-2 break-all">{createdKey}</code>
+                <Button variant="outline" size="sm" onClick={() => { navigator.clipboard.writeText(createdKey); toast.success('Copied') }}>
+                  <Copy className="h-3.5 w-3.5" />
+                </Button>
+              </div>
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle>Active keys <span className="text-sm font-normal text-gray-400">({keys.length})</span></CardTitle></CardHeader>
+        <CardContent className="space-y-3">
+          {isLoading && <p className="text-sm text-gray-400">Loading…</p>}
+          {!isLoading && keys.length === 0 && <p className="text-sm text-gray-400">No keys yet.</p>}
+          {keys.map((k) => (
+            <div key={k.id} className="flex items-center justify-between gap-4 border border-gray-100 rounded-lg p-3">
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-900">{k.name}</p>
+                <p className="text-xs text-gray-400 font-mono">{k.keyPrefix}…</p>
+                <p className="text-xs text-gray-400 flex gap-2 flex-wrap mt-0.5">
+                  <span>{k.scopes.join(', ')}</span>
+                  <span>created {formatDate(k.createdAt)}</span>
+                  {k.lastUsedAt && <span>last used {formatDate(k.lastUsedAt)}</span>}
+                  {k.expiresAt && <span className="text-orange-500">expires {formatDate(k.expiresAt)}</span>}
+                </p>
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-red-500 hover:bg-red-50 shrink-0"
+                onClick={() => revokeMutation.mutate(k.id)}
+                loading={revokeMutation.isPending && revokeMutation.variables === k.id}
+              >
+                Revoke
+              </Button>
+            </div>
+          ))}
+        </CardContent>
+      </Card>
+    </div>
+  )
+}
+
 const TABS: { id: Tab; label: string }[] = [
   { id: 'profile', label: 'Profile' },
   { id: 'security', label: 'Security' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'storage', label: 'Storage' },
+  { id: 'mcp', label: 'AI / MCP' },
 ]
 
 export default function SettingsPage() {
@@ -746,6 +872,7 @@ export default function SettingsPage() {
       {activeTab === 'security' && <PasskeysCard />}
       {activeTab === 'notifications' && <NotificationsTab />}
       {activeTab === 'storage' && <StorageTab />}
+      {activeTab === 'mcp' && <McpTab />}
     </div>
   )
 }

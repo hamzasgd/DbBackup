@@ -59,3 +59,20 @@ export const storageApi = {
       s3: { usedBytes: number | null; totalBytes: number | null; percent: number | null } | null
     } }>('/storage/usage'),
 }
+
+export interface McpKey {
+  id: string
+  name: string
+  keyPrefix: string
+  scopes: string[]
+  lastUsedAt?: string | null
+  expiresAt?: string | null
+  createdAt: string
+}
+
+export const mcpApi = {
+  list: () => api.get<{ success: boolean; data: { keys: McpKey[] } }>('/mcp/keys'),
+  create: (data: { name: string; scopes: string[]; expiresInDays?: number }) =>
+    api.post<{ success: boolean; data: { id: string; name: string; scopes: string[]; key: string }; message: string }>('/mcp/keys', data),
+  revoke: (id: string) => api.delete(`/mcp/keys/${id}`),
+}

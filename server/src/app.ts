@@ -23,6 +23,7 @@ import syncConfigRoutes from './routes/sync-config.routes';
 import syncConflictRoutes from './routes/sync-conflict.routes';
 import syncStateRoutes from './routes/sync-state.routes';
 import syncOperationsRoutes from './routes/sync-operations.routes';
+import { mcpRouter, keysRouter } from './routes/mcp.routes';
 
 const app = express();
 
@@ -82,6 +83,11 @@ app.use('/api/sync/configurations', syncConfigRoutes);
 app.use('/api/sync/configurations', syncStateRoutes);
 app.use('/api/sync/configurations', syncOperationsRoutes);
 app.use('/api/sync/conflicts', syncConflictRoutes);
+
+// MCP (AI agent) endpoint + API-key management.
+// /mcp is its own bearer-authenticated JSON-RPC surface — NOT under /api/.
+app.use('/mcp', express.json({ limit: '1mb' }), mcpRouter);
+app.use('/api/mcp/keys', keysRouter);
 
 // Serve React frontend in production
 if (process.env.NODE_ENV === 'production') {

@@ -110,6 +110,7 @@ model User {
   syncConfigurations   SyncConfiguration[]
   credentialAccessLogs CredentialAccessLog[]
   passkeys             PasskeyCredential[]
+  mcpApiKeys           McpApiKey[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -235,6 +236,23 @@ model ConnectionHeartbeat {
 
   @@index([connectionId, checkedAt])
   @@map("connection_heartbeats")
+}
+
+model McpApiKey {
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  keyHash    String    @unique
+  keyPrefix  String
+  scopes     String[]
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+  @@map("mcp_api_keys")
 }
 
 model Schedule {
