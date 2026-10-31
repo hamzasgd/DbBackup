@@ -102,3 +102,13 @@ export const mcpApprovalsApi = {
   deny: (id: string) =>
     api.post<{ success: boolean }>(`/mcp/keys/approvals/${id}/deny`),
 }
+
+export const bundleApi = {
+  exportUrl: '/api/connections/bundle/export',
+  import: (data: ArrayBuffer, passphrase: string) => {
+    const formData = new FormData()
+    formData.append('file', new Blob([data]))
+    formData.append('passphrase', passphrase)
+    return api.post('/connections/bundle/import', formData, { headers: { 'Content-Type': 'application/octet-stream' } })
+  },
+}
