@@ -853,6 +853,7 @@ export default function SettingsPage() {
       )}
 
       {activeTab === 'security' && (
+        <div className="space-y-4">
         <Card>
           <CardHeader><CardTitle><span className="flex items-center gap-2"><Lock className="h-4 w-4" />Change Password</span></CardTitle></CardHeader>
           <CardContent>
@@ -866,10 +867,21 @@ export default function SettingsPage() {
             </form>
           </CardContent>
         </Card>
+        </div>
       )}
 
-      {activeTab === 'security' && <SessionsTab />}
-      {activeTab === 'security' && <PasskeysCard />}
+      {activeTab === 'security' && (
+        <>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400 pt-2">Sign-in sessions</h3>
+          <SessionsTab />
+        </>
+      )}
+      {activeTab === 'security' && (
+        <>
+          <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-400 pt-2">Passkeys</h3>
+          <PasskeysCard />
+        </>
+      )}
       {activeTab === 'notifications' && <NotificationsTab />}
       {activeTab === 'storage' && <StorageTab />}
       {activeTab === 'mcp' && <McpTab />}
