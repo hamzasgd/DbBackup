@@ -133,7 +133,7 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
             </div>
           </div>
           <table className="w-full text-xs">
-            <thead>
+            <thead className="sticky top-0 bg-white shadow-[0_1px_0_0_#e5e7eb] z-10">
               <tr className="bg-white border-t border-gray-100 text-gray-400 uppercase tracking-wide">
                 <th className="text-left px-4 py-2 font-medium">Column</th>
                 <th className="text-left px-4 py-2 font-medium">Type</th>
