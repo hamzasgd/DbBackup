@@ -5,12 +5,16 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { encrypt, decrypt, encryptIfPresent, decryptIfPresent } from '../services/crypto.service';
 import { engineFactory } from '../services/engines/engine.factory';
-import { logAudit } from '../services/audit.service';
+import { logAudit, logAuditReq } from '../services/audit.service';
+import { deleteBackupArtifact } from '../services/storage.service';
+import { logger } from '../config/logger';
+import { getHeartbeatSummary } from '../services/heartbeat.service';
 
 function encryptConnection(data: {
   host: string; username: string; password: string; database: string;
   sslCa?: string; sslCert?: string; sslKey?: string;
   sshHost?: string; sshUsername?: string; sshPrivateKey?: string; sshPassphrase?: string;
+  sshPrivateKeyPath?: string;
 }) {
   return {
     host: encrypt(data.host),
@@ -28,8 +32,11 @@ function encryptConnection(data: {
 }
 
 function decryptConnection(conn: Record<string, unknown>) {
+  const heartbeats = conn.heartbeats as { status: string; latencyMs: number | null; checkedAt: Date }[] | undefined;
   return {
     ...conn,
+    heartbeats: undefined,
+    latestHeartbeat: heartbeats && heartbeats.length > 0 ? heartbeats[0] : null,
     host: decrypt(conn.host as string),
     username: decrypt(conn.username as string),
     password: '••••••••',
@@ -49,6 +56,7 @@ export async function getConnections(req: AuthRequest, res: Response, next: Next
     const connections = await prisma.connection.findMany({
       where: { userId: req.user!.userId },
       orderBy: { createdAt: 'desc' },
+      include: { heartbeats: { take: 1, orderBy: { checkedAt: 'desc' } } },
     });
     const decrypted = connections.map(decryptConnection);
     res.json({ success: true, data: decrypted });
@@ -76,6 +84,8 @@ export async function createConnection(req: AuthRequest, res: Response, next: Ne
         name, type, port: parseInt(port, 10),
         sslEnabled: !!sslEnabled,
         sshEnabled: !!sshEnabled,
+        heartbeatEnabled: !!rest.heartbeatEnabled,
+        sshPrivateKeyPath: rest.sshPrivateKeyPath || null,
         sshPort: rest.sshPort ? parseInt(rest.sshPort, 10) : 22,
         userId: req.user!.userId,
         ...encrypted,
@@ -108,8 +118,11 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
       sslKey: rest.sslKey !== undefined ? encryptIfPresent(rest.sslKey) : existing.sslKey,
       sshHost: rest.sshHost !== undefined ? encryptIfPresent(rest.sshHost) : existing.sshHost,
       sshUsername: rest.sshUsername !== undefined ? encryptIfPresent(rest.sshUsername) : existing.sshUsername,
-      sshPrivateKey: rest.sshPrivateKey !== undefined ? encryptIfPresent(rest.sshPrivateKey) : existing.sshPrivateKey,
-      sshPassphrase: rest.sshPassphrase !== undefined ? encryptIfPresent(rest.sshPassphrase) : existing.sshPassphrase,
+      // sshPrivateKey/sshPassphrase are never sent back by the edit form (never
+      // exposed), so an untouched field arrives as '' — !== undefined would wipe
+      // the stored secret. Only overwrite when a new value is actually provided.
+      sshPrivateKey: rest.sshPrivateKey ? encryptIfPresent(rest.sshPrivateKey) : existing.sshPrivateKey,
+      sshPassphrase: rest.sshPassphrase ? encryptIfPresent(rest.sshPassphrase) : existing.sshPassphrase,
     };
 
     const updated = await prisma.connection.update({
@@ -118,6 +131,8 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
         name, type, port: parseInt(port, 10),
         sslEnabled: !!sslEnabled,
         sshEnabled: !!sshEnabled,
+        heartbeatEnabled: rest.heartbeatEnabled !== undefined ? !!rest.heartbeatEnabled : existing.heartbeatEnabled,
+        sshPrivateKeyPath: rest.sshPrivateKeyPath !== undefined ? (rest.sshPrivateKeyPath || null) : existing.sshPrivateKeyPath,
         sshPort: rest.sshPort ? parseInt(rest.sshPort, 10) : 22,
         ...encrypted,
       },
@@ -135,11 +150,35 @@ export async function deleteConnection(req: AuthRequest, res: Response, next: Ne
       where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!existing) throw new AppError('Connection not found', 404);
+
+    // ?deleteBackups=true → also delete backup files (local + S3) and rows.
+    // Otherwise backup rows survive (connectionId set to NULL by the schema)
+    // and stay downloadable/restoreable.
+    const deleteBackups = req.query.deleteBackups === 'true';
+
+    if (deleteBackups) {
+      const backups = await prisma.backup.findMany({
+        where: { connectionId: existing.id },
+        select: { id: true, filePath: true, fileSize: true, storageType: true, storageKey: true },
+      });
+      for (const b of backups) {
+        await deleteBackupArtifact(existing.userId, b).catch((err) =>
+          logger.warn(`Artifact cleanup failed for backup ${b.id} during connection delete:`, err),
+        );
+      }
+    }
+
     await prisma.connection.delete({ where: { id: req.params.id } });
 
-    await logAudit(req.user!.userId, 'DELETE', 'connection', { connectionId: existing.id, name: existing.name }, req.ip);
+    await logAudit(
+      req.user!.userId,
+      'DELETE',
+      'connection',
+      { connectionId: existing.id, name: existing.name, backupsDeleted: deleteBackups },
+      req.ip,
+    );
 
-    res.json({ success: true, message: 'Connection deleted' });
+    res.json({ success: true, message: deleteBackups ? 'Connection and its backups deleted' : 'Connection deleted (backups kept)' });
   } catch (err) { next(err); }
 }
 
@@ -163,10 +202,14 @@ export async function testConnection(req: AuthRequest, res: Response, next: Next
       sshPort: conn.sshPort || 22,
       sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
       sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
       sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
     });
 
     const result = await engine.testConnection();
+    await logAuditReq(req, req.user!.userId, 'TEST', 'connection', {
+      connectionId: conn.id, name: conn.name, success: result.success, version: result.version,
+    });
     res.json({ success: true, data: result });
   } catch (err) { next(err); }
 }
@@ -191,10 +234,24 @@ export async function getDbInfo(req: AuthRequest, res: Response, next: NextFunct
       sshPort: conn.sshPort || 22,
       sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
       sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
+      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
       sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
     });
 
     const info = await engine.getDbInfo();
     res.json({ success: true, data: info });
+  } catch (err) { next(err); }
+}
+
+export async function getHeartbeat(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const conn = await prisma.connection.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+      select: { id: true, heartbeatEnabled: true },
+    });
+    if (!conn) throw new AppError('Connection not found', 404);
+
+    const summary = await getHeartbeatSummary(conn.id);
+    res.json({ success: true, data: { enabled: conn.heartbeatEnabled, ...summary } });
   } catch (err) { next(err); }
 }

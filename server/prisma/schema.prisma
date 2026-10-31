@@ -41,6 +41,7 @@ enum MigrationStatus {
 enum StorageProvider {
   LOCAL
   S3
+  GOOGLE_DRIVE
 }
 
 enum NotificationEvent {
@@ -97,6 +98,10 @@ model User {
   name                 String
   passwordHash         String
   isActive             Boolean               @default(true)
+  // Security cool-down: logins blocked until this time after a password change
+  loginLockedUntil     DateTime?
+  // Click-through acceptance of TERMS_OF_SERVICE.md at registration
+  termsAcceptedAt      DateTime?
   connections          Connection[]
   auditLogs            AuditLog[]
   refreshTokens        RefreshToken[]
@@ -104,19 +109,40 @@ model User {
   storageSettings      StorageSettings?
   syncConfigurations   SyncConfiguration[]
   credentialAccessLogs CredentialAccessLog[]
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
+  passkeys             PasskeyCredential[]
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
   @@map("users")
 }
 
+model PasskeyCredential {
+  id           String    @id @default(uuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  credentialId String    @unique
+  publicKey    String
+  counter      Int       @default(0)
+  transports   String?
+  deviceType   String?
+  backedUp     Boolean   @default(false)
+  name         String    @default("Passkey")
+  lastUsedAt   DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([userId])
+  @@map("passkey_credentials")
+}
+
 model RefreshToken {
-  id        String   @id @default(uuid())
-  token     String   @unique
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  createdAt DateTime @default(now())
+  id         String   @id @default(uuid())
+  token      String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  ipAddress  String?
+  userAgent  String?
 
   @@map("refresh_tokens")
 }
@@ -141,9 +167,16 @@ model Connection {
   sshPort       Int?    @default(22)
   sshUsername   String?
   sshPrivateKey String?
+  // Path to a key file on the server filesystem — alternative to storing the
+  // PEM in the DB (a stolen DB dump then contains no SSH key material).
+  sshPrivateKeyPath String?
   sshPassphrase String?
 
   connectionTimeout Int? @default(30000)
+
+  // Heartbeat monitoring
+  heartbeatEnabled Boolean @default(false)
+  heartbeats       ConnectionHeartbeat[]
 
   // Relations
   userId              String
@@ -163,8 +196,9 @@ model Connection {
 
 model Backup {
   id           String          @id @default(uuid())
-  connectionId String
-  connection   Connection      @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  userId       String
+  connectionId String?
+  connection   Connection?     @relation(fields: [connectionId], references: [id], onDelete: SetNull)
   fileName     String
   filePath     String
   fileSize     BigInt          @default(0)
@@ -186,7 +220,21 @@ model Backup {
   completedAt  DateTime?
   createdAt    DateTime        @default(now())
 
+  @@index([userId])
   @@map("backups")
+}
+
+model ConnectionHeartbeat {
+  id           String   @id @default(uuid())
+  connectionId String
+  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  status       String   // UP | DOWN
+  latencyMs    Int?
+  error        String?
+  checkedAt    DateTime @default(now())
+
+  @@index([connectionId, checkedAt])
+  @@map("connection_heartbeats")
 }
 
 model Schedule {
@@ -209,14 +257,16 @@ model Schedule {
 
 model AuditLog {
   id        String   @id @default(uuid())
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
   action    String
   resource  String
   details   Json?
   ipAddress String?
+  userAgent String?
   createdAt DateTime @default(now())
 
+  @@index([userId, createdAt])
   @@map("audit_logs")
 }
 
@@ -274,6 +324,8 @@ model NotificationSettings {
   notifyOnSuccess   Boolean  @default(false)
   notifyOnFailure   Boolean  @default(true)
   notifyOnRetention Boolean  @default(false)
+  notifyOnLogin     Boolean  @default(true)
+  notifyOnStorage   Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 
@@ -291,6 +343,15 @@ model StorageSettings {
   secretAccessKey String?
   endpoint        String?
   prefix          String?
+  gdriveClientId     String?
+  gdriveClientSecret String?
+  gdriveRefreshToken String?
+  gdriveFolderId     String?
+  // At-rest encryption of backup files (AES-256-GCM, passphrase-based)
+  backupEncryptionEnabled Boolean  @default(false)
+  backupPassphrase    String?
+  // Old passphrases (encrypted) so backups encrypted before a rotation stay decryptable
+  backupPassphraseHistory Json?
   deleteLocal     Boolean         @default(false)
   createdAt       DateTime        @default(now())
   updatedAt       DateTime        @updatedAt

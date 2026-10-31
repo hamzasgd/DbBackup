@@ -8,11 +8,13 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { decrypt } from '../services/crypto.service';
 import { addBackupJob } from '../queue/backup.queue';
 import { verifyBackup } from '../services/verification.service';
-import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempFile } from '../services/storage.service';
+import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempFile, ensureStorageDir, getStoragePath } from '../services/storage.service';
+import { streamFromGdrive } from '../services/gdrive.service';
 import { logAudit } from '../services/audit.service';
 import { runGlobalRetentionSweep } from '../services/retention.service';
 
-const STORAGE_PATH = process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
+const STORAGE_PATH = getStoragePath();
+ensureStorageDir(STORAGE_PATH);
 
 export async function getBackups(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
@@ -22,7 +24,7 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
     const skip = (parsedPage - 1) * parsedLimit;
 
     const where = {
-      connection: { userId: req.user!.userId },
+      userId: req.user!.userId,
       ...(connectionId ? { connectionId } : {}),
     };
 
@@ -50,10 +52,8 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
     });
     if (!conn) throw new AppError('Connection not found', 404);
 
-    // Ensure storage dir exists
-    if (!fs.existsSync(STORAGE_PATH)) {
-      fs.mkdirSync(STORAGE_PATH, { recursive: true });
-    }
+    // Ensure storage dir exists (owner-only permissions)
+    ensureStorageDir(STORAGE_PATH);
 
     // Resolve and validate format
     const defaultFormat = conn.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL';
@@ -62,6 +62,7 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
     const backup = await prisma.backup.create({
       data: {
         id: uuidv4(),
+        userId: req.user!.userId,
         connectionId,
         fileName: 'pending',
         filePath: 'pending',
@@ -92,7 +93,7 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
 export async function getBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const backup = await prisma.backup.findFirst({
-      where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      where: { id: req.params.id, userId: req.user!.userId },
       include: { connection: { select: { id: true, name: true, type: true } } },
     });
     if (!backup) throw new AppError('Backup not found', 404);
@@ -103,7 +104,7 @@ export async function getBackup(req: AuthRequest, res: Response, next: NextFunct
 export async function deleteBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const backup = await prisma.backup.findFirst({
-      where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!backup) throw new AppError('Backup not found', 404);
 
@@ -111,6 +112,7 @@ export async function deleteBackup(req: AuthRequest, res: Response, next: NextFu
     await deleteBackupArtifact(req.user!.userId, backup);
 
     await prisma.backup.delete({ where: { id: backup.id } });
+    await logAudit(req.user!.userId, 'DELETE', 'backup', { backupId: backup.id, fileName: backup.fileName, storageType: backup.storageType }, req.ip, req.headers['user-agent']);
     res.json({ success: true, message: 'Backup deleted' });
   } catch (err) { next(err); }
 }
@@ -118,14 +120,25 @@ export async function deleteBackup(req: AuthRequest, res: Response, next: NextFu
 export async function downloadBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const backup = await prisma.backup.findFirst({
-      where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!backup) throw new AppError('Backup not found', 404);
+
+    await logAudit(req.user!.userId, 'DOWNLOAD', 'backup', { backupId: backup.id, fileName: backup.fileName, storageType: backup.storageType }, req.ip, req.headers['user-agent']);
 
     // S3-stored backup — stream from S3
     if (backup.storageType === 'S3' && backup.storageKey) {
       const stream = await streamFromS3(req.user!.userId, backup.storageKey);
-      res.setHeader('Content-Disposition', `attachment; filename="${backup.fileName}"`);
+      res.setHeader('Content-Disposition', `attachment; filename="${backup.fileName.replace(/\.enc$/, '')}"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      stream.pipe(res);
+      return;
+    }
+
+    // Google Drive-stored backup — stream from Drive
+    if (backup.storageType === 'GOOGLE_DRIVE' && backup.storageKey) {
+      const stream = await streamFromGdrive(req.user!.userId, backup.storageKey);
+      res.setHeader('Content-Disposition', `attachment; filename="${backup.fileName.replace(/\.enc$/, '')}"`);
       res.setHeader('Content-Type', 'application/octet-stream');
       stream.pipe(res);
       return;
@@ -133,14 +146,14 @@ export async function downloadBackup(req: AuthRequest, res: Response, next: Next
 
     // Local backup
     if (!fs.existsSync(backup.filePath)) throw new AppError('Backup file not found on disk', 404);
-    res.download(backup.filePath, backup.fileName);
+    res.download(backup.filePath, backup.fileName.replace(/\.enc$/, ''));
   } catch (err) { next(err); }
 }
 
 export async function verifyBackupEndpoint(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const backup = await prisma.backup.findFirst({
-      where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!backup) throw new AppError('Backup not found', 404);
     if (backup.status !== 'COMPLETED') throw new AppError('Only completed backups can be verified', 400);
@@ -159,6 +172,8 @@ export async function verifyBackupEndpoint(req: AuthRequest, res: Response, next
           checksum: result.checksum || null,
         },
       });
+
+      await logAudit(req.user!.userId, 'VERIFY', 'backup', { backupId: backup.id, fileName: backup.fileName, valid: result.valid }, req.ip, req.headers['user-agent']);
 
       res.json({ success: true, data: result });
     } finally {

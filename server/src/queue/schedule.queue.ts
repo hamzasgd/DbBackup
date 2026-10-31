@@ -3,6 +3,7 @@ import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { addBackupJob } from './backup.queue';
 import { decrypt } from '../services/crypto.service';
+import { ensureStorageDir, getStoragePath } from '../services/storage.service';
 import { logger } from '../config/logger';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
@@ -60,7 +61,8 @@ export function createScheduleWorker(): Worker {
       if (!schedule || !schedule.isActive) return;
 
       const conn = schedule.connection;
-      const outputDir = process.env.BACKUP_STORAGE_PATH || path.join(process.cwd(), 'backups');
+      const outputDir = getStoragePath();
+      ensureStorageDir(outputDir);
 
       const defaultFormat = conn.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL';
 
@@ -69,6 +71,7 @@ export function createScheduleWorker(): Worker {
       await prisma.backup.create({
         data: {
           id: backupId,
+          userId: conn.userId,
           connectionId: conn.id,
           fileName: 'pending',
           filePath: 'pending',

@@ -4,7 +4,7 @@ import { notify } from './notification.service';
 import { deleteBackupArtifact } from './storage.service';
 
 export interface RetentionResult {
-  connectionId: string;
+  connectionId: string | null;
   deleted: number;
   freedBytes: bigint;
 }
@@ -12,9 +12,10 @@ export interface RetentionResult {
 /**
  * Enforce retention for a single connection based on its schedule settings.
  * Deletes backups older than `retentionDays` AND/OR keeps only the last `retentionCount`.
+ * `connectionId: null` targets backups detached from deleted connections (env default policy).
  */
 export async function enforceRetentionForConnection(
-  connectionId: string,
+  connectionId: string | null,
   retentionDays: number,
   retentionCount: number | null,
   userId: string,
@@ -79,7 +80,7 @@ export async function enforceRetentionForConnection(
       details: {
         'Backups Deleted': toDelete.size,
         'Space Freed': `${freedMB} MB`,
-        'Connection ID': connectionId,
+        'Connection ID': connectionId ?? 'no connection (deleted)',
       },
     });
   }
@@ -107,8 +108,11 @@ function envDefaultRetention(): { retentionDays: number; retentionCount: number 
  * policy is silently ignored.
  */
 export async function getRetentionPolicy(
-  connectionId: string,
+  connectionId: string | null,
 ): Promise<{ retentionDays: number; retentionCount: number | null }> {
+  // Detached backups (connection deleted) fall back to the env default policy
+  if (!connectionId) return envDefaultRetention();
+
   const schedules = await prisma.schedule.findMany({
     where: { connectionId },
     select: { retentionDays: true, retentionCount: true },
@@ -134,14 +138,16 @@ export async function getRetentionPolicy(
  * Covers scheduled connections (schedule policy) and manual-only connections (env defaults).
  */
 export async function runGlobalRetentionSweep(userId?: string): Promise<RetentionResult[]> {
+  // Group by connectionId; NULL connectionId (backups kept after their
+  // connection was deleted) forms one group governed by the env default policy.
   const connections = await prisma.backup.findMany({
-    where: { status: 'COMPLETED', ...(userId ? { connection: { userId } } : {}) },
-    select: { connectionId: true, connection: { select: { userId: true } } },
+    where: { status: 'COMPLETED', ...(userId ? { userId } : {}) },
+    select: { connectionId: true, userId: true },
     distinct: ['connectionId'],
   });
 
   const results: RetentionResult[] = [];
-  for (const { connectionId, connection } of connections) {
+  for (const { connectionId, userId: ownerId } of connections) {
     const policy = await getRetentionPolicy(connectionId);
     if (policy.retentionDays <= 0 && !policy.retentionCount) continue;
     try {
@@ -149,11 +155,19 @@ export async function runGlobalRetentionSweep(userId?: string): Promise<Retentio
         connectionId,
         policy.retentionDays,
         policy.retentionCount,
-        connection.userId,
+        ownerId,
       );
+      if (result.deleted > 0) {
+        const { logAudit } = await import('./audit.service');
+        await logAudit(ownerId, 'RETENTION_SWEEP', 'backup', {
+          connectionId: connectionId ?? null,
+          deleted: result.deleted,
+          freedBytes: Number(result.freedBytes),
+        });
+      }
       results.push(result);
     } catch (err) {
-      logger.warn(`Retention sweep failed for connection ${connectionId}:`, err);
+      logger.warn(`Retention sweep failed for connection ${connectionId ?? 'detached'}:`, err);
     }
   }
   return results;

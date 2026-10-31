@@ -5,8 +5,8 @@ export type ExportFormat = 'json' | 'csv' | 'sql'
 
 export interface Backup {
   id: string
-  connectionId: string
-  connection?: { id: string; name: string; type: string }
+  connectionId: string | null
+  connection?: { id: string; name: string; type: string } | null
   fileName: string
   filePath: string
   fileSize: number
@@ -25,7 +25,7 @@ export interface Backup {
   verified: boolean
   verifiedAt?: string
   checksum?: string
-  storageType: 'LOCAL' | 'S3'
+  storageType: 'LOCAL' | 'S3' | 'GOOGLE_DRIVE'
 }
 
 export const backupsApi = {

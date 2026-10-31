@@ -9,6 +9,7 @@ export const registerSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   email: z.string().email('Invalid email format'),
   password: z.string().min(8, 'Password must be at least 8 characters'),
+  acceptTerms: z.literal(true, { message: 'You must accept the Terms of Service' }),
 });
 
 export const loginSchema = z.object({
@@ -39,8 +40,10 @@ export const connectionSchema = z.object({
   sshPort: z.number().int().positive().optional().nullable(),
   sshUsername: z.string().optional().nullable(),
   sshPrivateKey: z.string().optional(),
+  sshPrivateKeyPath: z.string().optional(),
   sshPassphrase: z.string().optional(),
   connectionTimeout: z.number().int().positive().optional(),
+  heartbeatEnabled: z.boolean().optional(),
 });
 
 // Backup schemas

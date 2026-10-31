@@ -13,7 +13,6 @@ import { Select } from '../../components/ui/Select'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import { Badge } from '../../components/ui/Badge'
 import { Modal } from '../../components/ui/Modal'
-import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { CardSkeleton } from '../../components/ui/Skeleton'
 import { dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
 
@@ -27,10 +26,12 @@ const schema = z.object({
   database: z.string().min(1, 'Database name is required'),
   sslEnabled: z.boolean().default(false),
   sshEnabled: z.boolean().default(false),
+  heartbeatEnabled: z.boolean().default(false),
   sshHost: z.string().optional().nullable(),
   sshPort: z.coerce.number().optional().nullable(),
   sshUsername: z.string().optional().nullable(),
   sshPrivateKey: z.string().optional().nullable(),
+  sshPrivateKeyPath: z.string().optional().nullable(),
   sshPassphrase: z.string().optional().nullable(),
   connectionTimeout: z.coerce.number().optional().default(30000),
 })
@@ -54,7 +55,7 @@ export default function ConnectionsPage() {
 
   const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false },
+    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false },
   })
 
   const _dbType = watch('type')
@@ -74,8 +75,12 @@ export default function ConnectionsPage() {
   })
 
   const deleteMutation = useMutation({
-    mutationFn: (id: string) => connectionsApi.delete(id),
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); toast.success('Connection deleted') },
+    mutationFn: ({ id, deleteBackups }: { id: string; deleteBackups: boolean }) => connectionsApi.delete(id, deleteBackups),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['connections'] })
+      qc.invalidateQueries({ queryKey: ['backups'] })
+      toast.success('Connection deleted')
+    },
     onError: () => toast.error('Failed to delete connection'),
   })
 
@@ -148,6 +153,16 @@ export default function ConnectionsPage() {
               <div className="text-sm text-gray-500 space-y-1">
                 <p className="flex items-center gap-1.5"><Network className="h-3.5 w-3.5" />{c.host}:{c.port}</p>
                 <p className="flex items-center gap-1.5"><Database className="h-3.5 w-3.5" />{c.database}</p>
+                {c.heartbeatEnabled && (
+                  <p className="flex items-center gap-1.5">
+                    <span className={`h-2 w-2 rounded-full ${c.latestHeartbeat?.status === 'UP' ? 'bg-green-500' : c.latestHeartbeat?.status === 'DOWN' ? 'bg-red-500' : 'bg-gray-300'}`} />
+                    <span className={c.latestHeartbeat?.status === 'UP' ? 'text-green-600' : c.latestHeartbeat?.status === 'DOWN' ? 'text-red-600' : 'text-gray-400'}>
+                      {c.latestHeartbeat?.status === 'UP'
+                        ? `Up · ${c.latestHeartbeat.latencyMs ?? '?'} ms`
+                        : c.latestHeartbeat?.status === 'DOWN' ? 'Down' : 'No check yet'}
+                    </span>
+                  </p>
+                )}
               </div>
               <div className="flex gap-1 flex-wrap">
                 {c.sslEnabled && <Badge className="bg-green-100 text-green-700"><Shield className="h-3 w-3 mr-1" />SSL</Badge>}
@@ -240,6 +255,12 @@ export default function ConnectionsPage() {
                   <input type="checkbox" id="sshEnabledTunnel" {...register('sshEnabled')} className="rounded" />
                   <label htmlFor="sshEnabledTunnel" className="text-sm text-gray-700">Enable SSH tunnel</label>
                 </div>
+                <div className="flex items-center gap-2 pt-1">
+                  <input type="checkbox" id="heartbeatEnabledChk" {...register('heartbeatEnabled')} className="rounded" />
+                  <label htmlFor="heartbeatEnabledChk" className="text-sm text-gray-700">
+                    Heartbeat monitoring <span className="text-gray-400">(health check every 5 min, alerts on down/recovery)</span>
+                  </label>
+                </div>
                 {sshEnabled && (
                   <>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -253,7 +274,7 @@ export default function ConnectionsPage() {
                       <label className="text-sm font-medium text-gray-700">SSH Private Key</label>
                       <textarea
                         rows={4}
-                        placeholder="-----BEGIN RSA PRIVATE KEY-----"
+                        placeholder={editId ? 'Leave empty to keep the saved key' : '-----BEGIN OPENSSH PRIVATE KEY-----'}
                         className="mt-1 w-full px-3 py-2 text-xs font-mono border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                         {...register('sshPrivateKey')}
                       />
@@ -274,16 +295,30 @@ export default function ConnectionsPage() {
         </form>
       </Modal>
 
-      <ConfirmDialog
-        open={deleteTarget !== null}
-        onClose={() => setDeleteTarget(null)}
-        onConfirm={() => { if (deleteTarget) { deleteMutation.mutate(deleteTarget); setDeleteTarget(null) } }}
-        title="Delete Connection"
-        description="This will permanently delete this connection and cannot be undone."
-        confirmLabel="Delete"
-        variant="danger"
-        loading={deleteMutation.isPending}
-      />
+      <Modal open={deleteTarget !== null} onClose={() => setDeleteTarget(null)} title="Delete Connection">
+        <div className="space-y-4">
+          <p className="text-sm text-gray-600">
+            What should happen to this connection's backups?
+          </p>
+          <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
+            Schedules linked to this connection will be deleted either way.
+          </div>
+          <div className="flex flex-col gap-2">
+            <Button
+              variant="outline"
+              onClick={() => { if (deleteTarget) { deleteMutation.mutate({ id: deleteTarget, deleteBackups: false }); setDeleteTarget(null) } }}
+            >
+              Keep backups — delete connection only
+            </Button>
+            <Button
+              variant="danger"
+              onClick={() => { if (deleteTarget) { deleteMutation.mutate({ id: deleteTarget, deleteBackups: true }); setDeleteTarget(null) } }}
+            >
+              Delete connection and all its backups
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </div>
   )
 }

@@ -7,7 +7,7 @@ import { AppError } from '../middleware/errorHandler';
 export async function backupProgressSSE(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const backup = await prisma.backup.findFirst({
-      where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!backup) { next(new AppError('Backup not found', 404)); return; }
 

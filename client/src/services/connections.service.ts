@@ -11,6 +11,8 @@ export interface Connection {
   database: string
   sslEnabled: boolean
   sshEnabled: boolean
+  heartbeatEnabled?: boolean
+  latestHeartbeat?: { status: string; latencyMs: number | null; checkedAt: string } | null
   sshHost?: string
   sshPort?: number
   sshUsername?: string
@@ -105,7 +107,14 @@ export const connectionsApi = {
   getOne: (id: string) => api.get<{ success: boolean; data: Connection }>(`/connections/${id}`),
   create: (data: CreateConnectionPayload) => api.post<{ success: boolean; data: Connection }>('/connections', data),
   update: (id: string, data: Partial<CreateConnectionPayload>) => api.put<{ success: boolean; data: Connection }>(`/connections/${id}`, data),
-  delete: (id: string) => api.delete(`/connections/${id}`),
+  delete: (id: string, deleteBackups = false) => api.delete(`/connections/${id}${deleteBackups ? '?deleteBackups=true' : ''}`),
   test: (id: string) => api.post<{ success: boolean; data: { success: boolean; version: string; message: string } }>(`/connections/${id}/test`),
   getInfo: (id: string) => api.get<{ success: boolean; data: DbInfo }>(`/connections/${id}/info`),
+  heartbeat: (id: string) =>
+    api.get<{ success: boolean; data: {
+      enabled: boolean
+      latest: { status: string; latencyMs: number | null; checkedAt: string; error?: string | null } | null
+      history: { status: string; latencyMs: number | null; checkedAt: string; error?: string | null }[]
+      stats24h: { checks: number; upChecks: number; uptimePercent: number | null; avgLatencyMs: number | null }
+    } }>(`/connections/${id}/heartbeat`),
 }

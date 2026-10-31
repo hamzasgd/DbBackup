@@ -67,6 +67,13 @@ function VerifiedBadge({ backup }: { backup: Backup }) {
       </span>
     )
   }
+  if (backup.storageType === 'GOOGLE_DRIVE') {
+    return (
+      <span className="inline-flex items-center gap-1 text-xs text-gray-400 font-medium">
+        <ShieldOff className="h-3.5 w-3.5" />Drive stored
+      </span>
+    )
+  }
   return (
     <span className="inline-flex items-center gap-1 text-xs text-yellow-600 font-medium">
       <ShieldAlert className="h-3.5 w-3.5" />Unverified
@@ -123,7 +130,7 @@ function BackupRow({
       <td className="px-6 py-3">
         <div className="flex items-center gap-2">
           <Badge className={dbTypeBadgeColor(b.dbType)}>{dbTypeLabel(b.dbType)}</Badge>
-          <span className="text-gray-600">{b.connection?.name}</span>
+          <span className="text-gray-600">{b.connection?.name ?? <em className="text-gray-400">no connection</em>}</span>
         </div>
       </td>
       <td className="px-6 py-3 text-gray-600">{b.fileSize ? formatBytes(b.fileSize) : '\u2014'}</td>
@@ -222,6 +229,7 @@ export default function BackupsPage() {
   })
   const backups = data?.data.data.backups ?? []
   const total = data?.data.data.total ?? 0
+  const selectedBackupObj = backups.find(b => b.id === selectedBackup)
 
   const triggerMutation = useMutation({
     mutationFn: () => backupsApi.trigger({
@@ -351,7 +359,7 @@ export default function BackupsPage() {
                   <BackupRow
                     key={b.id}
                     b={b}
-                    onRestore={() => { setSelectedBackup(b.id); setRestoreTargetConn(b.connectionId); setRestoreModal(true) }}
+                    onRestore={() => { setSelectedBackup(b.id); setRestoreTargetConn(b.connectionId ?? ''); setRestoreModal(true) }}
                     onDelete={() => setDeleteTarget(b.id)}
                     onVerified={() => qc.invalidateQueries({ queryKey: ['backups'] })}
                   />
@@ -427,9 +435,17 @@ export default function BackupsPage() {
                 value={restoreTargetConn}
                 onChange={(e) => setRestoreTargetConn(e.target.value)}
               />
+              {!selectedBackupObj?.connectionId && !restoreTargetConn && (
+                <p className="text-xs text-red-600">This backup's source connection was deleted — pick a target connection above to restore.</p>
+              )}
               <div className="flex gap-2 justify-end">
                 <Button variant="outline" onClick={() => setRestoreModal(false)}>Cancel</Button>
-                <Button variant="danger" onClick={() => restoreMutation.mutate()} loading={restoreMutation.isPending}>
+                <Button
+                  variant="danger"
+                  onClick={() => restoreMutation.mutate()}
+                  loading={restoreMutation.isPending}
+                  disabled={!selectedBackupObj?.connectionId && !restoreTargetConn}
+                >
                   <RotateCcw className="h-4 w-4" />Restore
                 </Button>
               </div>

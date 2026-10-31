@@ -16,12 +16,14 @@ export async function restoreBackup(req: AuthRequest, res: Response, next: NextF
     const { backupId, targetConnectionId, targetDatabase } = req.body;
 
     const backup = await prisma.backup.findFirst({
-      where: { id: backupId, connection: { userId: req.user!.userId } },
+      where: { id: backupId, userId: req.user!.userId },
     });
     if (!backup) throw new AppError('Backup not found', 404);
     if (backup.status !== 'COMPLETED') throw new AppError('Backup is not in completed state', 400);
 
     const connId = targetConnectionId || backup.connectionId;
+    // Backups kept after their connection was deleted have no source connection
+    if (!connId) throw new AppError('This backup has no source connection — select a target connection to restore', 400);
     const conn = await prisma.connection.findFirst({
       where: { id: connId, userId: req.user!.userId },
     });
