@@ -11,6 +11,14 @@ export interface NotificationSettings {
   smtpSecure: boolean
   slackEnabled: boolean
   slackWebhookUrl?: string | null
+  ntfyEnabled: boolean
+  ntfyServerUrl?: string | null
+  ntfyTopic?: string | null
+  telegramEnabled: boolean
+  telegramBotToken?: string | null
+  telegramChatId?: string | null
+  discordEnabled: boolean
+  discordWebhookUrl?: string | null
   notifyOnSuccess: boolean
   notifyOnFailure: boolean
   notifyOnRetention: boolean

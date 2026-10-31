@@ -362,6 +362,14 @@ model NotificationSettings {
   smtpSecure        Boolean  @default(false)
   slackEnabled      Boolean  @default(false)
   slackWebhookUrl   String?
+  ntfyEnabled       Boolean  @default(false)
+  ntfyServerUrl     String?   // e.g. https://ntfy.sh (default) or self-hosted
+  ntfyTopic         String?   // topic to publish to
+  telegramEnabled   Boolean  @default(false)
+  telegramBotToken  String?
+  telegramChatId    String?
+  discordEnabled    Boolean  @default(false)
+  discordWebhookUrl String?
   notifyOnSuccess   Boolean  @default(false)
   notifyOnFailure   Boolean  @default(true)
   notifyOnRetention Boolean  @default(false)
