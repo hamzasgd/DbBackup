@@ -706,6 +706,31 @@ const MCP_AGENTS: { id: string; label: string; file: string; wrap: (url: string,
     wrap: (url, key) => JSON.stringify({ context_servers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
   },
   {
+    id: 'zcode', label: 'ZCode',
+    file: '~/.zcode/cli/config.json (mcp.servers) — if url-type is unsupported on your build, use the mcp-remote stdio variant in the README',
+    wrap: (url, key) => JSON.stringify({ mcp: { servers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` }, enabled: true } } } }, null, 2),
+  },
+  {
+    id: 'kiro', label: 'Kiro',
+    file: '.kiro/settings/mcp.json in your workspace',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'codex', label: 'Codex CLI',
+    file: '~/.codex/config.toml (TOML, not JSON)',
+    wrap: (url, key) => `[mcp_servers.dbbackup]\nurl = "${url}"\nhttp_headers = { "Authorization" = "Bearer ${key}" }`,
+  },
+  {
+    id: 'gemini', label: 'Gemini CLI',
+    file: '~/.gemini/settings.json',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { httpUrl: url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
+    id: 'trae', label: 'Trae',
+    file: 'Trae: MCP → + Add Server (or mcp.json)',
+    wrap: (url, key) => JSON.stringify({ mcpServers: { dbbackup: { url, headers: { Authorization: `Bearer ${key}` } } } }, null, 2),
+  },
+  {
     id: 'goose', label: 'Goose',
     file: '~/.config/goose/config.yaml',
     wrap: (url, key) => `mcpservers:\n  dbbackup:\n    url: ${url}\n    headers:\n      Authorization: Bearer ${key}`,
