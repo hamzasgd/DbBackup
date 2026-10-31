@@ -5,7 +5,15 @@
 <h1 align="center">DbBackup</h1>
 
 <p align="center">
-  A self-hosted web application for database backup, restore, and migration — powered by native CLI tools.
+  <strong>The agent-ready, self-hosted database backup platform.</strong><br/>
+  Back up, restore and migrate MySQL, MariaDB and PostgreSQL — over SSH tunnels, encrypted at rest,<br/>
+  monitored around the clock — and drive it all from your AI agent via built-in MCP.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/MCP-Agent--ready-6E56CF?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=" />
+  <img src="https://img.shields.io/badge/Passkeys-WebAuthn-3178C6" />
+  <img src="https://img.shields.io/badge/Encryption-AES--256--GCM-2DD4BF" />
 </p>
 
 <p align="center">
@@ -38,6 +46,14 @@
 
 ## ✨ Features
 
+### 🤖 AI Agents (MCP) — built in
+
+- **Model Context Protocol server** at `/mcp` (Streamable HTTP, JSON-RPC 2.0) — connect Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline, Zed, Goose, ZCode, Kiro, Codex CLI, Gemini CLI or Trae
+- **Scoped API keys** (`dbbk_mcp_…`, SHA-256-hashed at rest, shown once, instant revocation, optional expiry): **read ⊂ write ⊂ admin**, enforced per tool
+- **Agent tools**: list connections, test connectivity, list/get backups, trigger backups, verify, heartbeat status, storage usage, activity log, delete (admin) — restore deliberately not exposed
+- **Every call audited** (key, tool, outcome, duration, IP) with live usage tracking; ready-made per-agent config snippets with copy buttons in Settings → AI/MCP
+- Rate-limited endpoint (120 req/min)
+
 ### Core
 
 - **Multi-Engine Support** — MySQL, MariaDB, and PostgreSQL via native CLI tools (`mysqldump`, `mariadb-dump`, `pg_dump`, `pg_restore`)
@@ -67,6 +83,7 @@
 ### Security & Access
 
 - **Passkey (WebAuthn) Login** — Passwordless sign-in with Touch ID / Face ID / Windows Hello / security keys
+- **Login Lockout** — 3 failed password attempts from one IP blocks that address for 15 minutes (tunable) with an email/Slack alert; a **cross-IP brute-force detector** catches VPN/proxy hopping (consolidated alert instead of a grief-able account lock) and per-attempt failure emails are throttled
 - **Active Session Management** — See every logged-in device (browser, OS, IP, login time) and revoke individually or all at once
 - **Password Change Lockdown** — Optional 2-hour sign-in cool-down after a password change (bank-style anti-takeover)
 - **Credential Encryption** — All stored credentials and SSH keys encrypted with AES-256-GCM; versioned keys with rotation support
@@ -417,6 +434,8 @@ cd server && npx prisma migrate deploy   # apply pending migrations (required)
 ```
 
 Backwards compatibility: existing connections, backups, and unencrypted backups keep working; legacy encryption keys still decrypt existing rows; unencrypted backups remain readable alongside encrypted ones.
+
+> After deploying behind nginx, set `PASSKEY_RP_ID` (and ideally forward `Host` / `X-Forwarded-*` headers) — see [SECURITY.md](SECURITY.md) and `server/.env.example`.
 
 ---
 
