@@ -81,7 +81,7 @@ export interface McpKey {
 
 export const mcpApi = {
   list: () => api.get<{ success: boolean; data: { keys: McpKey[] } }>('/mcp/keys'),
-  create: (data: { name: string; scopes: string[]; expiresInDays?: number; approvalRequired?: boolean }) =>
+  create: (data: { name: string; scopes: string[]; expiresInDays?: number; approvalRequired?: boolean; dailyCallLimit?: number }) =>
     api.post<{ success: boolean; data: { id: string; name: string; scopes: string[]; key: string }; message: string }>('/mcp/keys', data),
   revoke: (id: string) => api.delete(`/mcp/keys/${id}`),
 }

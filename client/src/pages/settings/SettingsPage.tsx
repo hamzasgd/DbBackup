@@ -874,6 +874,7 @@ function McpTab() {
   const [name, setName] = useState('')
   const [scopes, setScopes] = useState<string[]>(['read'])
   const [approvalRequired, setApprovalRequired] = useState(false)
+  const [dailyCallLimit, setDailyCallLimit] = useState<number | undefined>()
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [endpoint, setEndpoint] = useState('')
 
@@ -883,7 +884,7 @@ function McpTab() {
   const keys: McpKey[] = data?.data.data.keys ?? []
 
   const createMutation = useMutation({
-    mutationFn: () => mcpApi.create({ name, scopes, approvalRequired }),
+    mutationFn: () => mcpApi.create({ name, scopes, approvalRequired, dailyCallLimit }),
     onSuccess: (res) => {
       qc.invalidateQueries({ queryKey: ['mcp-keys'] })
       setCreatedKey(res.data.data.key)
@@ -965,6 +966,18 @@ function McpTab() {
                 <input type="checkbox" className="rounded" checked={approvalRequired} onChange={(e) => setApprovalRequired(e.target.checked)} />
                 Require approval for write/admin tools (human-in-the-loop)
               </label>
+              <div className="mt-2">
+                <label className="text-sm font-medium text-gray-700">Daily call limit (optional)</label>
+                <input
+                  type="number"
+                  min={1}
+                  placeholder="e.g. 100 — leave empty for unlimited"
+                  className="mt-1 w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={dailyCallLimit ?? ''}
+                  onChange={(e) => setDailyCallLimit(e.target.value ? Number(e.target.value) : undefined)}
+                />
+                <p className="text-xs text-gray-400 mt-1">Caps the agent's tool calls per day (resets at midnight UTC). Prevents runaway agents from hammering your databases.</p>
+              </div>
             </div>
             <Button onClick={() => createMutation.mutate()} disabled={!name.trim() || scopes.length === 0} loading={createMutation.isPending}>
               <KeyRound className="h-4 w-4" />Create API key
