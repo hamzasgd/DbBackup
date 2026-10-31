@@ -104,6 +104,8 @@ model User {
   loginLockedUntil     DateTime?
   // Click-through acceptance of TERMS_OF_SERVICE.md at registration
   termsAcceptedAt      DateTime?
+  // When true, password sign-in is rejected — passkey only
+  passwordLoginDisabled Boolean @default(false)
   connections          Connection[]
   auditLogs            AuditLog[]
   refreshTokens        RefreshToken[]
