@@ -37,10 +37,10 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'", 'https://static.cloudflareinsights.com'],
       styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind uses inline styles
       imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'"],
+      connectSrc: ["'self'", 'https://cloudflareinsights.com'],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       mediaSrc: ["'none'"],
