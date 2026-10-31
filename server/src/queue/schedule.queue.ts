@@ -7,11 +7,11 @@ import { ensureStorageDir, getStoragePath } from '../services/storage.service';
 import { logger } from '../config/logger';
 import { v4 as uuidv4 } from 'uuid';
 import path from 'path';
-import parser from 'cron-parser';
+import { CronExpressionParser } from 'cron-parser';
 
 function getNextRunAt(cronExpression: string): Date | null {
   try {
-    return parser.parseExpression(cronExpression, { currentDate: new Date() }).next().toDate();
+    return CronExpressionParser.parse(cronExpression, { currentDate: new Date() }).next().toDate();
   } catch {
     return null;
   }

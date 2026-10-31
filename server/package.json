@@ -57,7 +57,7 @@
     "@types/node": "^20.11.30",
     "@types/pg": "^8.18.0",
     "@types/ssh2": "^1.15.0",
-    "@types/uuid": "^11.0.0",
+    "@types/uuid": "^9.0.8",
     "@vitest/ui": "^4.1.0",
     "fast-check": "^4.6.0",
     "prisma": "^5.10.0",

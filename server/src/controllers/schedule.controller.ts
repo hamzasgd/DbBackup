@@ -1,6 +1,6 @@
 import { Response, NextFunction } from 'express';
 import { v4 as uuidv4 } from 'uuid';
-import parser from 'cron-parser';
+import { CronExpressionParser } from 'cron-parser';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
@@ -9,7 +9,7 @@ import { logAudit } from '../services/audit.service';
 
 function getNextRunAt(cronExpression: string): Date {
   try {
-    return parser.parseExpression(cronExpression, { currentDate: new Date() }).next().toDate();
+    return CronExpressionParser.parse(cronExpression, { currentDate: new Date() }).next().toDate();
   } catch {
     throw new AppError('Invalid cron expression', 400);
   }

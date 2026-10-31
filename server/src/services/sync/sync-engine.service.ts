@@ -684,8 +684,8 @@ export class SyncEngineService {
     });
 
     // Calculate and store next scheduled sync time
-    const parser = await import('cron-parser');
-    const interval = parser.parseExpression(config.cronExpression);
+    const { CronExpressionParser } = await import('cron-parser');
+    const interval = CronExpressionParser.parse(config.cronExpression);
     const nextRun = interval.next().toDate();
 
     await prisma.syncState.update({
