@@ -16,6 +16,7 @@ import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { formatBytes, formatDate, statusBadgeColor, dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
 import { cn } from '../../lib/utils'
+import { CardSkeleton, StatCardSkeleton } from '../../components/ui/Skeleton'
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
@@ -199,8 +200,8 @@ export default function DashboardPage() {
   const user = useAuthStore((s) => s.user)
   const navigate = useNavigate()
 
-  const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
-  const { data: backupsData } = useQuery({
+  const { data: connsData, isLoading: connsLoading } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
+  const { data: backupsData, isLoading: backupsLoading } = useQuery({
     queryKey: ['backups', 'dash'],
     queryFn: () => backupsApi.getAll({ limit: 100 }),
     refetchInterval: (q) => {
@@ -210,7 +211,7 @@ export default function DashboardPage() {
   })
   const { data: schedulesData } = useQuery({ queryKey: ['schedules'], queryFn: () => schedulesApi.getAll() })
   const { data: usageData } = useQuery({ queryKey: ['storage-usage'], queryFn: () => storageApi.usage() })
-  const { data: auditData } = useQuery({ queryKey: ['audit-logs', 'dash'], queryFn: () => auditApi.getAll({ limit: 8 }) })
+  const { data: auditData, isLoading: auditLoading } = useQuery({ queryKey: ['audit-logs', 'dash'], queryFn: () => auditApi.getAll({ limit: 8 }) })
 
   const connections = connsData?.data.data ?? []
   const backups = backupsData?.data.data.backups ?? []
@@ -262,8 +263,19 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* First-run empty state */}
-      {hasNoConnections ? (
+      {/* Loading skeletons — never flash empty states while fetching */}
+      {connsLoading ? (
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => <StatCardSkeleton key={i} />)}
+          </div>
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <CardSkeleton />
+            <CardSkeleton />
+            <CardSkeleton />
+          </div>
+        </div>
+      ) : hasNoConnections ? (
         <Card>
           <CardContent className="py-14 text-center">
             <div className="mx-auto w-12 h-12 rounded-2xl bg-blue-50 flex items-center justify-center">
@@ -386,7 +398,9 @@ export default function DashboardPage() {
                 <Link to="/backups" className="text-xs text-blue-600 hover:underline">view all</Link>
               </CardHeader>
               <CardContent className="p-0">
-                {backups.length === 0 ? (
+                {backupsLoading ? (
+                  <p className="text-sm text-gray-300 text-center py-8">Loading…</p>
+                ) : backups.length === 0 ? (
                   <p className="text-sm text-gray-400 text-center py-8">No backups yet — trigger your first one</p>
                 ) : (
                   <div className="divide-y divide-gray-50">
@@ -411,7 +425,9 @@ export default function DashboardPage() {
                 <Link to="/audit" className="text-xs text-blue-600 hover:underline">full log</Link>
               </CardHeader>
               <CardContent className="p-0">
-                {events.length === 0 ? (
+                {auditLoading ? (
+                  <p className="text-sm text-gray-300 text-center py-8">Loading…</p>
+                ) : events.length === 0 ? (
                   <p className="text-sm text-gray-400 text-center py-8">Nothing yet</p>
                 ) : (
                   <div className="divide-y divide-gray-50">
