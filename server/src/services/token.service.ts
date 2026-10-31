@@ -1,12 +1,24 @@
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { prisma } from '../config/database';
+import { getKeyManager } from './crypto/key-manager';
 
-// Validate required secrets at module load — fail fast on startup
-if (!process.env.JWT_ACCESS_SECRET) throw new Error('Missing required env var: JWT_ACCESS_SECRET');
-if (!process.env.JWT_REFRESH_SECRET) throw new Error('Missing required env var: JWT_REFRESH_SECRET');
-const JWT_ACCESS_SECRET: string = process.env.JWT_ACCESS_SECRET;
-const JWT_REFRESH_SECRET: string = process.env.JWT_REFRESH_SECRET;
+/**
+ * JWT secrets: explicit env vars (JWT_ACCESS_SECRET / JWT_REFRESH_SECRET) win.
+ * When absent, they are DERIVED from the master encryption key (local or the
+ * KMS-unwrapped memory-only key) — two fewer plaintext secrets in .env, and in
+ * KMS mode the JWT signing material never touches the disk either.
+ * Derived lazily so the KMS key can be unwrapped at boot before first use.
+ */
+function jwtSecret(kind: 'access' | 'refresh'): string {
+  const env = kind === 'access' ? process.env.JWT_ACCESS_SECRET : process.env.JWT_REFRESH_SECRET;
+  if (env) return env;
+  return crypto
+    .createHmac('sha256', getKeyManager().getPrimaryKey())
+    .update(`dbbackup:jwt:${kind}`)
+    .digest('base64url');
+}
 
 export interface TokenPayload {
   userId: string;
@@ -14,23 +26,23 @@ export interface TokenPayload {
 }
 
 export function generateAccessToken(payload: TokenPayload): string {
-  return jwt.sign(payload, JWT_ACCESS_SECRET, {
+  return jwt.sign(payload, jwtSecret('access'), {
     expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
   } as jwt.SignOptions);
 }
 
 export function generateRefreshToken(payload: TokenPayload): string {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, {
+  return jwt.sign(payload, jwtSecret('refresh'), {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
   } as jwt.SignOptions);
 }
 
 export function verifyAccessToken(token: string): TokenPayload {
-  return jwt.verify(token, JWT_ACCESS_SECRET) as unknown as TokenPayload;
+  return jwt.verify(token, jwtSecret('access')) as unknown as TokenPayload;
 }
 
 export function verifyRefreshToken(token: string): TokenPayload {
-  return jwt.verify(token, JWT_REFRESH_SECRET) as unknown as TokenPayload;
+  return jwt.verify(token, jwtSecret('refresh')) as unknown as TokenPayload;
 }
 
 export async function saveRefreshToken(

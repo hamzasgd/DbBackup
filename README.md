@@ -300,6 +300,21 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 
 Despite all of this, **security features reduce risk — they do not guarantee outcomes, and they create no liability for the authors.** See [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md) and [SECURITY.md](SECURITY.md).
 
+### Securing your environment file (.env)
+
+An env file always holds *some* plaintext bootstrap secrets — that's unavoidable — but you can shrink the blast radius:
+
+1. **Permissions & ownership** — only the app user may read it:
+   ```bash
+   chmod 600 /www/wwwroot/dbbackup.hamza.codes/DbBackup/server/.env
+   chown <app-user>:<app-user> .../.env
+   ```
+   The app audits this at boot and warns in the logs when the file is group/world readable.
+2. **Fewer secrets in the file** — `JWT_ACCESS_SECRET` / `JWT_REFRESH_SECRET` are **optional**: when unset they are derived from the master encryption key. Delete those two lines from `.env` (note: existing sessions re-login once after the switch).
+3. **Master key off the disk** — set up the KMS kill switch (`KMS_WRAPPED_MASTER_KEY`, see `server/.env.example`): the credential-encryption master key lives only in AWS KMS and process memory. With JWT secrets derived from it, a stolen `.env` + stolen database no longer decrypt anything.
+4. **What still must stay in `.env`**: the app's own `DATABASE_URL` (Postgres for DbBackup), Redis, port — treat the server itself as the perimeter for these; rotate them in [INCIDENT_RESPONSE.md](INCIDENT_RESPONSE.md) if in doubt.
+5. **Never commit it** (already gitignored), never copy it into backups/notes, and avoid editing it over unencrypted channels.
+
 ---
 
 ## 📡 API Endpoints

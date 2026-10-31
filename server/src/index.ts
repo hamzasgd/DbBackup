@@ -5,12 +5,34 @@ import { connectRedis, disconnectRedis } from './config/redis';
 import { startWorkers, stopWorkers } from './queue/workers';
 import { prisma } from './config/database';
 import { initCrypto } from './services/crypto.service';
+import fs from 'fs';
+import path from 'path';
+
+/** Loud warnings for common environment-file exposure mistakes. */
+function auditEnvFileSecurity(): void {
+  const envPath = path.join(process.cwd(), '.env');
+  try {
+    const mode = fs.statSync(envPath).mode & 0o077;
+    if (mode !== 0) {
+      logger.warn(`⚠️  .env is group/world readable (mode ${mode.toString(8).padStart(2, '0')}) — run: chmod 600 ${envPath}`);
+    }
+  } catch {
+    /* no .env in cwd — nothing to audit */
+  }
+  if (process.env.NODE_ENV === 'production' && typeof process.getuid === 'function' && process.getuid() === 0) {
+    logger.warn('⚠️  Running as root in production — use a dedicated unprivileged user for the app');
+  }
+  if (process.env.NODE_ENV === 'production' && !process.env.KMS_WRAPPED_MASTER_KEY && process.env.ENCRYPTION_KEY) {
+    logger.warn('⚠️  ENCRYPTION_KEY is a plaintext env var — consider the KMS kill-switch (KMS_WRAPPED_MASTER_KEY) so the master key never touches disk');
+  }
+}
 import { ensureStorageDir, getStoragePath } from './services/storage.service';
 
 const PORT = process.env.PORT || 3001;
 
 async function bootstrap() {
   try {
+    auditEnvFileSecurity();
     await initCrypto();
     ensureStorageDir(getStoragePath());
     await connectRedis();
