@@ -151,23 +151,46 @@ export class MySQLEngine extends BaseEngine {
         const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';
+        let settled = false;
+        const settle = (err?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (err) reject(err);
+          else resolve();
+        };
+
         mysql.stderr.on('data', (d) => error += d.toString());
         mysql.on('close', (code) => {
-          if (code === 0) resolve();
-          else reject(new Error(`MySQL restore failed: ${error}`));
+          if (code === 0) settle();
+          else settle(new Error(`MySQL restore failed: ${error}`));
         });
-        mysql.on('error', reject);
+        mysql.on('error', settle);
 
-        if (isGzip) {
-          const { createReadStream } = require('fs');
-          const { createGunzip } = require('zlib');
-          const fileStream = createReadStream(backupFilePath);
-          const gunzip = createGunzip();
-          fileStream.pipe(gunzip).pipe(mysql.stdin);
-        } else {
-          const { createReadStream } = require('fs');
-          createReadStream(backupFilePath).pipe(mysql.stdin);
-        }
+        // Prevent EPIPE crash: if mysql exits early (bad SQL, connection error),
+        // the file stream is still writing to its stdin — handle the broken pipe
+        mysql.stdin.on('error', (err: NodeJS.ErrnoException) => {
+          if (err.code === 'EPIPE') {
+            // mysql closed its stdin — the 'close' event will fire with the exit
+            // code; don't crash the process, just destroy the source stream
+            settle(new Error(`MySQL restore failed: ${error || 'mysql exited early'}`));
+          } else {
+            settle(err);
+          }
+        });
+
+        const source = isGzip
+          ? (() => {
+              const { createReadStream } = require('fs');
+              const { createGunzip } = require('zlib');
+              return createReadStream(backupFilePath).pipe(createGunzip());
+            })()
+          : (() => {
+              const { createReadStream } = require('fs');
+              return createReadStream(backupFilePath);
+            })();
+
+        source.on('error', settle);
+        source.pipe(mysql.stdin);
       });
     } finally {
       tunnel?.close();

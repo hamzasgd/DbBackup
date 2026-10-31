@@ -207,12 +207,20 @@ export class PostgreSQLEngine extends BaseEngine {
             '--no-password',
           ], { env: this.getEnv() });
 
-          const fileStream = createReadStream(backupFilePath);
-          if (backupFilePath.endsWith('.gz')) {
-            fileStream.pipe(createGunzip()).pipe(proc.stdin);
-          } else {
-            fileStream.pipe(proc.stdin);
-          }
+          const fileStream = backupFilePath.endsWith('.gz')
+            ? createReadStream(backupFilePath).pipe(createGunzip())
+            : createReadStream(backupFilePath);
+
+          // Prevent EPIPE crash: if psql exits early, handle the broken stdin pipe
+          proc.stdin.on('error', (err: NodeJS.ErrnoException) => {
+            if (err.code === 'EPIPE') {
+              reject(new Error(`pg_restore failed: ${error || 'psql exited early'}`));
+            } else {
+              reject(err);
+            }
+          });
+          fileStream.on('error', reject);
+          fileStream.pipe(proc.stdin);
         }
 
         let error = '';

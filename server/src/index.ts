@@ -30,6 +30,15 @@ import { ensureStorageDir, getStoragePath } from './services/storage.service';
 
 const PORT = process.env.PORT || 3001;
 
+// Last-resort: a crash on an unhandled stream error (EPIPE etc.) takes the
+// whole app down — log it, keep serving, and rely on PM2 restart if it recurs.
+process.on('uncaughtException', (err) => {
+  logger.error('Uncaught exception (app continuing):', err);
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error('Unhandled rejection (app continuing):', reason);
+});
+
 async function bootstrap() {
   try {
     auditEnvFileSecurity();
