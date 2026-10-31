@@ -134,6 +134,12 @@ export default function MigrationsPage() {
             <ArrowLeftRight className="h-12 w-12 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-500 font-medium">No migrations yet</p>
             <p className="text-gray-400 text-sm mt-1">Start a migration to copy data between databases</p>
+            <Button size="sm" className="mt-4" onClick={() => setModalOpen(true)} disabled={connections.length < 2}>
+              <Plus className="h-4 w-4" />New Migration
+            </Button>
+            {connections.length < 2 && (
+              <p className="text-xs text-gray-400 mt-2">Needs at least two connections</p>
+            )}
           </CardContent>
         </Card>
       )}

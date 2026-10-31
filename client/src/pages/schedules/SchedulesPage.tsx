@@ -110,6 +110,9 @@ export default function SchedulesPage() {
             <Clock className="h-12 w-12 text-gray-300 mx-auto mb-4" />
             <p className="text-gray-500 font-medium">No schedules yet</p>
             <p className="text-gray-400 text-sm mt-1">Set up automated backups on a schedule</p>
+            <Button size="sm" className="mt-4" onClick={() => setModalOpen(true)}>
+              <Plus className="h-4 w-4" />New Schedule
+            </Button>
           </CardContent>
         </Card>
       )}
