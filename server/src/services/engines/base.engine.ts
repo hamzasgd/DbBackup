@@ -118,4 +118,15 @@ export abstract class BaseEngine {
 
   /** Lightweight health probe — SELECT 1 with a short timeout. */
   abstract ping(timeoutMs?: number): Promise<{ up: boolean; latencyMs: number; error?: string }>;
+
+  /** Restore-drill helpers (SQL engines). Throw by default. */
+  async createDatabase(_name: string): Promise<void> {
+    throw new Error('createDatabase not supported by this engine');
+  }
+  async dropDatabase(_name: string): Promise<void> {
+    throw new Error('dropDatabase not supported by this engine');
+  }
+  async countAllTables(_database: string): Promise<{ tables: number; rows: bigint }> {
+    throw new Error('countAllTables not supported by this engine');
+  }
 }

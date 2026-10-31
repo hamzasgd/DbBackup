@@ -12,6 +12,7 @@ import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempF
 import { streamFromGdrive } from '../services/gdrive.service';
 import { logAudit } from '../services/audit.service';
 import { runGlobalRetentionSweep } from '../services/retention.service';
+import { startRestoreDrill } from '../services/restore-drill.service';
 
 const STORAGE_PATH = getStoragePath();
 ensureStorageDir(STORAGE_PATH);
@@ -31,7 +32,10 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
     const [backups, total] = await Promise.all([
       prisma.backup.findMany({
         where,
-        include: { connection: { select: { id: true, name: true, type: true } } },
+        include: {
+          connection: { select: { id: true, name: true, type: true } },
+          drills: { take: 1, orderBy: { startedAt: 'desc' } },
+        },
         orderBy: { createdAt: 'desc' },
         skip,
         take: parsedLimit,
@@ -39,7 +43,12 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
       prisma.backup.count({ where }),
     ]);
 
-    res.json({ success: true, data: { backups, total, page: parsedPage, limit: parsedLimit } });
+    const withDrill = backups.map(({ drills, ...b }) => ({
+      ...b,
+      lastDrill: drills?.[0] ?? null,
+    }));
+
+    res.json({ success: true, data: { backups: withDrill, total, page: parsedPage, limit: parsedLimit } });
   } catch (err) { next(err); }
 }
 
@@ -196,4 +205,19 @@ export async function runRetention(req: AuthRequest, res: Response, next: NextFu
 
     res.json({ success: true, data: { deleted, freedBytes, connections: results.length } });
   } catch (err) { next(err); }
+}
+
+/**
+ * Kick off a restore drill: restores this backup into a throwaway scratch
+ * database on its source server, counts tables/rows, drops the scratch db.
+ * Async — poll the backup list (lastDrill) for the result.
+ */
+export async function drillBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const drillId = await startRestoreDrill(req.user!.userId, req.params.id);
+    await logAudit(req.user!.userId, 'DRILL_START', 'backup', { backupId: req.params.id, drillId }, req.ip, req.headers['user-agent']);
+    res.status(202).json({ success: true, data: { drillId }, message: 'Restore drill started — the backup will be restored into a scratch database and cleaned up' });
+  } catch (err) {
+    next(err instanceof AppError ? err : new AppError(err instanceof Error ? err.message : 'Drill failed to start', 400));
+  }
 }

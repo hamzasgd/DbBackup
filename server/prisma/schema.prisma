@@ -111,6 +111,7 @@ model User {
   credentialAccessLogs CredentialAccessLog[]
   passkeys             PasskeyCredential[]
   mcpApiKeys           McpApiKey[]
+  restoreDrills        RestoreDrill[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -219,6 +220,7 @@ model Backup {
   verifiedAt   DateTime?
   storageType  StorageProvider @default(LOCAL)
   storageKey   String?
+  drills       RestoreDrill[]  @relation("DrillBackup")
   startedAt    DateTime?
   completedAt  DateTime?
   createdAt    DateTime        @default(now())
@@ -255,6 +257,23 @@ model McpApiKey {
 
   @@index([userId])
   @@map("mcp_api_keys")
+}
+
+model RestoreDrill {
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backupId        String
+  backup          Backup    @relation("DrillBackup", fields: [backupId], references: [id], onDelete: Cascade)
+  status          String    @default("RUNNING") // RUNNING | PASSED | FAILED
+  tablesRestored  Int?
+  rowsRestored    BigInt?
+  error           String?
+  startedAt       DateTime  @default(now())
+  finishedAt      DateTime?
+
+  @@index([userId, startedAt])
+  @@map("restore_drills")
 }
 
 model Schedule {

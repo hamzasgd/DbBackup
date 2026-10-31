@@ -532,4 +532,69 @@ export class PostgreSQLEngine extends BaseEngine {
       tunnel?.close();
     }
   }
+
+  // ── Restore drill helpers ──────────────────────────────────────────────
+
+  private async drillClient(database?: string): Promise<{ client: Client; tunnel: SSHTunnel | null }> {
+    const tunnel = this.config.sshEnabled ? new SSHTunnel(this.config) : null;
+    if (tunnel) (this.config as any)._localPort = await tunnel.connect();
+    const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+    const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+    const client = new Client({
+      host,
+      port,
+      user: this.config.username,
+      password: this.config.password ?? undefined,
+      ...(database ? { database } : {}),
+      ssl: this.getSslOptions(),
+      connectionTimeoutMillis: 15000,
+    });
+    await client.connect();
+    return { client, tunnel };
+  }
+
+  private async closeDrillClient(client: Client, tunnel: SSHTunnel | null): Promise<void> {
+    await client.end().catch(() => undefined);
+    tunnel?.close();
+  }
+
+  async createDatabase(name: string): Promise<void> {
+    const safe = name.replace(/"/g, '');
+    const { client, tunnel } = await this.drillClient();
+    try {
+      await client.query(`CREATE DATABASE "${safe}"`);
+    } finally {
+      await this.closeDrillClient(client, tunnel);
+    }
+  }
+
+  async dropDatabase(name: string): Promise<void> {
+    const safe = name.replace(/"/g, '');
+    const { client, tunnel } = await this.drillClient();
+    try {
+      await client.query(`DROP DATABASE IF EXISTS "${safe}"`);
+    } finally {
+      await this.closeDrillClient(client, tunnel);
+    }
+  }
+
+  async countAllTables(database: string): Promise<{ tables: number; rows: bigint }> {
+    const safe = database.replace(/"/g, '');
+    const { client, tunnel } = await this.drillClient(safe);
+    try {
+      const { rows: tables } = await client.query(
+        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+      );
+      let total = 0n;
+      for (const t of tables as { tablename: string }[]) {
+        const { rows: [{ c }] } = await client.query(
+          `SELECT COUNT(*)::bigint AS c FROM "${safe}"."${String(t.tablename).replace(/"/g, '')}"`,
+        );
+        total += BigInt(c as string | number);
+      }
+      return { tables: tables.length, rows: total };
+    } finally {
+      await this.closeDrillClient(client, tunnel);
+    }
+  }
 }

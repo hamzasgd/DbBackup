@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff } from 'lucide-react'
+import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff, FlaskConical } from 'lucide-react'
 import { backupsApi, restoreApi, type BackupFormat, type Backup } from '../../services/backups.service'
 import { connectionsApi } from '../../services/connections.service'
 import { toast } from '../../store/toast.store'
@@ -86,11 +86,15 @@ function BackupRow({
   onRestore,
   onDelete,
   onVerified,
+  onDrill,
+  drilling,
 }: {
   b: Backup
   onRestore: () => void
   onDelete: () => void
   onVerified: () => void
+  onDrill: () => void
+  drilling: boolean
 }) {
   const isActive = b.status === 'RUNNING' || b.status === 'PENDING'
   const sse = useProgressSSE(`/backups/${b.id}/progress`, isActive)
@@ -139,6 +143,23 @@ function BackupRow({
           <div className="flex items-center gap-2">
             <Badge className={statusBadgeColor(b.status)}>{b.status}</Badge>
             {b.status === 'COMPLETED' && <VerifiedBadge backup={b} />}
+            {b.status === 'COMPLETED' && b.lastDrill && (
+              <span
+                className={`inline-flex items-center gap-1 text-xs font-medium ${
+                  b.lastDrill.status === 'PASSED' ? 'text-green-600'
+                  : b.lastDrill.status === 'FAILED' ? 'text-red-600'
+                  : 'text-gray-400'
+                }`}
+                title={b.lastDrill.error ?? `Restored into a scratch database — ${b.lastDrill.tablesRestored ?? '?'} tables, ${Number(b.lastDrill.rowsRestored ?? 0).toLocaleString()} rows`}
+              >
+                {b.lastDrill.status === 'PASSED' && <ShieldCheck className="h-3.5 w-3.5" />}
+                {b.lastDrill.status === 'FAILED' && <ShieldAlert className="h-3.5 w-3.5" />}
+                {b.lastDrill.status === 'RUNNING' && <RefreshCw className="h-3.5 w-3.5 animate-spin" />}
+                {b.lastDrill.status === 'PASSED'
+                  ? `Drill passed (${b.lastDrill.tablesRestored ?? '?'} tables)`
+                  : b.lastDrill.status === 'FAILED' ? 'Drill failed' : 'Drilling…'}
+              </span>
+            )}
           </div>
           {isActive && (
             <div className="w-32">
@@ -174,6 +195,14 @@ function BackupRow({
               </Button>
               <Button size="sm" variant="ghost" onClick={onRestore} title="Restore backup">
                 <RotateCcw className="h-3.5 w-3.5" />
+              </Button>
+              <Button
+                size="sm" variant="ghost"
+                onClick={onDrill}
+                disabled={drilling || b.status !== 'COMPLETED'}
+                title="Restore drill — test-restore into a scratch database, then clean up"
+              >
+                <FlaskConical className="h-3.5 w-3.5" />
               </Button>
               <Button
                 size="sm" variant="ghost"
@@ -225,7 +254,8 @@ export default function BackupsPage() {
     queryFn: () => backupsApi.getAll({ connectionId: selectedConnection || undefined }),
     refetchInterval: (query) => {
       const backups = query.state.data?.data.data.backups ?? []
-      return backups.some(b => b.status === 'RUNNING' || b.status === 'PENDING') ? 5000 : false
+      const drilling = backups.some(b => b.lastDrill?.status === 'RUNNING')
+      return (backups.some(b => b.status === 'RUNNING' || b.status === 'PENDING') || drilling) ? 5000 : false
     },
   })
   const allBackups = data?.data.data.backups ?? []
@@ -259,6 +289,16 @@ export default function BackupsPage() {
     mutationFn: (id: string) => backupsApi.delete(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['backups'] }); toast.success('Backup deleted') },
     onError: () => toast.error('Failed to delete backup'),
+  })
+
+  // Restore drill — proves the backup actually restores
+  const drillMutation = useMutation({
+    mutationFn: (id: string) => backupsApi.drill(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['backups'] })
+      toast.success(res.data.message ?? 'Drill started')
+    },
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to start drill'),
   })
 
   // On-demand retention purge — same policy as the daily sweep
@@ -391,6 +431,8 @@ export default function BackupsPage() {
                     onRestore={() => { setSelectedBackup(b.id); setRestoreTargetConn(b.connectionId ?? ''); setRestoreModal(true) }}
                     onDelete={() => setDeleteTarget(b.id)}
                     onVerified={() => qc.invalidateQueries({ queryKey: ['backups'] })}
+                    onDrill={() => drillMutation.mutate(b.id)}
+                    drilling={b.lastDrill?.status === 'RUNNING' || drillMutation.isPending}
                   />
                 ))}
               </tbody>

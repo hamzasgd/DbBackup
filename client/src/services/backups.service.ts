@@ -24,6 +24,15 @@ export interface Backup {
   createdAt: string
   verified: boolean
   verifiedAt?: string
+  lastDrill?: {
+    id: string
+    status: 'RUNNING' | 'PASSED' | 'FAILED'
+    tablesRestored?: number | null
+    rowsRestored?: number | string | null
+    error?: string | null
+    startedAt: string
+    finishedAt?: string | null
+  } | null
   checksum?: string
   storageType: 'LOCAL' | 'S3' | 'GOOGLE_DRIVE'
 }
@@ -39,6 +48,7 @@ export const backupsApi = {
     api.delete(`/backups/${id}`),
   verify: (id: string) =>
     api.post<{ success: boolean; data: { valid: boolean; checksum: string } }>(`/backups/${id}/verify`),
+  drill: (id: string) => api.post<{ success: boolean; data: { drillId: string }; message: string }>(`/backups/${id}/drill`),
   runRetention: () =>
     api.post<{ success: boolean; data: { deleted: number; freedBytes: number; connections: number } }>('/backups/retention/run'),
   downloadUrl: (id: string) => `/api/backups/${id}/download`,

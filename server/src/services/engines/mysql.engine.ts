@@ -431,6 +431,71 @@ export class MySQLEngine extends BaseEngine {
       tunnel?.close();
     }
   }
+
+  // ── Restore drill helpers ──────────────────────────────────────────────
+
+  private async drillConn(database?: string): Promise<mysql2.Connection> {
+    const tunnel = this.config.sshEnabled ? new SSHTunnel(this.config) : null;
+    if (tunnel) (this.config as any)._localPort = await tunnel.connect();
+    const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+    const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
+    const conn = await mysql2.createConnection({
+      host, port,
+      user: this.config.username,
+      password: this.config.password ?? undefined,
+      ssl: this.getSslOptions(),
+      ...(database ? { database } : {}),
+      connectTimeout: 15000,
+      multipleStatements: false,
+    });
+    // Keep the tunnel alive as long as the connection; close both together below
+    (conn as unknown as { _tunnel?: SSHTunnel })._tunnel = tunnel ?? undefined;
+    return conn;
+  }
+
+  private async closeDrillConn(conn: mysql2.Connection): Promise<void> {
+    await conn.end().catch(() => undefined);
+    const tunnel = (conn as unknown as { _tunnel?: SSHTunnel })._tunnel;
+    tunnel?.close();
+  }
+
+  async createDatabase(name: string): Promise<void> {
+    const conn = await this.drillConn();
+    try {
+      await conn.query(`CREATE DATABASE \`${name.replace(/`/g, '')}\``);
+    } finally {
+      await this.closeDrillConn(conn);
+    }
+  }
+
+  async dropDatabase(name: string): Promise<void> {
+    const conn = await this.drillConn();
+    try {
+      await conn.query(`DROP DATABASE IF EXISTS \`${name.replace(/`/g, '')}\``);
+    } finally {
+      await this.closeDrillConn(conn);
+    }
+  }
+
+  async countAllTables(database: string): Promise<{ tables: number; rows: bigint }> {
+    const conn = await this.drillConn(database);
+    try {
+      const [rows] = await conn.query<mysql2.RowDataPacket[]>(
+        'SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_TYPE = \'BASE TABLE\'',
+        [database],
+      );
+      let total = 0n;
+      for (const r of rows) {
+        const [[c]] = await conn.query<mysql2.RowDataPacket[]>(
+          `SELECT COUNT(*) AS c FROM \`${database}\`.\`${String(r['t']).replace(/`/g, '')}\``,
+        );
+        total += BigInt(Number(c['c']));
+      }
+      return { tables: rows.length, rows: total };
+    } finally {
+      await this.closeDrillConn(conn);
+    }
+  }
 }
 
 export class MariaDBEngine extends MySQLEngine {
