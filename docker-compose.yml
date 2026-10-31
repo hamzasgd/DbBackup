@@ -1,38 +1,70 @@
-version: '3.9'
+version: "3.9"
+
+# ─── Production: the full app ──────────────────────────────────────────────
+# Usage:
+#   1. Generate secrets:  openssl rand -hex 32  (for both JWT keys + ENCRYPTION_KEY)
+#   2. Create a .env file (see .env.example) with at minimum:
+#      JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY
+#   3. Run:  docker compose up -d
+#   4. Open: http://localhost:3001
 
 services:
+  dbbackup:
+    build: .
+    container_name: dbbackup
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-3001}:3001"
+    environment:
+      JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set in .env}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set in .env}
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set in .env}
+      KMS_WRAPPED_MASTER_KEY: ${KMS_WRAPPED_MASTER_KEY:-}
+      AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ID:-}
+      AWS_REGION: ${AWS_REGION:-us-east-1}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      DATABASE_URL: postgresql://dbbackup:${DB_PASSWORD:-dbbackup}@postgres:5432/dbbackup
+      REDIS_HOST: redis
+      NODE_ENV: production
+      CLIENT_URL: ${CLIENT_URL:-http://localhost:3001}
+      PASSKEY_RP_ID: ${PASSKEY_RP_ID:-}
+      PASSKEY_EXTRA_ORIGINS: ${PASSKEY_EXTRA_ORIGINS:-}
+      BACKUP_STORAGE_PATH: /app/backups
+    volumes:
+      - backups:/app/backups
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
   postgres:
     image: postgres:16-alpine
-    container_name: dbbackup_postgres
+    container_name: dbbackup-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: dbbackup
-      POSTGRES_PASSWORD: dbbackup_secret
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-dbbackup}
       POSTGRES_DB: dbbackup
-    ports:
-      - '5433:5432'
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ['CMD-SHELL', 'pg_isready -U dbbackup']
-      interval: 10s
+      test: ["CMD-SHELL", "pg_isready -U dbbackup"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
   redis:
     image: redis:7-alpine
-    container_name: dbbackup_redis
+    container_name: dbbackup-redis
     restart: unless-stopped
-    ports:
-      - '6379:6379'
-    volumes:
-      - redis_data:/data
     healthcheck:
-      test: ['CMD', 'redis-cli', 'ping']
-      interval: 10s
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
       timeout: 5s
       retries: 5
 
 volumes:
-  postgres_data:
-  redis_data:
+  pgdata:
+  backups:
