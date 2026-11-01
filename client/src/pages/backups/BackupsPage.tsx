@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff, FlaskConical } from 'lucide-react'
 import { backupsApi, restoreApi, type BackupFormat, type Backup } from '../../services/backups.service'
@@ -341,6 +341,17 @@ export default function BackupsPage() {
   const restoreProgress = useProgressSSE(
     restoreJobId ? `/restore/${restoreJobId}/progress` : null,
     restoreJobId !== null,
+    (event) => {
+      if (event.status === 'COMPLETED') {
+        toast.success('Restore completed successfully')
+        setRestoreJobId(null)
+        setRestoreModal(false)
+      } else if (event.status === 'FAILED') {
+        toast.error(`Restore failed: ${event.error ?? 'unknown error'}`)
+        setRestoreJobId(null)
+        setRestoreModal(false)
+      }
+    },
   )
 
   const restoreMutation = useMutation({
@@ -348,19 +359,6 @@ export default function BackupsPage() {
     onSuccess: (res) => { setRestoreJobId(res.data.data.jobId) },
     onError: () => toast.error('Failed to queue restore'),
   })
-
-  useEffect(() => {
-    if (!restoreJobId || !restoreProgress?.status) return
-    if (restoreProgress.status === 'COMPLETED') {
-      toast.success('Restore completed successfully')
-      setRestoreJobId(null)
-      setRestoreModal(false)
-    } else if (restoreProgress.status === 'FAILED') {
-      toast.error(`Restore failed: ${restoreProgress.error ?? 'unknown error'}`)
-      setRestoreJobId(null)
-      setRestoreModal(false)
-    }
-  }, [restoreProgress, restoreJobId])
 
   return (
     <div className="space-y-6">

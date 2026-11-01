@@ -8,7 +8,7 @@ import { useAuthStore } from '../../store/auth.store'
 import { authApi } from '../../services/auth.service'
 import { toast } from '../../store/toast.store'
 import { cn } from '../../lib/utils'
-import { queryClient } from '../../App'
+import { queryClient } from '../../lib/queryClient'
 
 const navGroups: { title: string; items: { to: string; icon: React.ElementType; label: string }[] }[] = [
   {
@@ -47,10 +47,12 @@ export function Sidebar() {
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
 
-  // Close mobile sidebar on route change
-  useEffect(() => {
+  // Close mobile sidebar on route change (state adjusted during render, not in an effect)
+  const [prevPathname, setPrevPathname] = useState(location.pathname)
+  if (prevPathname !== location.pathname) {
+    setPrevPathname(location.pathname)
     setMobileOpen(false)
-  }, [location.pathname])
+  }
 
   // Lock body scroll when mobile sidebar is open
   useEffect(() => {

@@ -6,6 +6,7 @@ import { Modal } from '../ui/Modal'
 import { ConfirmDialog } from '../ui/ConfirmDialog'
 import { syncApi } from '../../services/sync.service'
 import { toast } from '../../store/toast.store'
+import { getApiErrorMessage } from '../../lib/utils'
 
 interface LifecycleControlsProps {
   configId: string
@@ -27,9 +28,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       toast.success('Sync activated')
       setActivationModalOpen(false)
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to activate sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to activate sync'))
     }
   })
 
@@ -40,9 +40,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       queryClient.invalidateQueries({ queryKey: ['sync-state', configId] })
       toast.success('Sync paused')
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to pause sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to pause sync'))
     }
   })
 
@@ -53,9 +52,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       queryClient.invalidateQueries({ queryKey: ['sync-state', configId] })
       toast.success('Sync resumed')
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to resume sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to resume sync'))
     }
   })
 
@@ -68,9 +66,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       toast.success('Sync stopped')
       setStopDialogOpen(false)
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to stop sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to stop sync'))
     }
   })
 
@@ -81,9 +78,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       queryClient.invalidateQueries({ queryKey: ['sync-state', configId] })
       toast.success('Manual sync triggered')
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to trigger sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to trigger sync'))
     }
   })
 
@@ -94,9 +90,8 @@ export function LifecycleControls({ configId, status }: LifecycleControlsProps) 
       queryClient.invalidateQueries({ queryKey: ['sync-state', configId] })
       toast.success('Full sync triggered')
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to trigger full sync'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to trigger full sync'))
     }
   })
 

@@ -1,5 +1,5 @@
 import { useEffect } from 'react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
@@ -65,7 +65,7 @@ export function SyncConfigForm({ open, onClose, editId }: SyncConfigFormProps) {
     enabled: !!editId && open
   })
 
-  const { register, handleSubmit, reset, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
+  const { register, handleSubmit, reset, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
       direction: 'UNIDIRECTIONAL',
@@ -77,8 +77,8 @@ export function SyncConfigForm({ open, onClose, editId }: SyncConfigFormProps) {
     }
   })
 
-  const mode = watch('mode')
-  const sourceConnectionId = watch('sourceConnectionId')
+  const mode = useWatch({ control, name: 'mode' })
+  const sourceConnectionId = useWatch({ control, name: 'sourceConnectionId' })
 
   // Load existing configuration data when editing
   useEffect(() => {

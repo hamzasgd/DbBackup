@@ -1,5 +1,6 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClientProvider } from '@tanstack/react-query'
+import { queryClient } from './lib/queryClient'
 import { DashboardLayout } from './components/layout/DashboardLayout'
 import { ProtectedRoute } from './components/layout/ProtectedRoute'
 import { Toaster } from './components/ui/Toaster'
@@ -17,12 +18,6 @@ import MigrationsPage from './pages/migrations/MigrationsPage'
 import SyncConfigurationsPage from './pages/sync/SyncConfigurationsPage'
 import SyncDetailPage from './pages/sync/SyncDetailPage'
 import AuditLogsPage from './pages/audit/AuditLogsPage'
-
-export const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: { staleTime: 30_000, retry: 1 },
-  },
-})
 
 function App() {
   return (

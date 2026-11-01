@@ -7,6 +7,7 @@ import { Card, CardContent } from '../ui/Card'
 import { Button } from '../ui/Button'
 import { Skeleton } from '../ui/Skeleton'
 import { toast } from '../../store/toast.store'
+import { getApiErrorMessage } from '../../lib/utils'
 
 interface ConflictResolutionModalProps {
   configId: string
@@ -47,9 +48,8 @@ export function ConflictResolutionModal({ configId }: ConflictResolutionModalPro
       toast.success('Conflict resolved')
       setSelectedConflict(null)
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to resolve conflict'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to resolve conflict'))
     }
   })
 

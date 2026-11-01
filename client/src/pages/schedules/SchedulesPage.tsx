@@ -13,7 +13,7 @@ import { Select } from '../../components/ui/Select'
 import { formatDate, dbTypeLabel } from '../../lib/utils'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { CardSkeleton } from '../../components/ui/Skeleton'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 
@@ -50,12 +50,12 @@ export default function SchedulesPage() {
   const schedules = schedulesData?.data.data ?? []
   const connections = connsData?.data.data ?? []
 
-  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
+  const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined },
   })
 
-  const frequency = watch('frequency')
+  const frequency = useWatch({ control, name: 'frequency' })
 
   const createMutation = useMutation({
     mutationFn: schedulesApi.create,

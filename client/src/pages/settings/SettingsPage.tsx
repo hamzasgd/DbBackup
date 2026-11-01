@@ -360,8 +360,13 @@ function StorageTab() {
     deleteLocal: false,
   })
 
-  useEffect(() => {
-    const s = data?.data?.data
+  // Copy server settings into the editable form when a new response arrives
+  // (state adjusted during render, keyed on the response object, instead of an effect)
+  const serverSettings = data?.data?.data
+  const [syncedSettings, setSyncedSettings] = useState<typeof serverSettings>(undefined)
+  if (serverSettings !== syncedSettings) {
+    setSyncedSettings(serverSettings)
+    const s = serverSettings
     if (s && Object.keys(s).length > 0) {
       setForm((prev) => ({
         ...prev,
@@ -381,7 +386,7 @@ function StorageTab() {
         deleteLocal: s.deleteLocal ?? prev.deleteLocal,
       }))
     }
-  }, [data])
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => storageApi.save(form),
@@ -903,9 +908,7 @@ function McpTab() {
   const [dailyCallLimit, setDailyCallLimit] = useState<number | undefined>()
   const [createdKey, setCreatedKey] = useState<string | null>(null)
   const [rotatedKey, setRotatedKey] = useState<string | null>(null)
-  const [endpoint, setEndpoint] = useState('')
-
-  useEffect(() => { setEndpoint(`${window.location.origin}/mcp`) }, [])
+  const endpoint = `${window.location.origin}/mcp`
 
   const { data, isLoading } = useQuery({ queryKey: ['mcp-keys'], queryFn: () => mcpApi.list() })
   const keys: McpKey[] = data?.data.data.keys ?? []

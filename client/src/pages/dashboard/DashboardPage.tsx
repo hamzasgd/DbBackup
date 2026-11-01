@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link, useNavigate } from 'react-router-dom'
 import {
@@ -76,11 +77,11 @@ function StatCard({
 
 interface DayBucket { size: number; ok: number; failed: number }
 
-function ActivityChart({ backups }: { backups: { createdAt: string; status: string; fileSize: number }[] }) {
+function ActivityChart({ backups, now }: { backups: { createdAt: string; status: string; fileSize: number }[]; now: number }) {
   const days = 30
   const buckets = new Map<string, DayBucket>()
   for (let i = days - 1; i >= 0; i--) {
-    buckets.set(dayKey(new Date(Date.now() - i * DAY)), { size: 0, ok: 0, failed: 0 })
+    buckets.set(dayKey(new Date(now - i * DAY)), { size: 0, ok: 0, failed: 0 })
   }
   for (const b of backups) {
     const key = dayKey(b.createdAt)
@@ -101,7 +102,7 @@ function ActivityChart({ backups }: { backups: { createdAt: string; status: stri
   // ~5 x-axis labels
   const ticks = [0, 7, 14, 21, 29].map((i) => ({
     x: (i + 0.5) * barW,
-    label: new Date(Date.now() - (days - 1 - i) * DAY).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
+    label: new Date(now - (days - 1 - i) * DAY).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
   }))
 
   return (
@@ -118,7 +119,7 @@ function ActivityChart({ backups }: { backups: { createdAt: string; status: stri
           const x = i * barW + barW * 0.18
           const w = barW * 0.64
           const y = H - PAD_B - h
-          const dateLabel = new Date(Date.now() - (days - 1 - i) * DAY).toLocaleDateString()
+          const dateLabel = new Date(now - (days - 1 - i) * DAY).toLocaleDateString()
           const title = `${dateLabel} — ${d.ok} completed, ${d.failed} failed${d.size ? `, ${formatBytes(d.size)}` : ''}`
           return (
             <g key={i}>
@@ -201,7 +202,7 @@ export default function DashboardPage() {
   const navigate = useNavigate()
 
   const { data: connsData, isLoading: connsLoading } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
-  const { data: backupsData, isLoading: backupsLoading } = useQuery({
+  const { data: backupsData, isLoading: backupsLoading, dataUpdatedAt: backupsUpdatedAt } = useQuery({
     queryKey: ['backups', 'dash'],
     queryFn: () => backupsApi.getAll({ limit: 100 }),
     refetchInterval: (q) => {
@@ -213,6 +214,10 @@ export default function DashboardPage() {
   const { data: usageData } = useQuery({ queryKey: ['storage-usage'], queryFn: () => storageApi.usage() })
   const { data: auditData, isLoading: auditLoading } = useQuery({ queryKey: ['audit-logs', 'dash'], queryFn: () => auditApi.getAll({ limit: 8 }) })
 
+  // "Now" for the 30-day window: when the backups were last fetched (pure; refreshes with each refetch)
+  const [mountedAt] = useState(() => new Date().getTime())
+  const now = backupsUpdatedAt || mountedAt
+
   const connections = connsData?.data.data ?? []
   const backups = backupsData?.data.data.backups ?? []
   const totalBackups = backupsData?.data.data.total ?? backups.length
@@ -221,7 +226,7 @@ export default function DashboardPage() {
   const events = auditData?.data.data.logs ?? []
 
   // 30-day window stats
-  const since30 = Date.now() - 30 * DAY
+  const since30 = now - 30 * DAY
   const last30 = backups.filter((b) => new Date(b.createdAt).getTime() >= since30)
   const finished30 = last30.filter((b) => b.status === 'COMPLETED' || b.status === 'FAILED')
   const ok30 = finished30.filter((b) => b.status === 'COMPLETED')
@@ -330,7 +335,7 @@ export default function DashboardPage() {
                 <span className="text-xs text-gray-400">{totalBackups} backups stored</span>
               </CardHeader>
               <CardContent className="pt-0">
-                <ActivityChart backups={backups} />
+                <ActivityChart backups={backups} now={now} />
               </CardContent>
             </Card>
 

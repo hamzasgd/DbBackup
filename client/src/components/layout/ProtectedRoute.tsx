@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
 import { Navigate, Outlet } from 'react-router-dom'
 import { useAuthStore } from '../../store/auth.store'
-import { queryClient } from '../../App'
+import { queryClient } from '../../lib/queryClient'
 
 export function ProtectedRoute() {
   const { isAuthenticated, user } = useAuthStore()
