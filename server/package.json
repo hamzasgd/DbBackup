@@ -24,7 +24,7 @@
     "@simplewebauthn/server": "^13.3.3",
     "axios": "^1.6.0",
     "bcryptjs": "^2.4.3",
-    "bullmq": "^5.4.0",
+    "bullmq": "^6.5.1",
     "compression": "^1.7.4",
     "cookie-parser": "^1.4.6",
     "cors": "^2.8.5",
