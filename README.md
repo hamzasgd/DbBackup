@@ -321,6 +321,49 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 
 Despite all of this, **security features reduce risk — they do not guarantee outcomes, and they create no liability for the authors.** See [TERMS_OF_SERVICE.md](TERMS_OF_SERVICE.md) and [SECURITY.md](SECURITY.md).
 
+### Database TLS (SSL) settings
+
+| Connection settings | What happens |
+|---|---|
+| SSL off | Driver and CLI defaults (unchanged) |
+| SSL on, no CA certificate | Encryption is **required**, but the server certificate is **not verified**. Test Connection shows a warning. |
+| SSL on + CA certificate | Encryption required **and** the certificate is verified against the CA, including the host name |
+| + client certificate and key | Sent for mutual TLS |
+
+These settings apply to everything: backups and restores (`pg_dump`, `psql`, `pg_restore`, `mysqldump`, `mariadb-dump`, `mysql`, `mongodump`), migrations, exports, sync and verification. Paste your provider's CA certificate (for example the AWS RDS or DigitalOcean CA bundle) into the connection to get full verification. Through an SSH tunnel, PostgreSQL still checks the real host name; MySQL/MariaDB clients can only check the certificate chain there, and the tunnel is protected by its pinned host key.
+
+### SSH host keys
+
+The first successful connection through an SSH tunnel **pins** the server's host key fingerprint (`SHA256:…`, shown in the connection's settings). Every later connection must present the same key, otherwise it is refused before any database traffic is sent. If the SSH server was reinstalled or its key rotated, confirm the new fingerprint with its admin (`ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub` on the server), then click **Forget SSH host key**. Changing the SSH host or port also clears the pin.
+
+### Disaster recovery: what to keep off this server
+
+If the DbBackup server is lost, you need these to get your backups back:
+
+1. **The encryption key(s)** from `server/.env`: `ENCRYPTION_KEY` / `ENCRYPTION_KEY_PRIMARY` / `ENCRYPTION_KEY_V*` (or, with the KMS option, `KMS_WRAPPED_MASTER_KEY` plus access to the KMS key). Every saved connection password, SSH key and storage credential is encrypted with them. Store a copy in a password manager or vault, **not** next to the backups.
+2. **The backup encryption passphrase**, if backup encryption is on (Settings → Storage). Without it, `.enc` backups cannot be decrypted.
+3. **A regular dump of the app's own PostgreSQL database** (connections, schedules, backup history, users). Example cron job on the server:
+
+   ```bash
+   # /etc/cron.d/dbbackup-appdb — daily at 02:15, keep 14 days, then copy off-site
+   15 2 * * * dbbackup pg_dump "$DATABASE_URL" -Fc -f /var/backups/dbbackup-app-$(date +\%F).dump && find /var/backups -name 'dbbackup-app-*.dump' -mtime +14 -delete
+   ```
+
+   Copy `/var/backups` to another machine or bucket (for example `rclone sync` or `aws s3 sync`). The dump contains only encrypted credentials, so it is useless without item 1, and item 1 is useless without it: keep them in **different** places.
+4. **The backup files** themselves: use S3 or Google Drive storage, or copy the local backup directory off-site.
+
+To recover on a new server: install DbBackup, put the same encryption key(s) in `server/.env`, restore the app database with `pg_restore -d "$DATABASE_URL" --clean dbbackup-app-YYYY-MM-DD.dump`, run `npx prisma migrate deploy`, and start the app. Test this once on a spare machine before you need it.
+
+### Uptime monitoring
+
+`GET /health` checks the app database, Redis and the queue workers. It returns **200** with `"status": "ok"` when all are fine and **503** with the failing check otherwise:
+
+```json
+{ "status": "ok", "uptimeSeconds": 8123, "checks": { "database": { "ok": true, "latencyMs": 2 }, "redis": { "ok": true, "latencyMs": 1 }, "workers": { "ok": true } } }
+```
+
+The app's own alerts (email, Slack, …) cannot fire if the server itself is down, so add an external monitor: in UptimeRobot, Better Stack or similar (free plans are enough), create an HTTP(S) monitor for `https://your-dbbackup-host/health` that alerts on any non-200 status, checked every 1–5 minutes. The endpoint needs no login and returns no secrets.
+
 ### Securing your environment file (.env)
 
 An env file always holds *some* plaintext bootstrap secrets — that's unavoidable — but you can shrink the blast radius:
@@ -431,11 +474,19 @@ An env file always holds *some* plaintext bootstrap secrets — that's unavoidab
 
 ```bash
 git pull
-npm run install:all          # new dependencies (e.g. @simplewebauthn, @aws-sdk/client-kms)
+npm ci                       # exact dependencies from package-lock.json
 npm run build                # client + server
-cd server && npx prisma migrate deploy   # apply pending migrations (required)
-# restart the process (pm2 / panel) — queue workers register at boot
+(cd server && npx prisma migrate deploy)   # apply pending migrations (required)
+pm2 restart dbbackup         # or start it the first time: pm2 start ecosystem.config.cjs && pm2 save
 ```
+
+### Running with pm2
+
+Use the included [`ecosystem.config.cjs`](ecosystem.config.cjs). It runs `server/dist/index.js` from the `server/` folder (so `server/.env` is read) with `NODE_ENV=production`, in **fork mode with one instance**.
+
+> **Do not use cluster mode or `instances > 1`.** Passkey challenges, login lockouts, rate limits, real-time sync polling and restore drills are kept in process memory; a second process splits that state. Every pm2 instance other than the first refuses to start and logs why (override only if you know what you are doing: `ALLOW_MULTIPLE_INSTANCES=true`).
+
+If you started the app another way before, switch once with `pm2 delete <old-name> && pm2 start ecosystem.config.cjs && pm2 save`.
 
 Backwards compatibility: existing connections, backups, and unencrypted backups keep working; legacy encryption keys still decrypt existing rows; unencrypted backups remain readable alongside encrypted ones.
 
@@ -474,6 +525,9 @@ Both services include health checks and persistent Docker volumes.
 | `npm run prisma:generate` | Generate Prisma client |
 | `npm run prisma:migrate` | Run database migrations |
 | `npm run prisma:studio` | Open Prisma Studio |
+| `npm test` | Unit tests (no database needed) |
+| `npm run test:integration` | Prisma integration tests against `TEST_DATABASE_URL` (tables are wiped) |
+| `npm run test:e2e` | End-to-end tests against real databases and CLI tools — see [server/src/test/e2e/README.md](server/src/test/e2e/README.md) |
 
 ### Client (`cd client`)
 

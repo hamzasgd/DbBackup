@@ -32,7 +32,7 @@ export default defineConfig({
         test: {
           name: 'unit',
           include: ['src/**/*.test.ts'],
-          exclude: integrationTests,
+          exclude: [...integrationTests, 'src/test/e2e/**'],
         },
       },
       {
@@ -44,6 +44,20 @@ export default defineConfig({
           env: { DATABASE_URL: process.env.TEST_DATABASE_URL ?? '' },
           // Tests share one database and wipe it in beforeEach
           fileParallelism: false,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          // Real databases and real CLI tools (pg_dump, mariadb-dump, mongodump, redis-cli).
+          // Each suite is skipped unless its E2E_* URL is set — see src/test/e2e/README.md.
+          name: 'e2e',
+          include: ['src/test/e2e/**/*.e2e.test.ts'],
+          globalSetup: ['./src/test/e2e/global-setup.ts'],
+          env: { DATABASE_URL: process.env.E2E_APP_DATABASE_URL ?? '' },
+          fileParallelism: false,
+          testTimeout: 180_000,
+          hookTimeout: 180_000,
         },
       },
     ],
