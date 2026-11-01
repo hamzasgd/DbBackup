@@ -23,14 +23,21 @@ export const changePasswordSchema = z.object({
 });
 
 // Connection schemas
+// A value fed to a CLI tool (mysqldump/psql/...) must not start with "-", or it
+// is parsed as an option (option injection); also reject embedded CR/LF/NUL.
+const noOptionInjection = (label: string) =>
+  z.string().min(1, `${label} is required`)
+    .refine((v) => !v.startsWith('-'), `${label} cannot start with "-"`)
+    .refine((v) => !/[\r\n\x00]/.test(v), `${label} contains invalid characters`);
+
 export const connectionSchema = z.object({
   name: z.string().min(1, 'Name is required'),
   type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL', 'MONGODB', 'REDIS']),
-  host: z.string().min(1, 'Host is required'),
+  host: noOptionInjection('Host'),
   port: z.number().int().positive('Port must be a positive integer'),
-  username: z.string().min(1, 'Username is required'),
+  username: noOptionInjection('Username'),
   password: z.string().optional(),
-  database: z.string().min(1, 'Database is required'),
+  database: noOptionInjection('Database'),
   sslEnabled: z.boolean().optional().default(false),
   sslCa: z.string().optional().nullable(),
   sslCert: z.string().optional().nullable(),

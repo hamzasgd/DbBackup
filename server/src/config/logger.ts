@@ -24,6 +24,8 @@ const SENSITIVE_FIELDS = [
   'passphrase',
   'connectionString',
   'credentials',
+  'smtp',        // smtpPass
+  'webhook',     // slackWebhookUrl, discordWebhookUrl
 ];
 
 /**

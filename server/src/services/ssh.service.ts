@@ -2,6 +2,7 @@ import { Client as SSHClient } from 'ssh2';
 import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
+import path from 'path';
 import { ConnectionConfig } from './engines/base.engine';
 import { logger } from '../config/logger';
 import { prisma } from '../config/database';
@@ -71,12 +72,27 @@ export class SSHTunnel {
     if (this.config.sshPrivateKey) {
       return this.config.sshPrivateKey;
     }
-    const keyPath = (this.config as { sshPrivateKeyPath?: string }).sshPrivateKeyPath;
+    const keyPath = this.config.sshPrivateKeyPath;
     if (!keyPath) return undefined;
-    if (!fs.existsSync(keyPath)) {
-      throw new Error(`SSH private key file not found on server: ${keyPath}`);
+
+    // The path comes from the connection, so it must not let the server read
+    // arbitrary files (e.g. /etc/shadow). When SSH_KEY_DIR is set, require the
+    // key to live inside it; otherwise warn (single-owner deployments still work).
+    const resolved = path.resolve(keyPath);
+    const baseDir = process.env.SSH_KEY_DIR;
+    if (baseDir) {
+      const base = path.resolve(baseDir);
+      if (resolved !== base && !resolved.startsWith(base + path.sep)) {
+        throw new Error('SSH private key path is outside the allowed SSH_KEY_DIR');
+      }
+    } else {
+      logger.warn(`SSH key read from an unconstrained path: ${sanitizeForLog(resolved)}. Set SSH_KEY_DIR to restrict where key files may live.`);
     }
-    return fs.readFileSync(keyPath);
+
+    if (!fs.existsSync(resolved)) {
+      throw new Error('SSH private key file not found on server');
+    }
+    return fs.readFileSync(resolved);
   }
 
   async connect(): Promise<number> {

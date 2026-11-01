@@ -102,6 +102,7 @@ export class MySQLEngine extends BaseEngine {
         '--events',
         '--set-charset',
         '--add-drop-table',
+        '--', // end of options: the database name can never be read as a flag
         this.config.database,
       ], this.getEnv(), filePath, useGzip, (msg) => !msg.includes('Warning'));
 
@@ -129,7 +130,7 @@ export class MySQLEngine extends BaseEngine {
       const isGzip = backupFilePath.endsWith('.gz');
 
       await new Promise<void>((resolve, reject) => {
-        const mysqlArgs = [...this.getArgs('mysql', files), dbName];
+        const mysqlArgs = [...this.getArgs('mysql', files), '--', dbName];
         const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';
