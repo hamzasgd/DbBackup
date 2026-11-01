@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState } from 'react'
 import { useForm } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -75,8 +75,13 @@ function NotificationsTab() {
     notifyOnStorage: true,
   })
 
-  useEffect(() => {
-    const s = data?.data?.data
+  // Copy server settings into the editable form when a new response arrives
+  // (state adjusted during render, keyed on the response object, instead of an effect)
+  const serverSettings = data?.data?.data
+  const [syncedSettings, setSyncedSettings] = useState<typeof serverSettings>(undefined)
+  if (serverSettings !== syncedSettings) {
+    setSyncedSettings(serverSettings)
+    const s = serverSettings
     if (s && Object.keys(s).length > 0) {
       setForm((prev) => ({
         ...prev,
@@ -108,7 +113,7 @@ function NotificationsTab() {
         notifyOnStorage: s.notifyOnStorage ?? prev.notifyOnStorage,
       }))
     }
-  }, [data])
+  }
 
   const saveMutation = useMutation({
     mutationFn: () => notificationsApi.save(form),
