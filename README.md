@@ -364,6 +364,26 @@ To recover on a new server: install DbBackup, put the same encryption key(s) in 
 
 The app's own alerts (email, Slack, …) cannot fire if the server itself is down, so add an external monitor: in UptimeRobot, Better Stack or similar (free plans are enough), create an HTTP(S) monitor for `https://your-dbbackup-host/health` that alerts on any non-200 status, checked every 1–5 minutes. The endpoint needs no login and returns no secrets.
 
+### Authentication & sessions
+
+- The **refresh token** is delivered in an `httpOnly`, `SameSite=Strict` cookie scoped to `/api/auth` — never readable by JavaScript and never sent cross-site. The SPA only holds the short-lived (15 min) access token. Refresh and logout also require a custom `X-DBBK-CSRF` header that browsers send only same-origin (CSRF defence).
+- **Changing your password** and **"revoke all sessions"** bump a per-user token version, so every outstanding access token stops working immediately — not after its 15-minute expiry.
+- JWTs are verified with a pinned algorithm (`HS256`).
+
+> After deploying this version everyone is signed out once (the refresh token moved into a cookie) — just log in again.
+
+### Reverse proxy and client IP
+
+Set **`TRUST_PROXY`** to the exact number of proxy hops in front of the app: `1` for a single nginx, `2` for Cloudflare + nginx, or an IP/subnet. Rate limiting, login lockout and audit logs all use `req.ip`; a wrong hop count lets a client spoof it with `X-Forwarded-For` and evade the lockout. Don't expose the Node port directly to the internet when `TRUST_PROXY` is on.
+
+### SSH key files
+
+If a connection reads its SSH key from a file (`sshPrivateKeyPath`), set **`SSH_KEY_DIR`** so those paths are confined to one directory. Without it the server would read whatever absolute path the connection names. Important if more than one person can create connections.
+
+### Docker default password
+
+`docker-compose.yml` ships a default app-database password (`dbbackup`). Set `DB_PASSWORD` in your `.env` before `docker compose up` — don't run production on the default.
+
 ### Securing your environment file (.env)
 
 An env file always holds *some* plaintext bootstrap secrets — that's unavoidable — but you can shrink the blast radius:
