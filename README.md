@@ -112,7 +112,7 @@
 | **Frontend** | React 19, Vite 8, TypeScript, Tailwind CSS v4, React Router v7, Zustand, TanStack Query, React Hook Form, Zod, Lucide Icons |
 | **Backend** | Node.js, Express.js 4, TypeScript, tsx (dev) |
 | **Database** | PostgreSQL 16 via Prisma ORM 5 |
-| **Queue** | BullMQ 5 + Redis 7 (via ioredis) |
+| **Queue** | BullMQ 6 + Redis 7 (via ioredis 6) |
 | **Auth** | JWT (access + refresh tokens), bcryptjs, WebAuthn passkeys (@simplewebauthn) |
 | **Encryption** | AES-256-GCM (Node.js `crypto`), Key Manager with rotation support, Cloud KMS providers (AWS, Azure, GCP, Vault) |
 | **SSH** | ssh2 library |

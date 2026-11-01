@@ -7,7 +7,6 @@ import {
 import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
-  AuthenticatorTransportFuture,
 } from '@simplewebauthn/server';
 import { prisma } from '../config/database';
 
@@ -146,7 +145,7 @@ export async function verifyAuthentication(
   });
   if (!cred || !cred.user.isActive) return { ok: false, error: 'Unknown passkey' };
 
-  const transports = cred.transports ? (JSON.parse(cred.transports) as AuthenticatorTransportFuture[]) : undefined;
+  const transports = cred.transports ? (JSON.parse(cred.transports) as string[]) : undefined;
   const verification = await verifyAuthenticationResponse({
     response,
     expectedChallenge: challenge,
