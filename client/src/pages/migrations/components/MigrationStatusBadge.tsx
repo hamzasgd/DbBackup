@@ -27,4 +27,3 @@ export function MigrationStatusBadge({ status }: { status: Migration['status'] }
   return <Badge className={statusBadge(status)}>{status}</Badge>
 }
 
-export { statusIcon, statusBadge }

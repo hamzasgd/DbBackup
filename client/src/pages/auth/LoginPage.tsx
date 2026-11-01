@@ -10,7 +10,7 @@ import { useAuthStore } from '../../store/auth.store'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
-import { queryClient } from '../../App'
+import { queryClient } from '../../lib/queryClient'
 
 const schema = z.object({
   email: z.string().email('Enter a valid email'),

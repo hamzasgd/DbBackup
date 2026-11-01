@@ -7,6 +7,7 @@ import { Card, CardContent } from '../ui/Card'
 import { Badge } from '../ui/Badge'
 import { Skeleton } from '../ui/Skeleton'
 import { toast } from '../../store/toast.store'
+import { getApiErrorMessage } from '../../lib/utils'
 
 interface SchemaComparisonModalProps {
   open: boolean
@@ -46,9 +47,8 @@ export function SchemaComparisonModal({ open, onClose, configId }: SchemaCompari
       queryClient.invalidateQueries({ queryKey: ['schema-comparison', configId] })
       toast.success('Missing tables created successfully')
     },
-    onError: (error: any) => {
-      const message = error.response?.data?.message || 'Failed to create missing tables'
-      toast.error(message)
+    onError: (error: unknown) => {
+      toast.error(getApiErrorMessage(error, 'Failed to create missing tables'))
     }
   })
 

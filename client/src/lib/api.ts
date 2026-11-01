@@ -1,5 +1,6 @@
 import axios, { type AxiosError } from 'axios'
 import { useAuthStore } from '../store/auth.store'
+import { queryClient } from './queryClient'
 
 const api = axios.create({
   baseURL: '/api',
@@ -50,8 +51,7 @@ api.interceptors.response.use(
         return api(original)
       } catch {
         useAuthStore.getState().logout()
-        // Dynamically import to avoid circular dependency
-        import('../App').then(({ queryClient }) => queryClient.clear())
+        queryClient.clear()
         window.location.href = '/login'
       }
     }

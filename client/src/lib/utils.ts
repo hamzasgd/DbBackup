@@ -1,5 +1,6 @@
 import { type ClassValue, clsx } from 'clsx'
 import { twMerge } from 'tailwind-merge'
+import axios from 'axios'
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
@@ -51,4 +52,13 @@ export function statusBadgeColor(status: string): string {
     FAILED: 'bg-red-100 text-red-700',
   }
   return map[status] ?? 'bg-gray-100 text-gray-700'
+}
+
+/** Message from an API error response (`{ message }`), or `fallback` when there isn't one. */
+export function getApiErrorMessage(error: unknown, fallback: string): string {
+  if (axios.isAxiosError(error)) {
+    const message = (error.response?.data as { message?: unknown } | undefined)?.message
+    if (typeof message === 'string' && message) return message
+  }
+  return fallback
 }

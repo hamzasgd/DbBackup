@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
 import { Plus, Trash2, Edit2, Zap, Database, Shield, Network, Info } from 'lucide-react'
-import { useForm } from 'react-hook-form'
+import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { connectionsApi, type CreateConnectionPayload } from '../../services/connections.service'
@@ -55,14 +55,12 @@ export default function ConnectionsPage() {
   })
   const connections = data?.data.data ?? []
 
-  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
+  const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false },
   })
 
-  const _dbType = watch('type')
-  void _dbType
-  const sshEnabled = watch('sshEnabled')
+  const sshEnabled = useWatch({ control, name: 'sshEnabled' })
 
   const createMutation = useMutation({
     mutationFn: (d: CreateConnectionPayload) => connectionsApi.create(d),
