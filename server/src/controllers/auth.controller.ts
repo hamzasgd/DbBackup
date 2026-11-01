@@ -8,6 +8,7 @@ import {
   generateRefreshToken,
   verifyRefreshToken,
   saveRefreshToken,
+  hashRefreshToken,
   revokeRefreshToken,
   revokeAllUserTokens,
 } from '../services/token.service';
@@ -188,7 +189,7 @@ export async function refreshToken(req: Request, res: Response, next: NextFuncti
     // Use a transaction to prevent race conditions when multiple 401 retries
     // hit the refresh endpoint simultaneously with the same token.
     const result = await prisma.$transaction(async (tx: Prisma.TransactionClient) => {
-      const existing = await tx.refreshToken.findUnique({ where: { token } });
+      const existing = await tx.refreshToken.findUnique({ where: { token: hashRefreshToken(token) } });
       if (!existing || existing.expiresAt < new Date()) {
         throw new AppError('Invalid or expired refresh token', 401);
       }
@@ -205,7 +206,7 @@ export async function refreshToken(req: Request, res: Response, next: NextFuncti
       expiresAt.setDate(expiresAt.getDate() + 7);
 
       await tx.refreshToken.create({
-        data: { id: uuidv4(), token: newRefreshToken, userId: payload.userId, expiresAt, ipAddress: req.ip, userAgent: req.headers['user-agent'] },
+        data: { id: uuidv4(), token: hashRefreshToken(newRefreshToken), userId: payload.userId, expiresAt, ipAddress: req.ip, userAgent: req.headers['user-agent'] },
       });
 
       return { accessToken: newAccessToken, refreshToken: newRefreshToken };

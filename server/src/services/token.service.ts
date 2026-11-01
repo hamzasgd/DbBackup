@@ -32,8 +32,11 @@ export function generateAccessToken(payload: TokenPayload): string {
 }
 
 export function generateRefreshToken(payload: TokenPayload): string {
-  return jwt.sign(payload, jwtSecret('refresh'), {
+  // jwtid makes every token unique: two logins (or a login and a refresh) in the
+  // same second otherwise produced the same token and hit the unique index (HTTP 409)
+  return jwt.sign({ userId: payload.userId, email: payload.email }, jwtSecret('refresh'), {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
+    jwtid: uuidv4(),
   } as jwt.SignOptions);
 }
 
@@ -43,6 +46,27 @@ export function verifyAccessToken(token: string): TokenPayload {
 
 export function verifyRefreshToken(token: string): TokenPayload {
   return jwt.verify(token, jwtSecret('refresh')) as unknown as TokenPayload;
+}
+
+/**
+ * Refresh tokens are stored as a SHA-256 hash, like MCP keys: a leaked database
+ * dump then contains no usable session. The token is a signed JWT with plenty
+ * of entropy, so an unsalted hash is enough.
+ */
+export function hashRefreshToken(token: string): string {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/** Hash refresh tokens stored before hashing was introduced (they are JWTs, so they contain dots). */
+export async function upgradeLegacyRefreshTokens(): Promise<number> {
+  const legacy = await prisma.refreshToken.findMany({
+    where: { token: { contains: '.' } },
+    select: { id: true, token: true },
+  });
+  for (const row of legacy) {
+    await prisma.refreshToken.update({ where: { id: row.id }, data: { token: hashRefreshToken(row.token) } });
+  }
+  return legacy.length;
 }
 
 export async function saveRefreshToken(
@@ -55,12 +79,12 @@ export async function saveRefreshToken(
   expiresAt.setDate(expiresAt.getDate() + 7);
 
   await prisma.refreshToken.create({
-    data: { id: uuidv4(), token, userId, expiresAt, ipAddress, userAgent },
+    data: { id: uuidv4(), token: hashRefreshToken(token), userId, expiresAt, ipAddress, userAgent },
   });
 }
 
 export async function revokeRefreshToken(token: string): Promise<void> {
-  await prisma.refreshToken.deleteMany({ where: { token } });
+  await prisma.refreshToken.deleteMany({ where: { token: hashRefreshToken(token) } });
 }
 
 export async function revokeAllUserTokens(userId: string): Promise<void> {

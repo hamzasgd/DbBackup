@@ -23,6 +23,7 @@ import syncConflictRoutes from './routes/sync-conflict.routes';
 import syncStateRoutes from './routes/sync-state.routes';
 import syncOperationsRoutes from './routes/sync-operations.routes';
 import { mcpRouter, keysRouter } from './routes/mcp.routes';
+import { checkHealth } from './services/health.service';
 
 const app = express();
 
@@ -82,8 +83,11 @@ if (process.env.NODE_ENV !== 'test') {
 }
 
 // Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+// Checks the app database, Redis and the queue workers; 503 when any is down,
+// so an external uptime monitor (UptimeRobot, Better Stack, ...) can alert on it.
+app.get('/health', async (_req, res) => {
+  const health = await checkHealth();
+  res.status(health.status === 'ok' ? 200 : 503).json(health);
 });
 
 // API Routes
