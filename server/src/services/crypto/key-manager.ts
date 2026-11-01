@@ -151,7 +151,8 @@ export class KeyManager {
 
     const keyVersion = this.keys.get(version);
     if (!keyVersion) {
-      throw new Error(`Unknown key version: ${version}`);
+      // Do not echo the value: it is taken from the ciphertext being decrypted
+      throw new Error('Unknown encryption key version');
     }
 
     return this.decryptWithKey(data, keyVersion.key);

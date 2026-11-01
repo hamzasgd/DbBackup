@@ -31,13 +31,20 @@ async function verifyGzip(filePath: string): Promise<void> {
 
 /** Check a plain .sql file has a mysqldump/pg_dump footer */
 function verifySqlFile(filePath: string): void {
-  const size = fs.statSync(filePath).size;
-  if (size < 100) throw new Error('SQL file too small to be valid');
-  // Read last 512 bytes to look for dump-completed markers
+  // Open first and stat the same descriptor so the file can't change in between
   const fd = fs.openSync(filePath, 'r');
   const tail = Buffer.alloc(512);
-  fs.readSync(fd, tail, 0, 512, Math.max(0, size - 512));
-  fs.closeSync(fd);
+  let size: number;
+  try {
+    size = fs.fstatSync(fd).size;
+    if (size >= 100) {
+      // Read last 512 bytes to look for dump-completed markers
+      fs.readSync(fd, tail, 0, 512, Math.max(0, size - 512));
+    }
+  } finally {
+    fs.closeSync(fd);
+  }
+  if (size < 100) throw new Error('SQL file too small to be valid');
   const content = tail.toString('utf8');
   // mysqldump ends with "-- Dump completed", pg_dump ends with various markers
   const hasMarker =

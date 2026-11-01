@@ -219,16 +219,15 @@ export async function refreshToken(req: Request, res: Response, next: NextFuncti
 
 export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { refreshToken: token } = req.body;
+    const body = req.body as { refreshToken?: unknown };
+    const token = typeof body?.refreshToken === 'string' ? body.refreshToken : '';
     let userId: string | null = null;
-    if (token) {
-      try {
-        userId = verifyRefreshToken(token).userId;
-      } catch {
-        /* expired or invalid token — still a logout, just unattributable */
-      }
-      await revokeRefreshToken(token);
+    try {
+      userId = verifyRefreshToken(token).userId;
+    } catch {
+      /* missing, expired or invalid token — still a logout, just unattributable */
     }
+    await revokeRefreshToken(token);
     await logAudit(userId, 'LOGOUT', 'user', {}, req.ip, req.headers['user-agent']);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {

@@ -1,5 +1,6 @@
 import { prisma } from '../../config/database';
 import { logger } from '../../config/logger';
+import { sanitizeForLog } from '../../utils/sanitize';
 import { 
   SyncConfiguration, 
   SyncState,
@@ -606,7 +607,7 @@ export class SyncEngineService {
           await this.triggerSync(configId, false);
         }
       } catch (error) {
-        logger.error(`Real-time sync check failed for ${configId}:`, error);
+        logger.error(`Real-time sync check failed for ${sanitizeForLog(configId)}: ${sanitizeForLog(error instanceof Error ? error.message : error)}`);
       }
     }, 5000); // Check every 5 seconds
 
@@ -755,7 +756,7 @@ export class SyncEngineService {
         
         // If job doesn't exist or is completed/failed, atomically clear the stale job ID
         if (!job || await job.isCompleted() || await job.isFailed()) {
-          logger.warn(`Clearing stale job ID ${config.syncState.currentJobId} for sync ${id}`);
+          logger.warn(`Clearing stale job ID ${sanitizeForLog(config.syncState.currentJobId)} for sync ${sanitizeForLog(id)}`);
           // Atomic conditional update: only clear if the job ID hasn't changed
           const updated = await prisma.syncState.updateMany({
             where: {
@@ -798,7 +799,7 @@ export class SyncEngineService {
         },
       });
 
-      logger.info(`Triggering sync for ${id}. Pending changes: ${pendingChanges}`);
+      logger.info(`Triggering sync for ${sanitizeForLog(id)}. Pending changes: ${pendingChanges}`);
     }
 
     // Enqueue sync job using BullMQ

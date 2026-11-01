@@ -10,6 +10,20 @@ export interface AuthRequest extends Request {
   };
 }
 
+/** Bearer header first, then ?token= (EventSource can't set headers). Throws 401 when absent. */
+function extractToken(req: Request): string {
+  const authHeader = req.headers.authorization;
+  const queryToken = typeof req.query.token === 'string' ? req.query.token : undefined;
+  const fromHeader = typeof authHeader === 'string' && authHeader.startsWith('Bearer ')
+    ? authHeader.split(' ')[1]
+    : undefined;
+  const raw = fromHeader ?? queryToken;
+  if (!raw) {
+    throw new AppError('No token provided', 401);
+  }
+  return raw;
+}
+
 export async function authenticate(
   req: AuthRequest,
   _res: Response,
@@ -17,19 +31,7 @@ export async function authenticate(
 ): Promise<void> {
   try {
     // Support token via Authorization header OR ?token= query param (for SSE EventSource)
-    const authHeader = req.headers.authorization;
-    const queryToken = req.query.token as string | undefined;
-
-    const raw = authHeader?.startsWith('Bearer ')
-      ? authHeader.split(' ')[1]
-      : queryToken;
-
-    if (!raw) {
-      throw new AppError('No token provided', 401);
-    }
-
-    const token = raw;
-    const payload = verifyAccessToken(token);
+    const payload = verifyAccessToken(extractToken(req));
 
     // Verify user still exists and is active
     const user = await prisma.user.findUnique({

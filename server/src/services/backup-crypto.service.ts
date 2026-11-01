@@ -59,11 +59,11 @@ export async function encryptBackupFile(srcPath: string, destPath: string, passp
 
 /** Decrypt an encrypted backup back to plaintext. Throws on wrong passphrase or tampering. */
 export async function decryptBackupFile(srcPath: string, destPath: string, passphrase: string): Promise<void> {
-  const stat = fs.statSync(srcPath);
-  if (stat.size < HEADER_LEN + TAG_LEN) throw new Error('File too small to be an encrypted backup');
-
   const fd = fs.openSync(srcPath, 'r');
   try {
+    const stat = fs.fstatSync(fd);
+    if (stat.size < HEADER_LEN + TAG_LEN) throw new Error('File too small to be an encrypted backup');
+
     const header = Buffer.alloc(HEADER_LEN);
     fs.readSync(fd, header, 0, HEADER_LEN, 0);
     if (!header.subarray(0, MAGIC.length).equals(MAGIC)) throw new Error('Not a DbBackup encrypted file');

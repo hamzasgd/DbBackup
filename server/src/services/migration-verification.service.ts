@@ -305,22 +305,29 @@ async function getMySQLColumnProfileMap(config: ConnectionConfig, tableName: str
     return new Map();
   }
 
-  const selectParts = columns.flatMap((col) => {
-    const safeCol = `\`${col.replace(/`/g, '``')}\``;
+  // Identifiers go in as `??` placeholders (escaped by the driver), never by concatenation
+  const selectParts: string[] = [];
+  const identifiers: string[] = [];
+  for (const col of columns) {
     const base = col.replace(/[^a-zA-Z0-9_]/g, '_');
-
-    return [
-      `SUM(${safeCol} IS NULL) AS \`${base}__null\``,
-      `COALESCE(MIN(OCTET_LENGTH(${safeCol})), 0) AS \`${base}__min\``,
-      `COALESCE(MAX(OCTET_LENGTH(${safeCol})), 0) AS \`${base}__max\``,
-      `COALESCE(AVG(OCTET_LENGTH(${safeCol})), 0) AS \`${base}__avg\``,
-    ];
-  });
+    selectParts.push(
+      'SUM(?? IS NULL) AS ??',
+      'COALESCE(MIN(OCTET_LENGTH(??)), 0) AS ??',
+      'COALESCE(MAX(OCTET_LENGTH(??)), 0) AS ??',
+      'COALESCE(AVG(OCTET_LENGTH(??)), 0) AS ??',
+    );
+    identifiers.push(
+      col, `${base}__null`,
+      col, `${base}__min`,
+      col, `${base}__max`,
+      col, `${base}__avg`,
+    );
+  }
 
   return withMySQLConnection(config, async (conn) => {
-    const safeTable = `\`${tableName.replace(/`/g, '``')}\``;
     const [rows] = await conn.query<mysql2.RowDataPacket[]>(
-      `SELECT ${selectParts.join(', ')} FROM ${safeTable}`
+      `SELECT ${selectParts.join(', ')} FROM ??`,
+      [...identifiers, tableName]
     );
 
     const row = rows[0] ?? {};
@@ -416,14 +423,14 @@ async function computeMySQLSampleRowHash(
     return { hash: '', sampledRows: 0, skipped: true };
   }
 
-  const safeTable = `\`${tableName.replace(/`/g, '``')}\``;
-  const selectCols = columns.map((c) => `\`${c.replace(/`/g, '``')}\``).join(', ');
-  const orderBy = orderColumns.map((c) => `\`${c.replace(/`/g, '``')}\``).join(', ');
+  // Identifiers are bound as `??` placeholders (escaped by the driver)
+  const selectCols = columns.map(() => '??').join(', ');
+  const orderBy = orderColumns.map(() => '??').join(', ');
 
   return withMySQLConnection(config, async (conn) => {
     const [rows] = await conn.query<mysql2.RowDataPacket[]>(
-      `SELECT ${selectCols} FROM ${safeTable} ORDER BY ${orderBy} LIMIT ?`,
-      [sampleSize]
+      `SELECT ${selectCols} FROM ?? ORDER BY ${orderBy} LIMIT ?`,
+      [...columns, tableName, ...orderColumns, sampleSize]
     );
 
     const digest = createHash('sha256');

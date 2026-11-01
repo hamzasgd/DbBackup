@@ -2,6 +2,7 @@ import { Response } from 'express';
 import { Redis } from 'ioredis';
 import { getRedisConfig } from '../config/redis';
 import { logger } from '../config/logger';
+import { sanitizeForLog } from '../utils/sanitize';
 import { AppError } from '../middleware/errorHandler';
 
 const MAX_SSE_CONNECTIONS = 50;
@@ -64,7 +65,7 @@ export function streamSSE(res: Response, channel: string, timeoutMs = 300_000): 
 
   sub.subscribe(channel, (err) => {
     if (err) {
-      logger.error(`SSE subscribe error for ${channel}:`, err);
+      logger.error(`SSE subscribe error for ${sanitizeForLog(channel)}:`, err);
       res.end();
       cleanup();
       return;
