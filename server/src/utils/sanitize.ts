@@ -19,3 +19,8 @@ export function sanitizeConfig(config: Record<string, unknown>): Record<string, 
   
   return result;
 }
+
+/** Strip CR/LF (and other control chars) so a user-supplied value can't forge extra log lines. */
+export function sanitizeForLog(value: unknown): string {
+  return String(value).replace(/[\r\n\u0000-\u001f\u007f]/g, '');
+}

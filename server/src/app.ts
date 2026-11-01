@@ -2,7 +2,6 @@ import express, { RequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import compression from 'compression';
-import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import path from 'path';
 import { rateLimit } from 'express-rate-limit';
@@ -65,7 +64,6 @@ app.use('/api/', limiter);
 // Body parsing
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
-app.use(cookieParser());
 app.use(compression() as unknown as RequestHandler);
 
 // Serialize BigInt fields (e.g. fileSize from Prisma BigInt columns) as numbers

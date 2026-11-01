@@ -11,12 +11,14 @@ import {
   HeadObjectCommand,
   GetBucketPolicyStatusCommand,
   GetPublicAccessBlockCommand,
+  ListObjectsV2Command,
 } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { prisma } from '../config/database';
 import { decrypt } from './crypto.service';
 import { logger } from '../config/logger';
+import { assertSafeEndpoint, parseSafeEndpoint, UnsafeEndpointError } from '../utils/endpoint-guard';
 import { uploadToGdrive, downloadFromGdrive, deleteFromGdrive } from './gdrive.service';
 import { isEncryptedFile, decryptBackupFile } from './backup-crypto.service';
 
@@ -75,6 +77,7 @@ function buildS3Client(settings: {
   secretAccessKey: string;
   endpoint?: string | null;
 }): S3Client {
+  if (settings.endpoint) parseSafeEndpoint(settings.endpoint);
   const decryptedKey = decrypt(settings.accessKeyId);
   const cacheKey = crypto.createHash('sha256')
     .update(`${settings.region}:${decryptedKey}:${settings.endpoint ?? ''}`)
@@ -410,6 +413,12 @@ export async function testS3Connection(settings: {
   secretAccessKey: string;
   endpoint?: string | null;
 }): Promise<{ success: boolean; error?: string; warning?: string }> {
+  try {
+    if (settings.endpoint) await assertSafeEndpoint(settings.endpoint);
+  } catch (err) {
+    if (err instanceof UnsafeEndpointError) return { success: false, error: err.message };
+    throw err;
+  }
   const s3 = buildS3Client(settings);
   try {
     await s3.send(new HeadObjectCommand({ Bucket: settings.bucket, Key: '.dbbackup-test' }));
@@ -442,18 +451,30 @@ async function checkS3PublicAccess(
 ): Promise<string | undefined> {
   const problems: string[] = [];
 
-  // 1. Anonymous probe — no credentials sent; a plain fetch that succeeds
-  //    means the bucket (and likely its objects) are world-readable.
+  // 1. Anonymous probe — an UNSIGNED bucket listing through the SDK (no credentials sent);
+  //    if it succeeds the bucket (and likely its objects) are world-readable.
   try {
-    const base = settings.endpoint
-      ? `${settings.endpoint.replace(/\/$/, '')}/${settings.bucket}` // path-style (custom endpoints)
-      : `https://${settings.bucket}.s3.${settings.region}.amazonaws.com`;
-    const res = await fetch(base, { method: 'GET' });
-    if (res.ok) {
+    const anonymous = new S3Client({
+      region: settings.region,
+      ...(settings.endpoint ? { endpoint: settings.endpoint, forcePathStyle: true } : {}),
+      // Replace SigV4 with a "no auth" scheme so no Authorization header is added
+      httpAuthSchemes: [{
+        schemeId: 'smithy.api#noAuth',
+        identityProvider: () => async () => ({}),
+        signer: { sign: async (request: unknown) => request },
+      }] as never,
+      httpAuthSchemeProvider: (() => [{ schemeId: 'smithy.api#noAuth' }]) as never,
+      maxAttempts: 1,
+      requestHandler: { requestTimeout: 5000, connectionTimeout: 5000 },
+    });
+    try {
+      await anonymous.send(new ListObjectsV2Command({ Bucket: settings.bucket, MaxKeys: 1 }));
       problems.push('anonymous listing of the bucket succeeded — objects may be world-readable');
+    } finally {
+      anonymous.destroy();
     }
   } catch {
-    /* network issues on the probe are not conclusive — ignore */
+    /* AccessDenied / network issues on the probe are not conclusive — ignore */
   }
 
   // 2. Bucket policy status (requires s3:GetBucketPolicyStatus)

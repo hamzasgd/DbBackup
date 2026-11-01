@@ -7,6 +7,7 @@ import { AppError } from '../middleware/errorHandler';
 export type ExportFormat = 'json' | 'csv' | 'sql';
 
 const BATCH_SIZE = 5000;
+const MAX_JSON_ROWS = 1000000;
 const TABLE_NAME_REGEX = /^[a-zA-Z_][a-zA-Z0-9_$]*$/;
 
 function validateTableName(table: string): void {
@@ -16,6 +17,31 @@ function validateTableName(table: string): void {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Map each requested table to a quoted identifier taken from the PostgreSQL
+ * catalog. Unknown tables are rejected, so user input never reaches a query.
+ */
+async function resolvePostgresTables(pool: Pool, tables: string[]): Promise<Map<string, string>> {
+  const { rows } = await pool.query(
+    `SELECT DISTINCT table_name
+       FROM information_schema.tables
+      WHERE table_schema = ANY (current_schemas(false))
+        AND table_name = ANY ($1::text[])`,
+    [tables],
+  );
+  const catalogNames: string[] = rows.map((r: { table_name: string }) => r.table_name);
+  const resolved = new Map<string, string>();
+  for (const table of tables) {
+    // Use the catalog's own spelling of the name, never the request's string
+    const name = catalogNames.find((n) => n === table);
+    if (name === undefined) {
+      throw new AppError(`Table not found: ${table}`, 404);
+    }
+    resolved.set(table, `"${name.replace(/"/g, '""')}"`);
+  }
+  return resolved;
+}
 
 function escapeCsvValue(val: unknown): string {
   if (val === null || val === undefined) return '';
@@ -67,15 +93,15 @@ export async function exportMySQL(
     if (format === 'json') {
       res.setHeader('Content-Type', 'application/json');
       res.setHeader('Content-Disposition', `attachment; filename="${config.database}_export.json"`);
-      const result: Record<string, unknown[]> = {};
+      const result = new Map<string, unknown[]>();
 
       for (const table of tables) {
         const [rows] = await conn.query<mysql2.RowDataPacket[]>(
-          `SELECT * FROM \`${table}\` LIMIT 1000000`
+          'SELECT * FROM ?? LIMIT ?', [table, MAX_JSON_ROWS]
         );
-        result[table] = rows;
+        result.set(table, rows);
       }
-      res.end(JSON.stringify(result, null, 2));
+      res.end(JSON.stringify(Object.fromEntries(result), null, 2));
 
     } else if (format === 'csv') {
       // Multi-table CSV: separate sections per table
@@ -89,7 +115,7 @@ export async function exportMySQL(
 
         while (true) {
           const [rows] = await conn.query<mysql2.RowDataPacket[]>(
-            `SELECT * FROM \`${table}\` LIMIT ${BATCH_SIZE} OFFSET ${offset}`
+            'SELECT * FROM ?? LIMIT ? OFFSET ?', [table, BATCH_SIZE, offset]
           );
           if (rows.length === 0) break;
 
@@ -119,7 +145,7 @@ export async function exportMySQL(
 
         while (true) {
           const [rows] = await conn.query<mysql2.RowDataPacket[]>(
-            `SELECT * FROM \`${table}\` LIMIT ${BATCH_SIZE} OFFSET ${offset}`
+            'SELECT * FROM ?? LIMIT ? OFFSET ?', [table, BATCH_SIZE, offset]
           );
           if (rows.length === 0) break;
 
@@ -171,29 +197,33 @@ export async function exportPostgres(
   });
 
   try {
+    // Identifiers can't be bound as parameters, so only names that exist in the
+    // catalog (as returned by the server itself) are ever put into a query.
+    const resolved = await resolvePostgresTables(pool, tables);
+
     if (format === 'json') {
       res.setHeader('Content-Type', 'application/json');
       res.setHeader('Content-Disposition', `attachment; filename="${config.database}_export.json"`);
-      const result: Record<string, unknown[]> = {};
+      const result = new Map<string, unknown[]>();
 
-      for (const table of tables) {
-        const { rows } = await pool.query(`SELECT * FROM "${table}" LIMIT 1000000`);
-        result[table] = rows;
+      for (const [table, safeName] of resolved) {
+        const { rows } = await pool.query(`SELECT * FROM ${safeName} LIMIT $1`, [MAX_JSON_ROWS]);
+        result.set(table, rows);
       }
-      res.end(JSON.stringify(result, null, 2));
+      res.end(JSON.stringify(Object.fromEntries(result), null, 2));
 
     } else if (format === 'csv') {
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="${config.database}_export.csv"`);
 
-      for (const table of tables) {
+      for (const [table, safeName] of resolved) {
         res.write(`# TABLE: ${table}\n`);
         let offset = 0;
         let firstBatch = true;
 
         while (true) {
           const { rows } = await pool.query(
-            `SELECT * FROM "${table}" LIMIT ${BATCH_SIZE} OFFSET ${offset}`
+            `SELECT * FROM ${safeName} LIMIT $1 OFFSET $2`, [BATCH_SIZE, offset]
           );
           if (rows.length === 0) break;
 
@@ -216,20 +246,20 @@ export async function exportPostgres(
       res.setHeader('Content-Disposition', `attachment; filename="${config.database}_export.sql"`);
       res.write(`-- Export of database: ${config.database}\n-- Generated: ${new Date().toISOString()}\n\n`);
 
-      for (const table of tables) {
+      for (const [table, safeName] of resolved) {
         res.write(`-- Table: ${table}\n`);
         let offset = 0;
 
         while (true) {
           const { rows } = await pool.query(
-            `SELECT * FROM "${table}" LIMIT ${BATCH_SIZE} OFFSET ${offset}`
+            `SELECT * FROM ${safeName} LIMIT $1 OFFSET $2`, [BATCH_SIZE, offset]
           );
           if (rows.length === 0) break;
 
           const cols = Object.keys(rows[0]).map(c => `"${c}"`).join(', ');
           for (const row of rows) {
             const vals = Object.values(row).map(escapeSqlValue).join(', ');
-            res.write(`INSERT INTO "${table}" (${cols}) VALUES (${vals});\n`);
+            res.write(`INSERT INTO ${safeName} (${cols}) VALUES (${vals});\n`);
           }
           offset += BATCH_SIZE;
           if (rows.length < BATCH_SIZE) break;

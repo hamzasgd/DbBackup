@@ -50,10 +50,14 @@ interface AuthedKey {
 }
 
 async function authenticateKey(authHeader: string | undefined): Promise<AuthedKey | null> {
-  const match = /^Bearer\s+(.+)$/i.exec(authHeader ?? '');
-  if (!match) return null;
+  // Parsed without a regex: `\s+(.+)` backtracks polynomially on long whitespace runs
+  const header = authHeader ?? '';
+  const sep = header.search(/\s/);
+  if (sep < 1 || header.slice(0, sep).toLowerCase() !== 'bearer') return null;
+  const bearer = header.slice(sep).trim();
+  if (!bearer) return null;
   const key = await prisma.mcpApiKey.findUnique({
-    where: { keyHash: hashMcpKey(match[1].trim()) },
+    where: { keyHash: hashMcpKey(bearer) },
     include: { user: { select: { isActive: true } } },
   });
   if (!key || key.revokedAt || key.user.isActive !== true) return null;
