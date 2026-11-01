@@ -36,11 +36,17 @@ export async function authenticate(
     // Verify user still exists and is active
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { id: true, email: true, isActive: true },
+      select: { id: true, email: true, isActive: true, tokenVersion: true },
     });
 
     if (!user || !user.isActive) {
       throw new AppError('User not found or inactive', 401);
+    }
+
+    // Invalidate access tokens issued before a password change / "revoke all sessions".
+    // Tokens minted before this field existed carry no tokenVersion → treated as 0.
+    if ((payload.tokenVersion ?? 0) !== user.tokenVersion) {
+      throw new AppError('Session no longer valid — please sign in again', 401);
     }
 
     req.user = { userId: payload.userId, email: payload.email };

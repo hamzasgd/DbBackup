@@ -3,6 +3,7 @@ import axios from 'axios';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 import { decrypt, decryptIfPresent, encrypt } from './crypto.service';
+import { assertSafeEndpoint } from '../utils/endpoint-guard';
 
 export type NotificationEventType =
   | 'BACKUP_COMPLETED'
@@ -131,7 +132,10 @@ async function sendSlack(webhookUrl: string, payload: NotificationPayload): Prom
     ? Object.entries(payload.details).map(([k, v]) => ({ title: k, value: String(v), short: true }))
     : [];
 
-  await axios.post(decrypt(webhookUrl), {
+  const url = decrypt(webhookUrl);
+  // SSRF guard: block link-local / cloud-metadata targets and non-http(s) schemes
+  await assertSafeEndpoint(url);
+  await axios.post(url, {
     attachments: [
       {
         color,
@@ -147,6 +151,7 @@ async function sendSlack(webhookUrl: string, payload: NotificationPayload): Prom
 
 async function sendNtfy(settings: { serverUrl?: string | null; topic: string }, payload: NotificationPayload): Promise<void> {
   const server = settings.serverUrl || 'https://ntfy.sh';
+  await assertSafeEndpoint(server); // SSRF guard on the user-supplied ntfy server URL
   await fetch(`${server}/${settings.topic}`, {
     method: 'POST',
     headers: { Title: payload.title, Priority: payload.event.includes('FAILED') || payload.event.includes('DOWN') ? 'urgent' : 'default', Tags: 'floppy_disk' },

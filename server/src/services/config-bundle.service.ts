@@ -137,11 +137,13 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
 
   // Import notification settings
   if (bundle.notificationSettings) {
-    const ns = bundle.notificationSettings;
+    // Never let the bundle set identity/ownership columns (e.g. override userId)
+    const { id: _id, userId: _uid, createdAt: _c, updatedAt: _u, ...nsData } = bundle.notificationSettings as Record<string, unknown>;
+    void _id; void _uid; void _c; void _u;
     await prisma.notificationSettings.upsert({
       where: { userId },
-      create: { userId, ...ns } as never,
-      update: ns as never,
+      create: { userId, ...nsData } as never,
+      update: nsData as never,
     });
   }
 

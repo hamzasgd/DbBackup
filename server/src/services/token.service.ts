@@ -23,12 +23,19 @@ function jwtSecret(kind: 'access' | 'refresh'): string {
 export interface TokenPayload {
   userId: string;
   email: string;
+  /** Access tokens carry the user's tokenVersion; a mismatch (password change / revoke-all) rejects the token. */
+  tokenVersion?: number;
 }
 
+// Pin the algorithm so a token can never be verified under a different scheme.
+const JWT_ALG: jwt.Algorithm = 'HS256';
+
 export function generateAccessToken(payload: TokenPayload): string {
-  return jwt.sign(payload, jwtSecret('access'), {
-    expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m',
-  } as jwt.SignOptions);
+  return jwt.sign(
+    { userId: payload.userId, email: payload.email, tokenVersion: payload.tokenVersion ?? 0 },
+    jwtSecret('access'),
+    { expiresIn: process.env.JWT_ACCESS_EXPIRES_IN || '15m', algorithm: JWT_ALG } as jwt.SignOptions,
+  );
 }
 
 export function generateRefreshToken(payload: TokenPayload): string {
@@ -37,15 +44,16 @@ export function generateRefreshToken(payload: TokenPayload): string {
   return jwt.sign({ userId: payload.userId, email: payload.email }, jwtSecret('refresh'), {
     expiresIn: process.env.JWT_REFRESH_EXPIRES_IN || '7d',
     jwtid: uuidv4(),
+    algorithm: JWT_ALG,
   } as jwt.SignOptions);
 }
 
 export function verifyAccessToken(token: string): TokenPayload {
-  return jwt.verify(token, jwtSecret('access')) as unknown as TokenPayload;
+  return jwt.verify(token, jwtSecret('access'), { algorithms: [JWT_ALG] }) as unknown as TokenPayload;
 }
 
 export function verifyRefreshToken(token: string): TokenPayload {
-  return jwt.verify(token, jwtSecret('refresh')) as unknown as TokenPayload;
+  return jwt.verify(token, jwtSecret('refresh'), { algorithms: [JWT_ALG] }) as unknown as TokenPayload;
 }
 
 /**

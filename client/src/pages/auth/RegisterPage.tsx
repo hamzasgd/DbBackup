@@ -27,8 +27,8 @@ export default function RegisterPage() {
   const onSubmit = async (data: FormData) => {
     try {
       const res = await authApi.register(data)
-      const { user, accessToken, refreshToken } = res.data.data
-      setAuth(user, accessToken, refreshToken)
+      const { user, accessToken } = res.data.data
+      setAuth(user, accessToken)
       toast.success(`Welcome, ${user.name}!`)
       navigate('/dashboard')
     } catch (err: unknown) {
