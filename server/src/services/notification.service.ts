@@ -46,7 +46,8 @@ function escapeHtml(str: string | number | boolean): string {
 }
 
 // Cache transporters by SMTP config fingerprint to avoid creating new connections per email
-const transporterCache = new Map<string, { transporter: nodemailer.Transporter; createdAt: number }>();
+type MailTransporter = ReturnType<typeof nodemailer.createTransport>;
+const transporterCache = new Map<string, { transporter: MailTransporter; createdAt: number }>();
 const TRANSPORTER_TTL = 10 * 60 * 1000; // 10 minutes
 
 function getTransporter(settings: {
@@ -55,7 +56,7 @@ function getTransporter(settings: {
   smtpUser?: string | null;
   smtpPass?: string | null;
   smtpSecure: boolean;
-}): nodemailer.Transporter {
+}): MailTransporter {
   const key = `${settings.smtpHost}:${settings.smtpPort}:${settings.smtpUser ?? ''}`;
   const cached = transporterCache.get(key);
   if (cached && Date.now() - cached.createdAt < TRANSPORTER_TTL) {

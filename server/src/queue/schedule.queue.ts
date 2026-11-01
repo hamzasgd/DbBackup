@@ -5,7 +5,7 @@ import { addBackupJob } from './backup.queue';
 import { decrypt } from '../services/crypto.service';
 import { ensureStorageDir, getStoragePath } from '../services/storage.service';
 import { logger } from '../config/logger';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import path from 'path';
 import { CronExpressionParser } from 'cron-parser';
 

@@ -36,7 +36,8 @@ const schema = z.object({
   sshPassphrase: z.string().optional().nullable(),
   connectionTimeout: z.coerce.number().optional().default(30000),
 })
-type FormData = z.infer<typeof schema>
+type FormData = z.output<typeof schema>
+type FormInput = z.input<typeof schema>
 
 const DEFAULT_PORTS: Record<string, number> = { MYSQL: 3306, MARIADB: 3306, POSTGRESQL: 5432 }
 
@@ -54,7 +55,7 @@ export default function ConnectionsPage() {
   })
   const connections = data?.data.data ?? []
 
-  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormData>({
+  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false },
   })

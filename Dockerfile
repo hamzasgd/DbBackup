@@ -3,22 +3,19 @@ FROM node:22-alpine AS build
 
 WORKDIR /app
 
-# Copy workspace root (package.json + yarn workspaces)
-COPY package.json yarn.lock ./
+# Copy workspace root (package.json + npm workspaces lockfile)
+COPY package.json package-lock.json ./
 COPY server/package.json server/
 COPY client/package.json client/
 
-RUN yarn install --frozen-lockfile
+RUN npm ci
 
 # Copy source
 COPY server/ server/
 COPY client/ client/
 
-# Build
-RUN yarn workspace dbbackup-server run build && yarn workspace client run build
-
-# Generate Prisma client
-RUN cd server && npx prisma generate
+# Build (server build runs `prisma generate` first)
+RUN npm run build -w dbbackup-server && npm run build -w client
 
 # ─── Runtime stage: slim image ─────────────────────────────────────────────
 FROM node:22-alpine
@@ -28,12 +25,13 @@ RUN apk add --no-cache mysql-client postgresql17-client mongodb-tools redis
 
 WORKDIR /app
 
-# Copy workspace root for module resolution
-COPY --from=build /app/package.json /app/yarn.lock ./
+# Copy workspace manifests for module resolution
+COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/server/package.json server/
+COPY --from=build /app/client/package.json client/
 
-# Install production dependencies only
-RUN yarn install --production --frozen-lockfile
+# Install production dependencies of the server workspace only
+RUN npm ci --omit=dev -w dbbackup-server && npm cache clean --force
 
 # Copy built artifacts
 COPY --from=build /app/server/dist server/dist/

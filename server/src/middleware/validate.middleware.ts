@@ -9,7 +9,7 @@ export function validate(schema: ZodSchema) {
       next();
     } catch (err) {
       if (err instanceof ZodError) {
-        const messages = err.errors.map(e => `${e.path.join('.')}: ${e.message}`);
+        const messages = err.issues.map(e => `${e.path.join('.')}: ${e.message}`);
         next(new AppError(messages.join('; '), 400));
       } else {
         next(err);

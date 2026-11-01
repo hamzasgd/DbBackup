@@ -7,13 +7,12 @@
     "server"
   ],
   "scripts": {
-    "dev": "concurrently \"yarn workspace dbbackup-server dev\" \"yarn workspace client dev\"",
-    "build": "yarn workspace dbbackup-server build && yarn workspace client build",
-    "install:all": "yarn install"
+    "dev": "concurrently \"npm run dev -w dbbackup-server\" \"npm run dev -w client\"",
+    "build": "npm run build -w dbbackup-server && npm run build -w client",
+    "test": "npm test -w dbbackup-server",
+    "install:all": "npm install"
   },
   "devDependencies": {
-    "@types/uuid": "^11.0.0",
     "concurrently": "^8.2.2"
-  },
-  "packageManager": "yarn@1.22.22"
+  }
 }
