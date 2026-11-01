@@ -6,6 +6,7 @@ import morgan from 'morgan';
 import path from 'path';
 import { rateLimit } from 'express-rate-limit';
 
+import { logger } from './config/logger';
 import { errorHandler } from './middleware/errorHandler';
 import { notFound } from './middleware/notFound';
 import authRoutes from './routes/auth.routes';
@@ -27,10 +28,20 @@ import { checkHealth } from './services/health.service';
 
 const app = express();
 
-// Behind nginx (aaPanel reverse proxy): trust X-Forwarded-* headers so
-// req.ip gets the real client IP — required for rate limiting, login
-// lockout and audit logging to work per-client instead of per-nginx.
-app.set('trust proxy', 1);
+// Behind a reverse proxy (nginx / aaPanel / Cloudflare): trust X-Forwarded-* so
+// req.ip is the real client IP — rate limiting, login lockout and audit logging
+// all key off it. Set TRUST_PROXY to the exact number of proxy hops in front of
+// the app (e.g. 2 for Cloudflare + nginx), an IP/subnet, or 'false' to disable.
+// Wrong hop counts let a client spoof its IP via X-Forwarded-For, so this is
+// deliberately configurable instead of hard-coded.
+const trustProxyEnv = process.env.TRUST_PROXY;
+app.set(
+  'trust proxy',
+  trustProxyEnv === undefined ? 1
+    : trustProxyEnv === 'false' ? false
+    : /^\d+$/.test(trustProxyEnv) ? Number(trustProxyEnv)
+    : trustProxyEnv,
+);
 
 // Security
 app.use(helmet({
@@ -39,7 +50,7 @@ app.use(helmet({
       defaultSrc: ["'self'"],
       scriptSrc: ["'self'", 'https://static.cloudflareinsights.com'],
       styleSrc: ["'self'", "'unsafe-inline'"], // Tailwind uses inline styles
-      imgSrc: ["'self'", 'data:', 'https:'],
+      imgSrc: ["'self'", 'data:'], // app images are local/inline SVG only
       connectSrc: ["'self'", 'https://cloudflareinsights.com'],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
@@ -48,6 +59,16 @@ app.use(helmet({
     },
   },
 }));
+
+// helmet doesn't set Permissions-Policy — lock down powerful features the app never uses
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=()');
+  next();
+});
+
+if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_URL) {
+  logger.warn('CLIENT_URL is not set — CORS falls back to http://localhost:5173, which blocks the real frontend. Set it to your site origin.');
+}
 app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:5173',
   credentials: true,
