@@ -9,11 +9,13 @@ interface User {
 
 interface AuthState {
   user: User | null
+  // Short-lived (15 min) access token. The refresh token is NOT kept here — it
+  // lives in an httpOnly cookie the browser sends automatically, so no durable
+  // credential is reachable from JavaScript.
   accessToken: string | null
-  refreshToken: string | null
   isAuthenticated: boolean
-  setAuth: (user: User, accessToken: string, refreshToken: string) => void
-  setTokens: (accessToken: string, refreshToken: string) => void
+  setAuth: (user: User, accessToken: string) => void
+  setAccessToken: (accessToken: string) => void
   logout: () => void
 }
 
@@ -22,24 +24,22 @@ export const useAuthStore = create<AuthState>()(
     (set) => ({
       user: null,
       accessToken: null,
-      refreshToken: null,
       isAuthenticated: false,
 
-      setAuth: (user, accessToken, refreshToken) =>
-        set({ user, accessToken, refreshToken, isAuthenticated: true }),
+      setAuth: (user, accessToken) =>
+        set({ user, accessToken, isAuthenticated: true }),
 
-      setTokens: (accessToken, refreshToken) =>
-        set({ accessToken, refreshToken }),
+      setAccessToken: (accessToken) =>
+        set({ accessToken }),
 
       logout: () =>
-        set({ user: null, accessToken: null, refreshToken: null, isAuthenticated: false }),
+        set({ user: null, accessToken: null, isAuthenticated: false }),
     }),
     {
       name: 'dbbackup-auth',
       partialize: (state) => ({
         user: state.user,
         accessToken: state.accessToken,
-        refreshToken: state.refreshToken,
         isAuthenticated: state.isAuthenticated,
       }),
     }

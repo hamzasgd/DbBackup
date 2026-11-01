@@ -1,13 +1,13 @@
 import api from '../lib/api'
 import type { PublicKeyCredentialCreationOptionsJSON, PublicKeyCredentialRequestOptionsJSON } from '@simplewebauthn/browser'
-import { useAuthStore } from '../store/auth.store'
 
 export const authApi = {
   register: (data: { name: string; email: string; password: string }) =>
     api.post('/auth/register', data),
   login: (data: { email: string; password: string }) =>
     api.post('/auth/login', data),
-  logout: () => api.post('/auth/logout', { refreshToken: useAuthStore.getState().refreshToken }),
+  // Refresh token lives in an httpOnly cookie, cleared server-side
+  logout: () => api.post('/auth/logout'),
   me: () => api.get('/auth/me'),
   togglePasswordLogin: (disabled: boolean) =>
     api.put<{ success: boolean; message: string }>('/auth/password-login', { disabled }),
@@ -31,7 +31,7 @@ export const authApi = {
   passkeyLoginOptions: () =>
     api.post<{ success: boolean; data: { options: PublicKeyCredentialRequestOptionsJSON } }>('/auth/passkey/login/options'),
   passkeyLoginVerify: (response: unknown) =>
-    api.post<{ success: boolean; data: { user: { id: string; name: string; email: string }; accessToken: string; refreshToken: string } }>('/auth/passkey/login/verify', { response }),
+    api.post<{ success: boolean; data: { user: { id: string; name: string; email: string }; accessToken: string } }>('/auth/passkey/login/verify', { response }),
 }
 
 export interface ActiveSession {

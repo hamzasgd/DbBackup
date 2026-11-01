@@ -17,6 +17,59 @@ import { logAudit } from '../services/audit.service';
 import { notify } from '../services/notification.service';
 import { isLoginLocked, recordLoginFailure, clearLoginFailures, recordAccountFailure, shouldNotifyFailure } from '../services/login-lockout.service';
 
+// ─── Refresh token transport: httpOnly cookie (not JS-readable) ──────────────
+// The refresh token is a 7-day credential; keeping it out of localStorage means
+// an XSS can't steal a durable session. It rides in an httpOnly, SameSite=Strict
+// cookie scoped to /api/auth, so browsers never expose it to scripts and never
+// send it cross-site. State-changing cookie endpoints also require a custom
+// header (CSRF defence: cross-origin callers can't set it without a preflight
+// that CORS blocks).
+const REFRESH_COOKIE = 'dbbk_refresh';
+const REFRESH_COOKIE_PATH = '/api/auth';
+const REFRESH_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+const CSRF_HEADER = 'x-dbbk-csrf';
+
+function refreshCookieOptions() {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'strict' as const,
+    path: REFRESH_COOKIE_PATH,
+  };
+}
+
+function setRefreshCookie(res: Response, token: string): void {
+  res.cookie(REFRESH_COOKIE, token, { ...refreshCookieOptions(), maxAge: REFRESH_MAX_AGE_MS });
+}
+
+function clearRefreshCookie(res: Response): void {
+  res.clearCookie(REFRESH_COOKIE, refreshCookieOptions());
+}
+
+/** Refresh token from the cookie, with a body fallback for clients from before the cookie rollout. */
+function readRefreshToken(req: Request): string {
+  // Parse the Cookie header directly (no cookie-parser dependency; only this one cookie is read)
+  const header = req.headers.cookie;
+  if (header) {
+    for (const part of header.split(';')) {
+      const eq = part.indexOf('=');
+      if (eq === -1) continue;
+      if (part.slice(0, eq).trim() === REFRESH_COOKIE) {
+        return decodeURIComponent(part.slice(eq + 1).trim());
+      }
+    }
+  }
+  const body = req.body as { refreshToken?: unknown };
+  return typeof body?.refreshToken === 'string' ? body.refreshToken : '';
+}
+
+/** Reject state-changing cookie requests that lack the custom header (CSRF defence). */
+function assertCsrfHeader(req: Request): void {
+  if (!req.headers[CSRF_HEADER]) {
+    throw new AppError('Missing CSRF header', 403);
+  }
+}
+
 
 /** Fire-and-forget login alert (email/Slack) respecting the user's notifyOnLogin toggle. */
 function sendLoginAlert(userId: string, event: 'LOGIN' | 'PASSKEY_LOGIN', email: string, ip: string | undefined, userAgent: string | string[] | undefined): void {
@@ -89,13 +142,14 @@ export async function register(req: Request, res: Response, next: NextFunction):
       select: { id: true, name: true, email: true, createdAt: true },
     });
 
-    const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+    const accessToken = generateAccessToken({ userId: user.id, email: user.email, tokenVersion: 0 });
     const refreshToken = generateRefreshToken({ userId: user.id, email: user.email });
     await saveRefreshToken(user.id, refreshToken);
+    setRefreshCookie(res, refreshToken);
 
     await logAudit(user.id, 'REGISTER', 'user', { email: user.email }, req.ip);
 
-    res.status(201).json({ success: true, data: { user, accessToken, refreshToken } });
+    res.status(201).json({ success: true, data: { user, accessToken } });
   } catch (err) {
     next(err);
   }
@@ -161,9 +215,10 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       return;
     }
 
-    const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+    const accessToken = generateAccessToken({ userId: user.id, email: user.email, tokenVersion: user.tokenVersion });
     const refreshToken = generateRefreshToken({ userId: user.id, email: user.email });
     await saveRefreshToken(user.id, refreshToken, req.ip, req.headers['user-agent']);
+    setRefreshCookie(res, refreshToken);
 
     await logAudit(user.id, 'LOGIN', 'user', { email: user.email }, req.ip, req.headers['user-agent']);
     sendLoginAlert(user.id, 'LOGIN', user.email, req.ip, req.headers['user-agent']);
@@ -173,7 +228,6 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
       data: {
         user: { id: user.id, name: user.name, email: user.email },
         accessToken,
-        refreshToken,
       },
     });
   } catch (err) {
@@ -183,7 +237,8 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
 
 export async function refreshToken(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { refreshToken: token } = req.body;
+    assertCsrfHeader(req);
+    const token = readRefreshToken(req);
     if (!token) throw new AppError('Refresh token required', 400);
 
     // Use a transaction to prevent race conditions when multiple 401 retries
@@ -194,34 +249,46 @@ export async function refreshToken(req: Request, res: Response, next: NextFuncti
         throw new AppError('Invalid or expired refresh token', 401);
       }
 
-      // Revoke the old token inside the transaction
+      // Revoke the old token inside the transaction (single-use refresh)
       await tx.refreshToken.delete({ where: { id: existing.id } });
 
       const payload = verifyRefreshToken(token);
 
-      const newAccessToken = generateAccessToken({ userId: payload.userId, email: payload.email });
-      const newRefreshToken = generateRefreshToken({ userId: payload.userId, email: payload.email });
+      // Reject if the user is gone/inactive, and stamp the current tokenVersion
+      const user = await tx.user.findUnique({
+        where: { id: payload.userId },
+        select: { id: true, email: true, isActive: true, tokenVersion: true },
+      });
+      if (!user || !user.isActive) {
+        throw new AppError('Invalid or expired refresh token', 401);
+      }
+
+      const newAccessToken = generateAccessToken({ userId: user.id, email: user.email, tokenVersion: user.tokenVersion });
+      const newRefreshToken = generateRefreshToken({ userId: user.id, email: user.email });
 
       const expiresAt = new Date();
       expiresAt.setDate(expiresAt.getDate() + 7);
 
       await tx.refreshToken.create({
-        data: { id: uuidv4(), token: hashRefreshToken(newRefreshToken), userId: payload.userId, expiresAt, ipAddress: req.ip, userAgent: req.headers['user-agent'] },
+        data: { id: uuidv4(), token: hashRefreshToken(newRefreshToken), userId: user.id, expiresAt, ipAddress: req.ip, userAgent: req.headers['user-agent'] },
       });
 
       return { accessToken: newAccessToken, refreshToken: newRefreshToken };
     });
 
-    res.json({ success: true, data: result });
+    setRefreshCookie(res, result.refreshToken);
+    res.json({ success: true, data: { accessToken: result.accessToken } });
   } catch (err) {
+    // A bad/expired refresh token is dead — drop the cookie so the browser stops resending it
+    if (err instanceof AppError && err.statusCode === 401) clearRefreshCookie(res);
     next(err);
   }
 }
 
 export async function logout(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
-    const body = req.body as { refreshToken?: unknown };
-    const token = typeof body?.refreshToken === 'string' ? body.refreshToken : '';
+    assertCsrfHeader(req);
+    const token = readRefreshToken(req);
     let userId: string | null = null;
     try {
       userId = verifyRefreshToken(token).userId;
@@ -229,6 +296,7 @@ export async function logout(req: Request, res: Response, next: NextFunction): P
       /* missing, expired or invalid token — still a logout, just unattributable */
     }
     await revokeRefreshToken(token);
+    clearRefreshCookie(res);
     await logAudit(userId, 'LOGOUT', 'user', {}, req.ip, req.headers['user-agent']);
     res.json({ success: true, message: 'Logged out successfully' });
   } catch (err) {
@@ -264,8 +332,10 @@ export async function changePassword(req: Request & { user?: { userId: string; e
     // manages to change the password cannot immediately sign back in.
     const lockdownHours = Math.max(0, parseFloat(process.env.PASSWORD_CHANGE_LOCKDOWN_HOURS ?? '2') || 0);
     const loginLockedUntil = lockdownHours > 0 ? new Date(Date.now() + lockdownHours * 60 * 60 * 1000) : null;
-    await prisma.user.update({ where: { id: user.id }, data: { passwordHash, loginLockedUntil } });
+    // Bump tokenVersion so existing access tokens stop working immediately (not after their 15-min TTL)
+    await prisma.user.update({ where: { id: user.id }, data: { passwordHash, loginLockedUntil, tokenVersion: { increment: 1 } } });
     await revokeAllUserTokens(user.id);
+    clearRefreshCookie(res);
 
     await logAudit(user.id, 'PASSWORD_CHANGE', 'user', { email: user.email, sessionsRevoked: true, loginLockedUntil }, req.ip, req.headers['user-agent']);
 
@@ -335,6 +405,9 @@ export async function revokeSession(req: Request & { user?: { userId: string } }
 export async function revokeAllSessions(req: Request & { user?: { userId: string } }, res: Response, next: NextFunction): Promise<void> {
   try {
     const deleted = await prisma.refreshToken.deleteMany({ where: { userId: req.user!.userId } });
+    // Invalidate every outstanding access token too, not just refresh tokens
+    await prisma.user.update({ where: { id: req.user!.userId }, data: { tokenVersion: { increment: 1 } } });
+    clearRefreshCookie(res);
     await logAudit(req.user!.userId, 'SESSIONS_REVOKE_ALL', 'user', { count: deleted.count }, req.ip, req.headers['user-agent']);
     res.json({ success: true, message: `Revoked ${deleted.count} session(s). You will need to log in again.` });
   } catch (err) {
@@ -450,9 +523,10 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
       return;
     }
 
-    const accessToken = generateAccessToken({ userId: user.id, email: user.email });
+    const accessToken = generateAccessToken({ userId: user.id, email: user.email, tokenVersion: user.tokenVersion });
     const refreshToken = generateRefreshToken({ userId: user.id, email: user.email });
     await saveRefreshToken(user.id, refreshToken, req.ip, req.headers['user-agent']);
+    setRefreshCookie(res, refreshToken);
 
     await logAudit(user.id, 'PASSKEY_LOGIN', 'user', { email: user.email }, req.ip, req.headers['user-agent']);
     sendLoginAlert(user.id, 'PASSKEY_LOGIN', user.email, req.ip, req.headers['user-agent']);
@@ -462,7 +536,6 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
       data: {
         user: { id: user.id, name: user.name, email: user.email },
         accessToken,
-        refreshToken,
       },
     });
   } catch (err) {

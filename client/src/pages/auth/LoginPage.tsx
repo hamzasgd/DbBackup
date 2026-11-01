@@ -28,9 +28,9 @@ export default function LoginPage() {
   const onSubmit = async (data: FormData) => {
     try {
       const res = await authApi.login(data)
-      const { user, accessToken, refreshToken } = res.data.data
+      const { user, accessToken } = res.data.data
       queryClient.clear()
-      setAuth(user, accessToken, refreshToken)
+      setAuth(user, accessToken)
       toast.success(`Welcome back, ${user.name}!`)
       navigate('/dashboard')
     } catch (err: unknown) {
@@ -47,9 +47,9 @@ export default function LoginPage() {
       const opts = await authApi.passkeyLoginOptions()
       const assertion = await startAuthentication({ optionsJSON: opts.data.data.options })
       const res = await authApi.passkeyLoginVerify(assertion)
-      const { user, accessToken, refreshToken } = res.data.data
+      const { user, accessToken } = res.data.data
       queryClient.clear()
-      setAuth(user, accessToken, refreshToken)
+      setAuth(user, accessToken)
       toast.success(`Welcome back, ${user.name}!`)
       navigate('/dashboard')
     } catch (err: unknown) {

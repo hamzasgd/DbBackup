@@ -4,7 +4,10 @@ import { queryClient } from './queryClient'
 
 const api = axios.create({
   baseURL: '/api',
-  withCredentials: true,
+  withCredentials: true, // send the httpOnly refresh cookie on /api/auth calls
+  // Custom header the server requires on cookie endpoints (refresh/logout).
+  // Cross-origin callers can't set it without a CORS preflight we don't allow → CSRF defence.
+  headers: { 'X-DBBK-CSRF': '1' },
 })
 
 // Attach access token to every request
@@ -23,11 +26,12 @@ function doRefresh(): Promise<string> {
   if (refreshPromise) return refreshPromise
 
   refreshPromise = (async () => {
-    const refreshToken = useAuthStore.getState().refreshToken
-    if (!refreshToken) throw new Error('No refresh token')
-
-    const { data } = await axios.post('/api/auth/refresh', { refreshToken })
-    useAuthStore.getState().setTokens(data.data.accessToken, data.data.refreshToken)
+    // The refresh token rides in the httpOnly cookie; no body needed.
+    const { data } = await axios.post('/api/auth/refresh', {}, {
+      withCredentials: true,
+      headers: { 'X-DBBK-CSRF': '1' },
+    })
+    useAuthStore.getState().setAccessToken(data.data.accessToken)
     return data.data.accessToken as string
   })().finally(() => {
     refreshPromise = null

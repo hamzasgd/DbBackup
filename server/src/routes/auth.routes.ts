@@ -8,7 +8,7 @@ import {
 } from '../controllers/auth.controller';
 import { authenticate } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
-import { registerSchema, loginSchema, changePasswordSchema, refreshTokenSchema, logoutSchema } from '../middleware/validation.schemas';
+import { registerSchema, loginSchema, changePasswordSchema } from '../middleware/validation.schemas';
 
 const router = Router();
 
@@ -23,8 +23,10 @@ const authLimiter = rateLimit({
 
 router.post('/register', authLimiter, validate(registerSchema), register);
 router.post('/login', authLimiter, validate(loginSchema), login);
-router.post('/refresh', authLimiter, validate(refreshTokenSchema), refreshToken);
-router.post('/logout', validate(logoutSchema), logout);
+// Refresh/logout read the token from the httpOnly cookie (body validation would
+// reject the now-bodyless request); the controller enforces the CSRF header.
+router.post('/refresh', authLimiter, refreshToken);
+router.post('/logout', logout);
 router.get('/me', authenticate, getMe);
 router.put('/change-password', authenticate, validate(changePasswordSchema), changePassword);
 
