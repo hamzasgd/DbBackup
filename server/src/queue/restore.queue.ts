@@ -7,8 +7,8 @@ import { logger } from '../config/logger';
 import { publishProgress, RESTORE_PROGRESS_CHANNEL } from '../services/sse.service';
 import { notify } from '../services/notification.service';
 import { ensureLocalBackupFile, cleanupTempFile } from '../services/storage.service';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { logAudit } from '../services/audit.service';
+import { toEngineConfig, type StoredConnection } from '../services/engines/connection-config';
 
 export const RESTORE_QUEUE_NAME = 'restores';
 
@@ -36,38 +36,8 @@ export async function addRestoreJob(data: RestoreJobData): Promise<void> {
   });
 }
 
-function buildConnectionConfig(conn: {
-  type: string;
-  port: number;
-  sslEnabled: boolean;
-  sshEnabled: boolean;
-  sshPort: number | null;
-  host: string;
-  username: string;
-  password: string | null;
-  database: string;
-  sshHost: string | null;
-  sshUsername: string | null;
-  sshPrivateKey: string | null;
-  sshPrivateKeyPath: string | null;
-  sshPassphrase: string | null;
-}): ConnectionConfig {
-  return {
-    type: conn.type as ConnectionConfig['type'],
-    host: decrypt(conn.host),
-    port: conn.port,
-    username: decrypt(conn.username),
-    password: conn.password ? decrypt(conn.password) : undefined,
-    database: decrypt(conn.database),
-    sslEnabled: conn.sslEnabled,
-    sshEnabled: conn.sshEnabled,
-    sshHost: decryptIfPresent(conn.sshHost) || undefined,
-    sshPort: conn.sshPort || 22,
-    sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-    sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-    sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-  };
+function buildConnectionConfig(conn: StoredConnection): ConnectionConfig {
+  return toEngineConfig(conn);
 }
 
 export function createRestoreWorker(): Worker<RestoreJobData> {

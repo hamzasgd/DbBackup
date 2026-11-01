@@ -4,10 +4,10 @@ import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 import { notify } from './notification.service';
 import { logAudit } from './audit.service';
-import { decrypt, decryptIfPresent } from './crypto.service';
 import { engineFactory } from './engines/engine.factory';
 import { ConnectionConfig } from './engines/base.engine';
 import { ensureLocalBackupFile, cleanupTempFile } from './storage.service';
+import { toEngineConfig } from './engines/connection-config';
 
 /**
  * Restore drill — the backup community's #1 gap: untested restores.
@@ -51,22 +51,7 @@ async function runDrill(drillId: string, userId: string, backupId: string): Prom
     const conn = await prisma.connection.findUnique({ where: { id: backup.connectionId } });
     if (!conn) throw new Error('Source connection no longer exists');
 
-    const config: ConnectionConfig = {
-      type: conn.type as ConnectionConfig['type'],
-      host: decrypt(conn.host),
-      port: conn.port,
-      username: decrypt(conn.username),
-      password: conn.password ? decrypt(conn.password) : undefined,
-      database: decrypt(conn.database),
-      sslEnabled: conn.sslEnabled,
-      sshEnabled: conn.sshEnabled,
-      sshHost: decryptIfPresent(conn.sshHost) || undefined,
-      sshPort: conn.sshPort || 22,
-      sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-      sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-    };
+    const config: ConnectionConfig = toEngineConfig(conn);
     const engine = engineFactory(config);
 
     // 1. Resolve a local plaintext copy (downloads from S3/Drive, decrypts .enc)

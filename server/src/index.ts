@@ -7,6 +7,8 @@ import { prisma } from './config/database';
 import { initCrypto } from './services/crypto.service';
 import fs from 'fs';
 import path from 'path';
+import { upgradeLegacyRefreshTokens } from './services/token.service';
+import { markWorkersStarted } from './services/health.service';
 
 /** Loud warnings for common environment-file exposure mistakes. */
 function auditEnvFileSecurity(): void {
@@ -29,6 +31,23 @@ function auditEnvFileSecurity(): void {
 import { ensureStorageDir, getStoragePath } from './services/storage.service';
 import { cleanupOrphanedDrills } from './services/restore-drill.service';
 
+/**
+ * The app keeps state in process memory (passkey challenges, login lockouts,
+ * rate limits, real-time sync polling, restore drills). A second copy of the
+ * process would split that state: passkey logins fail at random, lockouts and
+ * rate limits can be bypassed, and every real-time sync runs twice.
+ * So refuse to start any pm2 instance other than the first.
+ */
+function refuseExtraInstances(): void {
+  const instance = process.env.NODE_APP_INSTANCE;
+  if (instance === undefined || instance === '0' || process.env.ALLOW_MULTIPLE_INSTANCES === 'true') return;
+  logger.error(
+    `❌ Refusing to start pm2 instance ${instance}: DbBackup must run as a single process. ` +
+    'Use exec_mode "fork" with instances: 1 (see ecosystem.config.cjs), then: pm2 delete <name> && pm2 start ecosystem.config.cjs',
+  );
+  process.exit(1);
+}
+
 const PORT = process.env.PORT || 3001;
 
 // Last-resort: a crash on an unhandled stream error (EPIPE etc.) takes the
@@ -42,12 +61,16 @@ process.on('unhandledRejection', (reason) => {
 
 async function bootstrap() {
   try {
+    refuseExtraInstances();
     auditEnvFileSecurity();
     await initCrypto();
     ensureStorageDir(getStoragePath());
     await cleanupOrphanedDrills();
+    const upgraded = await upgradeLegacyRefreshTokens();
+    if (upgraded > 0) logger.info(`🔐 Hashed ${upgraded} refresh token(s) stored in plain text by an older version`);
     await connectRedis();
     await startWorkers();
+    markWorkersStarted();
 
     const server = app.listen(PORT, () => {
       logger.info(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV}]`);

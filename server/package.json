@@ -8,6 +8,7 @@
     "start": "node dist/index.js",
     "test": "vitest --run --project unit",
     "test:integration": "vitest --run --project integration",
+    "test:e2e": "vitest --run --project e2e",
     "test:all": "vitest --run",
     "test:watch": "vitest --project unit",
     "test:ui": "vitest --ui",
@@ -56,6 +57,7 @@
     "@types/ssh2": "^1.15.0",
     "@vitest/ui": "^4.1.0",
     "fast-check": "^4.6.0",
+    "mongodb": "^6.21.0",
     "tsx": "^4.7.1",
     "typescript": "^5.4.2",
     "vitest": "^4.1.0"

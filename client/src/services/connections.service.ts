@@ -10,7 +10,14 @@ export interface Connection {
   password: string
   database: string
   sslEnabled: boolean
+  /** PEM CA certificate used to verify the server (not secret) */
+  sslCa?: string | null
+  sslCert?: string | null
+  /** The client key itself is never sent back */
+  hasSslKey?: boolean
   sshEnabled: boolean
+  /** Pinned SSH host key fingerprint ("SHA256:…"), set on the first connect */
+  sshHostKey?: string | null
   heartbeatEnabled?: boolean
   expectedBackupHours?: number | null
   latestHeartbeat?: { status: string; latencyMs: number | null; checkedAt: string } | null
@@ -30,6 +37,9 @@ export interface CreateConnectionPayload {
   password?: string
   database: string
   sslEnabled?: boolean
+  sslCa?: string | null
+  sslCert?: string | null
+  sslKey?: string | null
   sshEnabled?: boolean
   sshHost?: string | null
   sshPort?: number | null
@@ -109,7 +119,8 @@ export const connectionsApi = {
   create: (data: CreateConnectionPayload) => api.post<{ success: boolean; data: Connection }>('/connections', data),
   update: (id: string, data: Partial<CreateConnectionPayload>) => api.put<{ success: boolean; data: Connection }>(`/connections/${id}`, data),
   delete: (id: string, deleteBackups = false) => api.delete(`/connections/${id}${deleteBackups ? '?deleteBackups=true' : ''}`),
-  test: (id: string) => api.post<{ success: boolean; data: { success: boolean; version: string; message: string } }>(`/connections/${id}/test`),
+  test: (id: string) => api.post<{ success: boolean; data: { success: boolean; version: string; message: string; warning?: string } }>(`/connections/${id}/test`),
+  resetSshHostKey: (id: string) => api.post<{ success: boolean; message: string }>(`/connections/${id}/ssh-host-key/reset`),
   getInfo: (id: string) => api.get<{ success: boolean; data: DbInfo }>(`/connections/${id}/info`),
   heartbeat: (id: string) =>
     api.get<{ success: boolean; data: {

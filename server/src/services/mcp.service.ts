@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
-import { decrypt, decryptIfPresent } from './crypto.service';
+import { decrypt } from './crypto.service';
 import { engineFactory } from './engines/engine.factory';
 import { addBackupJob } from '../queue/backup.queue';
 import { getHeartbeatSummary } from './heartbeat.service';
@@ -9,6 +9,7 @@ import { getStorageUsage } from './storage-alerts.service';
 import { deleteBackupArtifact } from './storage.service';
 import { verifyBackup } from './verification.service';
 import path from 'path';
+import { toEngineConfig, type StoredConnection } from './engines/connection-config';
 
 /**
  * MCP (Model Context Protocol) tool registry.
@@ -42,28 +43,8 @@ function short(s: unknown, n = 400): string {
   return str.length > n ? `${str.slice(0, n)}…` : str;
 }
 
-function buildEngineConfig(conn: {
-  type: string; host: string; port: number; username: string; password: string | null;
-  database: string; sslEnabled: boolean; sshEnabled: boolean; sshHost: string | null;
-  sshPort: number | null; sshUsername: string | null; sshPrivateKey: string | null;
-  sshPrivateKeyPath: string | null; sshPassphrase: string | null;
-}) {
-  return {
-    type: conn.type as Parameters<typeof engineFactory>[0]['type'],
-    host: decrypt(conn.host),
-    port: conn.port,
-    username: decrypt(conn.username),
-    password: conn.password ? decrypt(conn.password) : undefined,
-    database: decrypt(conn.database),
-    sslEnabled: conn.sslEnabled,
-    sshEnabled: conn.sshEnabled,
-    sshHost: decryptIfPresent(conn.sshHost) || undefined,
-    sshPort: conn.sshPort || 22,
-    sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-    sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-    sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-  };
+function buildEngineConfig(conn: StoredConnection) {
+  return toEngineConfig(conn);
 }
 
 async function ownedConnection(ctx: McpToolContext, connectionId: unknown) {

@@ -1,23 +1,26 @@
 import { spawn } from 'child_process';
-import { createWriteStream, statSync } from 'fs';
-import { createGzip } from 'zlib';
+import { statSync } from 'fs';
 import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
+import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
+import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 
 export class MySQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
     return `\`${identifier.replace(/`/g, '``')}\``;
   }
 
-  private getArgs(): string[] {
+  /** Connection + TLS arguments for the mysql / mysqldump / mariadb-dump CLI `bin`. */
+  private getArgs(bin: string, files: TlsFiles): string[] {
     const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
     const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
     return [
       `-h${host}`,
       `-P${port}`,
       `-u${this.config.username}`,
+      ...mysqlCliTlsArgs(this.config, bin, !!this.config.sshEnabled, files),
     ];
   }
 
@@ -25,18 +28,13 @@ export class MySQLEngine extends BaseEngine {
     return { ...process.env, MYSQL_PWD: this.config.password ?? undefined };
   }
 
-  private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
-    if (!this.config.sslEnabled) return undefined;
-    if (this.config.sslCa) {
-      return { rejectUnauthorized: true, ca: this.config.sslCa };
-    }
-    // No CA provided - warn and allow self-signed
-    console.warn('SSL enabled but no CA cert provided - using rejectUnauthorized: false');
-    return { rejectUnauthorized: false };
+  private getSslOptions() {
+    return nodeTlsOptions(this.config, 'mysql2');
   }
 
   async testConnection(): Promise<TestConnectionResult> {
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -47,7 +45,7 @@ export class MySQLEngine extends BaseEngine {
       return await new Promise((resolve, reject) => {
         const timeout = this.config.connectionTimeout ? Math.floor(this.config.connectionTimeout / 1000) : 30;
         const proc = spawn('mysql', [
-          ...this.getArgs(),
+          ...this.getArgs('mysql', files),
           `--connect-timeout=${timeout}`,
           '-e', 'SELECT VERSION() as version;',
           '--batch', '--skip-column-names',
@@ -69,6 +67,7 @@ export class MySQLEngine extends BaseEngine {
       });
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
@@ -78,6 +77,7 @@ export class MySQLEngine extends BaseEngine {
     const useGzip = format !== 'PLAIN_SQL';
 
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -93,37 +93,17 @@ export class MySQLEngine extends BaseEngine {
 
       onProgress?.(5);
 
-      await new Promise<void>((resolve, reject) => {
-        const dumpCmd = this.config.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
-        const dump = spawn(dumpCmd, [
-          ...this.getArgs(),
-          '--single-transaction',
-          '--routines',
-          '--triggers',
-          '--events',
-          '--set-charset',
-          '--add-drop-table',
-          this.config.database,
-        ], { env: this.getEnv() });
-
-        const fileStream = createWriteStream(filePath);
-        const outStream = useGzip ? createGzip() : fileStream;
-        if (useGzip) (outStream as ReturnType<typeof createGzip>).pipe(fileStream);
-        dump.stdout.pipe(outStream as NodeJS.WritableStream);
-
-        let error = '';
-        dump.stderr.on('data', (d) => {
-          const msg = d.toString();
-          if (!msg.includes('Warning')) error += msg;
-        });
-
-        fileStream.on('finish', resolve);
-        if (!useGzip) dump.stdout.on('end', () => fileStream.end());
-        dump.on('close', (code) => {
-          if (code !== 0) reject(new Error(`${dumpCmd} failed: ${error}`));
-        });
-        dump.on('error', reject);
-      });
+      const dumpCmd = this.config.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
+      await dumpToFile(dumpCmd, [
+        ...this.getArgs(dumpCmd, files),
+        '--single-transaction',
+        '--routines',
+        '--triggers',
+        '--events',
+        '--set-charset',
+        '--add-drop-table',
+        this.config.database,
+      ], this.getEnv(), filePath, useGzip, (msg) => !msg.includes('Warning'));
 
       onProgress?.(95);
       const stats = statSync(filePath);
@@ -131,11 +111,13 @@ export class MySQLEngine extends BaseEngine {
       return { fileName, filePath, fileSize: stats.size };
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
   async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -147,7 +129,7 @@ export class MySQLEngine extends BaseEngine {
       const isGzip = backupFilePath.endsWith('.gz');
 
       await new Promise<void>((resolve, reject) => {
-        const mysqlArgs = [...this.getArgs(), dbName];
+        const mysqlArgs = [...this.getArgs('mysql', files), dbName];
         const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';
@@ -194,6 +176,7 @@ export class MySQLEngine extends BaseEngine {
       });
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
@@ -521,9 +504,9 @@ export class MySQLEngine extends BaseEngine {
   }
 }
 
-export class MariaDBEngine extends MySQLEngine {
-  async backup(outputDir: string): Promise<BackupResult> {
-    // Try mariadb-dump first, fall back to mysqldump
-    return super.backup(outputDir);
-  }
-}
+/**
+ * MariaDB uses the same code path; MySQLEngine picks `mariadb-dump` for this type.
+ * (An override here used to drop the backup options, so MariaDB backups ignored the
+ * chosen format, always produced .sql.gz, and never reported progress.)
+ */
+export class MariaDBEngine extends MySQLEngine {}

@@ -1,8 +1,9 @@
 import { Pool } from 'pg';
-import { spawn } from 'child_process';
 import { ConnectionConfig } from '../../engines/base.engine';
 import { getEngineHostPort } from '../utils/engine-host';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
+import { TlsFiles, nodeTlsOptions, pgCliTls } from '../../engines/tls';
+import { runPipe } from '../utils/process-pipe';
 
 /**
  * Get table metadata from PostgreSQL database.
@@ -58,8 +59,60 @@ export async function getPGTableMeta(pool: Pool, tables: string[]): Promise<Tabl
   return result;
 }
 
+interface PgSide {
+  conn: string[];
+  env: NodeJS.ProcessEnv;
+  pool: () => Pool;
+}
+
+function pgSide(cfg: ConnectionConfig, ref: { host: string; port: number }, files: TlsFiles): PgSide {
+  const tls = pgCliTls(cfg, ref.host, files);
+  return {
+    // Passwords and TLS settings go through the environment, never argv (argv is visible in `ps`)
+    conn: ['-h', tls.host, '-p', String(ref.port), '-U', cfg.username, '-d', cfg.database, '--no-password'],
+    env: { ...process.env, PGPASSWORD: cfg.password || undefined, ...tls.env },
+    pool: () => new Pool({
+      host: ref.host, port: ref.port, user: cfg.username, password: cfg.password ?? undefined,
+      database: cfg.database, ssl: nodeTlsOptions(cfg), max: 1, connectionTimeoutMillis: 15000,
+    }),
+  };
+}
+
+interface QualifiedTable { schema: string; name: string }
+
+async function listUserTables(side: PgSide): Promise<QualifiedTable[]> {
+  const pool = side.pool();
+  try {
+    const { rows } = await pool.query(
+      `SELECT n.nspname AS schema, c.relname AS name
+         FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE c.relkind IN ('r', 'p')
+          AND NOT c.relispartition
+          AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+          AND n.nspname NOT LIKE 'pg_toast%'
+          AND n.nspname NOT LIKE 'pg_temp%'`,
+    );
+    return rows as QualifiedTable[];
+  } finally {
+    await pool.end();
+  }
+}
+
+/** Exact-match pattern for pg_dump -t (double quotes disable pattern characters and keep case). */
+function tablePattern(t: QualifiedTable): string {
+  const q = (v: string) => `"${v.replace(/"/g, '""')}"`;
+  return `${q(t.schema)}.${q(t.name)}`;
+}
+
 /**
  * Migrate PostgreSQL to PostgreSQL using piped pg_dump -> psql.
+ *
+ * 1. Schema: tables missing on the target are created first. An empty target
+ *    gets the full source schema (types, sequences, functions, constraints);
+ *    a target that already has some tables gets only the missing ones.
+ * 2. Data: a data-only dump of the selected tables (all when none selected).
+ *    Existing rows on the target are not removed, so duplicate keys stop the
+ *    migration with an error instead of mixing data.
  */
 export async function migratePG2PG(
   src: ConnectionConfig,
@@ -68,92 +121,86 @@ export async function migratePG2PG(
 ): Promise<{ rowsMigrated: number }> {
   const srcRef = await getEngineHostPort(src);
   const dstRef = await getEngineHostPort(dst);
+  const files = new TlsFiles();
 
   try {
-    return await new Promise((resolve, reject) => {
-      // Note: --clean cannot be combined with --data-only (pg_dump rejects it),
-      // so this is a pure data copy into an existing target schema.
-      const srcArgs = [
-        '-h', srcRef.host,
-        '-p', String(srcRef.port),
-        '-U', src.username,
-        '-d', src.database,
-        '--no-password',
-        '--data-only',
-        '--rows-per-insert=1000',
-      ];
+    const source = pgSide(src, srcRef, files);
+    const target = pgSide(dst, dstRef, files);
+    const psql = (extra: string[] = []) => ({ cmd: 'psql', args: [...target.conn, '-q', '-v', 'ON_ERROR_STOP=1', ...extra], env: target.env });
 
-      const dstArgs = [
-        '-h', dstRef.host,
-        '-p', String(dstRef.port),
-        '-U', dst.username,
-        '-d', dst.database,
-        '--no-password',
-        '-v', 'ON_ERROR_STOP=1',
-      ];
+    // ── which tables
+    const sourceTables = await listUserTables(source);
+    const wanted = opts.tables?.length
+      ? sourceTables.filter((t) => opts.tables!.includes(t.name) || opts.tables!.includes(`${t.schema}.${t.name}`))
+      : sourceTables;
+    if (opts.tables?.length && wanted.length === 0) {
+      throw new Error(`None of the selected tables exist in the source database: ${opts.tables.join(', ')}`);
+    }
+    const selectArgs = opts.tables?.length ? wanted.flatMap((t) => ['-t', tablePattern(t)]) : [];
 
-      // Passwords go through the environment, never argv (argv is visible in `ps`).
-      const srcEnv = { ...process.env, PGPASSWORD: src.password || undefined };
-      const dstEnv = { ...process.env, PGPASSWORD: dst.password || undefined };
+    // ── schema
+    const targetTables = await listUserTables(target);
+    const existing = new Set(targetTables.map((t) => `${t.schema}.${t.name}`));
+    const missing = wanted.filter((t) => !existing.has(`${t.schema}.${t.name}`));
 
+    if (missing.length > 0) {
       opts.onProgress?.({
-        currentTable: 'Starting pg_dump pipe...',
-        tablesCompleted: 0,
-        tableCount: 1,
-        rowsMigrated: 0,
-        progress: 10,
+        currentTable: `Creating ${missing.length} missing table(s) on the target...`,
+        tablesCompleted: 0, tableCount: wanted.length, rowsMigrated: 0, progress: 10,
       });
-
-      const dump = spawn('pg_dump', srcArgs, { env: srcEnv });
-      const restore = spawn('psql', dstArgs, { env: dstEnv });
-
-      let dumpError = '';
-      let restoreError = '';
-      let dumpExitCode: number | null | undefined;
-      let restoreExitCode: number | null | undefined;
-
-      dump.stderr.on('data', (d) => {
-        dumpError += d.toString();
-      });
-
-      restore.stderr.on('data', (d) => {
-        restoreError += d.toString();
-      });
-
-      // If psql dies early, pg_dump gets EPIPE on stdout; don't crash on it.
-      restore.stdin.on('error', () => { /* reported via exit codes below */ });
-
-      dump.stdout.pipe(restore.stdin);
-
-      // Decide only after BOTH processes have exited: psql can exit 0 on a
-      // truncated stream, so a failed pg_dump must fail the migration too.
-      const finish = () => {
-        if (dumpExitCode === undefined || restoreExitCode === undefined) return;
-        if (dumpExitCode !== 0) {
-          reject(new Error(`pg_dump failed: ${dumpError || `exit code ${dumpExitCode}`}`));
-          return;
+      const schemaDump = ['--schema-only', '--no-owner', '--no-privileges'];
+      if (targetTables.length === 0 && !opts.tables?.length) {
+        // Empty target: copy the whole schema, including types, functions and sequences
+        await runPipe({ cmd: 'pg_dump', args: [...source.conn, ...schemaDump], env: source.env }, psql(), 'Schema copy');
+      } else {
+        // Partly populated target: create only the missing tables (schemas first; pg_dump -t omits CREATE SCHEMA)
+        const schemas = [...new Set(missing.map((t) => t.schema))];
+        const pool = target.pool();
+        try {
+          for (const schema of schemas) await pool.query(`CREATE SCHEMA IF NOT EXISTS "${schema.replace(/"/g, '""')}"`);
+        } finally {
+          await pool.end();
         }
-        if (restoreExitCode === 0) {
-          opts.onProgress?.({
-            currentTable: 'Finished',
-            tablesCompleted: 1,
-            tableCount: 1,
-            rowsMigrated: -1,
-            progress: 100,
-          });
-          resolve({ rowsMigrated: -1 });
-        } else {
-          reject(new Error(`PostgreSQL restore failed: ${restoreError || dumpError}`));
+        try {
+          await runPipe(
+            { cmd: 'pg_dump', args: [...source.conn, ...schemaDump, ...missing.flatMap((t) => ['-t', tablePattern(t)])], env: source.env },
+            psql(),
+            'Schema copy',
+          );
+        } catch (err) {
+          // pg_dump -t copies tables, their indexes, constraints and triggers, but not the
+          // types or functions they use; those must already exist on the target.
+          throw new Error(
+            `Could not create the missing tables (${missing.map((t) => `${t.schema}.${t.name}`).join(', ')}) on the target: ` +
+            `${err instanceof Error ? err.message : String(err)}. ` +
+            'Types, functions and other objects these tables use are only copied when the target database is empty. ' +
+            'Migrate into an empty database, or create those objects on the target first.',
+          );
         }
-      };
+      }
+    }
 
-      dump.on('close', (code) => { dumpExitCode = code; finish(); });
-      restore.on('close', (code) => { restoreExitCode = code; finish(); });
-
-      dump.on('error', reject);
-      restore.on('error', reject);
+    // ── data
+    opts.onProgress?.({
+      currentTable: 'Copying data (pg_dump pipe)...',
+      tablesCompleted: 0, tableCount: wanted.length, rowsMigrated: 0, progress: 30,
     });
+    await runPipe(
+      { cmd: 'pg_dump', args: [...source.conn, '--data-only', '--no-owner', '--rows-per-insert=1000', ...selectArgs], env: source.env },
+      psql(),
+      'Data copy',
+    );
+
+    opts.onProgress?.({
+      currentTable: 'Finished',
+      tablesCompleted: wanted.length,
+      tableCount: wanted.length,
+      rowsMigrated: -1,
+      progress: 100,
+    });
+    return { rowsMigrated: -1 };
   } finally {
+    files.cleanup();
     if (srcRef.tunnel) srcRef.tunnel.close();
     if (dstRef.tunnel) dstRef.tunnel.close();
   }

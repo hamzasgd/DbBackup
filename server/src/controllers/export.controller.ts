@@ -2,9 +2,9 @@ import { Response, NextFunction } from 'express';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { exportMySQL, exportPostgres, ExportFormat } from '../services/export.service';
 import { SSHTunnel } from '../services/ssh.service';
+import { toEngineConfig } from '../services/engines/connection-config';
 
 export async function exportTableData(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   let tunnel: SSHTunnel | null = null;
@@ -24,22 +24,7 @@ export async function exportTableData(req: AuthRequest, res: Response, next: Nex
     });
     if (!conn) throw new AppError('Connection not found', 404);
 
-    const config = {
-      type: conn.type,
-      host: decrypt(conn.host),
-      port: conn.port,
-      username: decrypt(conn.username),
-      password: decrypt(conn.password),
-      database: decrypt(conn.database),
-      sslEnabled: conn.sslEnabled,
-      sshEnabled: conn.sshEnabled,
-      sshHost: decryptIfPresent(conn.sshHost) || undefined,
-      sshPort: conn.sshPort || 22,
-      sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-      sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-    };
+    const config = toEngineConfig(conn);
 
     if (config.sshEnabled) {
       tunnel = new SSHTunnel(config);

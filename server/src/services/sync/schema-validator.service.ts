@@ -1,7 +1,8 @@
 import { engineFactory } from '../engines/engine.factory';
 import { ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from '../engines/base.engine';
 import { prisma } from '../../config/database';
-import { decrypt, decryptIfPresent } from '../crypto.service';
+import { toEngineConfig, type StoredConnection } from '../engines/connection-config';
+import { nodeTlsOptions } from '../engines/tls';
 
 export interface ColumnMismatch {
   tableName: string;
@@ -500,7 +501,7 @@ export class SchemaValidatorService {
         user: config.username,
         password: config.password ?? undefined,
         database: config.database,
-        ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: nodeTlsOptions(config),
       });
 
       try {
@@ -516,7 +517,7 @@ export class SchemaValidatorService {
         user: config.username,
         password: config.password ?? undefined,
         database: config.database,
-        ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+        ssl: nodeTlsOptions(config, 'mysql2'),
       });
 
       try {
@@ -562,26 +563,7 @@ export class SchemaValidatorService {
   /**
    * Convert Prisma connection model to ConnectionConfig
    */
-  private prismaConnectionToConfig(connection: any): ConnectionConfig {
-    return {
-      type: connection.type,
-      host: decrypt(connection.host),
-      port: connection.port,
-      username: decrypt(connection.username),
-      password: decrypt(connection.password),
-      database: decrypt(connection.database),
-      sslEnabled: connection.sslEnabled,
-      sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
-      sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
-      sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
-      connectionTimeout: connection.connectionTimeout ?? 30000,
-      sshEnabled: connection.sshEnabled,
-      sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
-      sshPort: connection.sshPort ?? undefined,
-      sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
-      sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
-      sshPrivateKeyPath: connection.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
-    };
+  private prismaConnectionToConfig(connection: StoredConnection): ConnectionConfig {
+    return toEngineConfig(connection);
   }
 }
