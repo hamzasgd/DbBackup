@@ -1,4 +1,4 @@
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 import { logAudit } from './audit.service';

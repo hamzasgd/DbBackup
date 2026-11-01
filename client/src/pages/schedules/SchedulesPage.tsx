@@ -28,7 +28,8 @@ const schema = z.object({
     z.number().int().min(1, 'Must be at least 1').max(1000).optional(),
   ),
 })
-type FormData = z.infer<typeof schema>
+type FormData = z.output<typeof schema>
+type FormInput = z.input<typeof schema>
 
 const CRON_PRESETS: Record<string, string> = {
   HOURLY: '0 * * * *',
@@ -49,7 +50,7 @@ export default function SchedulesPage() {
   const schedules = schedulesData?.data.data ?? []
   const connections = connsData?.data.data ?? []
 
-  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormData>({
+  const { register, handleSubmit, reset, setValue, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined },
   })

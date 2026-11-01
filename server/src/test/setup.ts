@@ -1,6 +1,17 @@
 import { beforeAll, afterAll, beforeEach } from 'vitest';
 import { prisma } from '../config/database';
 
+// vitest.config.ts maps TEST_DATABASE_URL onto DATABASE_URL for this project.
+// This setup wipes tables, so refuse to run without a dedicated test database.
+if (!process.env.TEST_DATABASE_URL) {
+  throw new Error(
+    'Integration tests need a disposable Postgres database. Set TEST_DATABASE_URL ' +
+    '(e.g. postgresql://postgres:postgres@localhost:5432/dbbackup_test), run ' +
+    '`npx prisma migrate deploy` against it, then `npm run test:integration`. ' +
+    'WARNING: every table used by the tests is emptied before each test.'
+  );
+}
+
 beforeAll(async () => {
   // Connect to test database
   await prisma.$connect();

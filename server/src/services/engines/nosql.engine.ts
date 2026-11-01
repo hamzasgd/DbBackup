@@ -1,5 +1,6 @@
 import { spawn } from 'child_process';
-import { createWriteStream, statSync } from 'fs';
+import { createWriteStream, statSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
+import os from 'os';
 import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
@@ -12,6 +13,10 @@ import { SSHTunnel } from '../ssh.service';
  *
  * Both are SSH-tunnel aware and follow the same lifecycle as the SQL
  * engines (tunnel per operation, closed in finally).
+ *
+ * Passwords are never passed on the command line (argv is visible to other
+ * users via `ps`): MongoDB tools get them from a private --config file and
+ * redis-cli from the REDISCLI_AUTH environment variable.
  */
 
 abstract class CliEngine extends BaseEngine {
@@ -52,22 +57,39 @@ export class MongoEngine extends CliEngine {
       '--host', this.config.sshEnabled ? '127.0.0.1' : this.config.host,
       '--port', String(port),
       ...(this.config.username ? ['--username', this.config.username] : []),
-      ...(this.config.password ? ['--password', this.config.password] : []),
       '--authenticationDatabase', 'admin',
       ...(this.config.sslEnabled ? ['--ssl'] : []),
       '--connectTimeoutMS=10000',
     ];
   }
 
+  /**
+   * Run a mongo tool with the password supplied via a private --config file
+   * (mode 0600 inside a fresh temp dir, removed afterwards) instead of argv.
+   */
+  private async runMongo(cmd: 'mongodump' | 'mongorestore', port: number, extraArgs: string[], timeoutMs?: number) {
+    const args = [...this.commonArgs(port), ...extraArgs];
+    if (!this.config.password) return this.runCli(cmd, args, undefined, timeoutMs);
+
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'dbbk-mongo-'));
+    const configFile = path.join(dir, 'auth.yaml');
+    try {
+      // A JSON string literal is a valid YAML double-quoted scalar, so this escapes safely
+      writeFileSync(configFile, `password: ${JSON.stringify(this.config.password)}\n`, { mode: 0o600 });
+      return await this.runCli(cmd, [`--config=${configFile}`, ...args], undefined, timeoutMs);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
   async testConnection(): Promise<TestConnectionResult> {
     const { tunnel, port } = await this.openTunnel();
     try {
       // Dump the tiny admin.system.version collection — validates auth + connectivity cheaply
-      const { stdout } = await this.runCli('mongodump', [
-        ...this.commonArgs(port),
+      const { stdout } = await this.runMongo('mongodump', port, [
         '--db', 'admin', '--collection', 'system.version',
         '--archive', '--gzip',
-      ], undefined, 30_000);
+      ], 30_000);
       void stdout;
       return { success: true, version: 'connected', message: 'Connection successful' };
     } catch (e) {
@@ -85,10 +107,9 @@ export class MongoEngine extends CliEngine {
       const filePath = path.join(outputDir, fileName);
       options.onProgress?.(5);
 
-      await this.runCli('mongodump', [
-        ...this.commonArgs(port),
+      await this.runMongo('mongodump', port, [
         '--db', this.config.database,
-        '--archive', filePath,
+        `--archive=${filePath}`,
         '--gzip',
       ]);
       options.onProgress?.(95);
@@ -104,15 +125,14 @@ export class MongoEngine extends CliEngine {
     const { tunnel, port } = await this.openTunnel();
     try {
       const args = [
-        ...this.commonArgs(port),
-        '--archive', backupFilePath,
+        `--archive=${backupFilePath}`,
         '--gzip',
         '--drop',
       ];
       if (targetDatabase && targetDatabase !== this.config.database) {
         args.push('--nsFrom', `${this.config.database}.*`, '--nsTo', `${targetDatabase}.*`);
       }
-      await this.runCli('mongorestore', args);
+      await this.runMongo('mongorestore', port, args);
     } finally {
       tunnel?.close();
     }
@@ -128,11 +148,10 @@ export class MongoEngine extends CliEngine {
     const started = Date.now();
     const { tunnel, port } = await this.openTunnel();
     try {
-      await this.runCli('mongodump', [
-        ...this.commonArgs(port),
+      await this.runMongo('mongodump', port, [
         '--db', 'admin', '--collection', 'system.version',
         '--archive', '--gzip',
-      ], undefined, timeoutMs);
+      ], timeoutMs);
       return { up: true, latencyMs: Date.now() - started };
     } catch (e) {
       return { up: false, latencyMs: Date.now() - started, error: e instanceof Error ? e.message : String(e) };
@@ -147,21 +166,25 @@ export class RedisEngine extends CliEngine {
     return [
       '-h', this.config.sshEnabled ? '127.0.0.1' : this.config.host,
       '-p', String(port),
-      ...(this.config.password ? ['-a', this.config.password, '--no-auth-warning'] : []),
     ];
+  }
+
+  /** redis-cli reads the password from REDISCLI_AUTH, which keeps it out of argv. */
+  private cliEnv(): NodeJS.ProcessEnv {
+    return { ...process.env, REDISCLI_AUTH: this.config.password || undefined };
   }
 
   async testConnection(): Promise<TestConnectionResult> {
     const { tunnel, port } = await this.openTunnel();
     try {
-      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], undefined, 10_000);
+      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.cliEnv(), 10_000);
       if (!stdout.includes('PONG')) {
         return { success: false, message: `Unexpected reply: ${stdout.trim().slice(0, 100)}` };
       }
       // Try to surface the server version for the UI
       let version = '';
       try {
-        const info = await this.runCli('redis-cli', [...this.cliArgs(port), 'INFO', 'server'], undefined, 10_000);
+        const info = await this.runCli('redis-cli', [...this.cliArgs(port), 'INFO', 'server'], this.cliEnv(), 10_000);
         const m = /redis_version:([^\r\n]+)/.exec(info.stdout);
         if (m) version = m[1].trim();
       } catch { /* version is optional */ }
@@ -182,7 +205,7 @@ export class RedisEngine extends CliEngine {
       options.onProgress?.(10);
 
       // redis-cli --rdb streams a BGSAVE snapshot to the given file
-      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath]);
+      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath], this.cliEnv());
       void stderr;
       options.onProgress?.(95);
       const stats = statSync(filePath);
@@ -206,7 +229,7 @@ export class RedisEngine extends CliEngine {
     const started = Date.now();
     const { tunnel, port } = await this.openTunnel();
     try {
-      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], undefined, timeoutMs);
+      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.cliEnv(), timeoutMs);
       if (!stdout.includes('PONG')) throw new Error(`Unexpected reply: ${stdout.trim()}`);
       return { up: true, latencyMs: Date.now() - started };
     } catch (e) {

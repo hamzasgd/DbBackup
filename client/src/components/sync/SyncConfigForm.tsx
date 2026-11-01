@@ -38,7 +38,8 @@ const schema = z.object({
   path: ['targetConnectionId']
 })
 
-type FormData = z.infer<typeof schema>
+type FormData = z.output<typeof schema>
+type FormInput = z.input<typeof schema>
 
 interface SyncConfigFormProps {
   open: boolean
@@ -64,7 +65,7 @@ export function SyncConfigForm({ open, onClose, editId }: SyncConfigFormProps) {
     enabled: !!editId && open
   })
 
-  const { register, handleSubmit, reset, watch, formState: { errors, isSubmitting } } = useForm<FormData>({
+  const { register, handleSubmit, reset, watch, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: {
       direction: 'UNIDIRECTIONAL',
