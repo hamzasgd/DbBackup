@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>The agent-ready, self-hosted database backup platform.</strong><br/>
-  Back up, restore and migrate MySQL, MariaDB and PostgreSQL — over SSH tunnels, encrypted at rest,<br/>
+  Back up, restore and migrate MySQL, MariaDB and PostgreSQL (plus MongoDB and Redis backups) — over SSH tunnels, encrypted at rest,<br/>
   monitored around the clock — and drive it all from your AI agent via built-in MCP.
 </p>
 
@@ -57,6 +57,7 @@
 ### Core
 
 - **Multi-Engine Support** — MySQL, MariaDB, and PostgreSQL via native CLI tools (`mysqldump`, `mariadb-dump`, `pg_dump`, `pg_restore`)
+- **MongoDB & Redis** — MongoDB backup and restore (`mongodump` / `mongorestore`); Redis RDB snapshot backups (`redis-cli --rdb`). Redis restore is manual (it needs a server restart), and migration, sync and export cover the SQL engines only
 - **Backup & Restore** — Multiple output formats: compressed SQL, plain SQL, custom (`.dump`), directory, and tar
 - **Scheduled Backups** — Cron-based automation (hourly, daily, weekly, monthly, or custom cron expressions)
 - **Cross-Engine Migration** — Migrate data between databases of different types (e.g., MySQL → PostgreSQL)
@@ -154,9 +155,9 @@ DbBackup/
     └── src/
         ├── controllers/        # Auth, Backup, Connection, Export, Migration, Notification, Restore, Schedule, SSE, Storage
         ├── services/
-        │   ├── engines/        # MySQL, MariaDB, PostgreSQL engine adapters + ConnectionFactory
+        │   ├── engines/        # MySQL, MariaDB, PostgreSQL, MongoDB, Redis engine adapters + ConnectionFactory
         │   ├── crypto/         # Key rotation, CryptoProvider interface, KMS providers (AWS, Azure, GCP, Vault)
-        │   ├── migrations/     # Modular: executors, schema builder, type mapper
+        │   ├── migrations/     # Cross-engine migration: executors, schema builder, type mapper
         │   ├── security/      # Credential audit, rate limiting, secure credentials, connection validator
         │   ├── sync/           # CDC trackers, conflict resolver, sync types
         │   ├── crypto.service.ts
@@ -167,7 +168,6 @@ DbBackup/
         │   ├── retention.service.ts
         │   ├── sse.service.ts
         │   ├── export.service.ts
-        │   ├── migration.service.ts
         │   └── verification.service.ts
         ├── routes/             # Express route definitions
         ├── middleware/         # Auth guard, error handler, rate limiters, 404
@@ -183,11 +183,13 @@ DbBackup/
 
 ## 📋 Prerequisites
 
-- **Node.js** ≥ 18
+- **Node.js** ≥ 20 (22 LTS recommended; the Docker image uses Node 22)
 - **Docker** & **Docker Compose** (for PostgreSQL and Redis)
 - **Database CLI tools** installed on the host:
   - MySQL / MariaDB: `mysqldump`, `mysql`, `mariadb-dump`, `mariadb`
   - PostgreSQL: `pg_dump`, `pg_restore`, `psql`
+  - MongoDB (optional): `mongodump`, `mongorestore` (MongoDB Database Tools 100.x)
+  - Redis (optional): `redis-cli`
   - Cross-Engine Migrations: `pgloader` (required for MySQL to PostgreSQL migrations)
 
 ---
@@ -277,6 +279,8 @@ Open http://localhost:5173 and register your first user.
 | PostgreSQL | Custom | `.dump` | `pg_dump -Fc` |
 | PostgreSQL | Tar | `.tar` | `pg_dump -Ft` |
 | PostgreSQL | Directory | folder | `pg_dump -Fd` (parallel) |
+| MongoDB | Gzipped archive | `.archive.gz` | `mongodump --archive --gzip` |
+| Redis | RDB snapshot | `.rdb` | `redis-cli --rdb` |
 
 ---
 
