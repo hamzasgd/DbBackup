@@ -178,6 +178,9 @@ model Connection {
   // PEM in the DB (a stolen DB dump then contains no SSH key material).
   sshPrivateKeyPath String?
   sshPassphrase String?
+  // Pinned SSH host key fingerprint ("SHA256:<base64>"), recorded on the first
+  // successful connect and checked on every later one (trust on first use).
+  sshHostKey    String?
 
   connectionTimeout Int? @default(30000)
 

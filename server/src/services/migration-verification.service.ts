@@ -5,6 +5,7 @@ import { engineFactory } from './engines/engine.factory';
 import { SchemaValidatorService } from './sync/schema-validator.service';
 import { SSHTunnel } from './ssh.service';
 import { createHash } from 'crypto';
+import { nodeTlsOptions } from './engines/tls';
 
 interface IndexSignature {
   unique: boolean;
@@ -132,7 +133,7 @@ async function listMySQLIndexSignatures(config: ConnectionConfig, tableName: str
       user: config.username,
       password: config.password ?? undefined,
       database: config.database,
-      ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+      ssl: nodeTlsOptions(config, 'mysql2'),
       connectTimeout: config.connectionTimeout || 30000,
     });
 
@@ -177,7 +178,7 @@ async function listPostgresIndexSignatures(config: ConnectionConfig, tableName: 
       user: config.username,
       password: config.password ?? undefined,
       database: config.database,
-      ssl: config.sslEnabled ? { rejectUnauthorized: false } : undefined,
+      ssl: nodeTlsOptions(config),
       connectionTimeoutMillis: 10000,
       max: 1,
     });
@@ -216,8 +217,8 @@ async function listIndexSignatures(config: ConnectionConfig, tableName: string):
   return listMySQLIndexSignatures(config, tableName);
 }
 
-function mysqlSsl(config: ConnectionConfig): mysql2.SslOptions | string | undefined {
-  return config.sslEnabled ? { rejectUnauthorized: false } : undefined;
+function mysqlSsl(config: ConnectionConfig) {
+  return nodeTlsOptions(config, 'mysql2');
 }
 
 async function withMySQLConnection<T>(config: ConnectionConfig, fn: (conn: mysql2.Connection) => Promise<T>): Promise<T> {

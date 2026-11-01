@@ -3,30 +3,13 @@ import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
 import { addMigrationJob } from '../queue/migration.queue';
 import { ConnectionConfig } from '../services/engines/base.engine';
 import { verifyMigrationConsistency } from '../services/migration-verification.service';
 import { logAudit } from '../services/audit.service';
+import { toEngineConfig, type StoredConnection } from '../services/engines/connection-config';
 
-const decryptConn = (conn: any): ConnectionConfig => {
-  return {
-    type: conn.type as ConnectionConfig['type'],
-    host: decrypt(conn.host),
-    port: conn.port,
-    username: decrypt(conn.username),
-    password: decrypt(conn.password),
-    database: decrypt(conn.database),
-    sslEnabled: conn.sslEnabled,
-    sshEnabled: conn.sshEnabled,
-    sshHost: decryptIfPresent(conn.sshHost) || undefined,
-    sshPort: conn.sshPort || 22,
-    sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-    sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-    sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-  };
-}
+const decryptConn = (conn: StoredConnection): ConnectionConfig => toEngineConfig(conn);
 
 export async function getMigrations(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {

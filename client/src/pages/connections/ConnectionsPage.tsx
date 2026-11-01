@@ -25,6 +25,9 @@ const schema = z.object({
   password: z.string().optional(),
   database: z.string().min(1, 'Database name is required'),
   sslEnabled: z.boolean().default(false),
+  sslCa: z.string().optional().nullable(),
+  sslCert: z.string().optional().nullable(),
+  sslKey: z.string().optional().nullable(),
   sshEnabled: z.boolean().default(false),
   heartbeatEnabled: z.boolean().default(false),
   expectedBackupHours: z.coerce.number().int().positive().optional().nullable(),
@@ -61,6 +64,18 @@ export default function ConnectionsPage() {
   })
 
   const sshEnabled = useWatch({ control, name: 'sshEnabled' })
+  const sslEnabled = useWatch({ control, name: 'sslEnabled' })
+  const sslCa = useWatch({ control, name: 'sslCa' })
+  const editing = editId ? connections.find((c) => c.id === editId) : undefined
+
+  const resetHostKeyMutation = useMutation({
+    mutationFn: (id: string) => connectionsApi.resetSshHostKey(id),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['connections'] })
+      toast.success(res.data.message)
+    },
+    onError: () => toast.error('Failed to forget the SSH host key'),
+  })
 
   const createMutation = useMutation({
     mutationFn: (d: CreateConnectionPayload) => connectionsApi.create(d),
@@ -87,8 +102,9 @@ export default function ConnectionsPage() {
   const testMutation = useMutation({
     mutationFn: (id: string) => connectionsApi.test(id),
     onSuccess: (res) => {
-      const { message, version } = res.data.data
+      const { message, version, warning } = res.data.data
       toast.success(message + (version ? ` (${version})` : ''))
+      if (warning) toast.warning(warning)
     },
     onError: (e: unknown) => {
       const msg = (e as { response?: { data?: { message?: string } } })?.response?.data?.message
@@ -101,7 +117,7 @@ export default function ConnectionsPage() {
 
   const openEdit = (c: (typeof connections)[0]) => {
     setEditId(c.id)
-    reset({ ...c, password: '' } as unknown as FormData)
+    reset({ ...c, password: '', sslKey: '' } as unknown as FormData)
     setShowSSH(!!c.sshEnabled)
     setModalOpen(true)
   }
@@ -241,6 +257,50 @@ export default function ConnectionsPage() {
             <label htmlFor="sslEnabled" className="text-sm text-gray-700">Enable SSL</label>
           </div>
 
+          {sslEnabled && (
+            <div className="space-y-3 pl-4 border-l-2 border-green-100">
+              <div>
+                <label htmlFor="sslCa" className="text-sm font-medium text-gray-700">CA certificate (PEM)</label>
+                <textarea
+                  id="sslCa"
+                  rows={3}
+                  placeholder="-----BEGIN CERTIFICATE-----"
+                  className="mt-1 w-full px-3 py-2 text-xs font-mono border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  {...register('sslCa')}
+                />
+                {sslCa?.trim() ? (
+                  <p className="text-xs text-green-700 mt-1">
+                    The server certificate is verified against this CA, including the host name.
+                  </p>
+                ) : (
+                  <p className="text-xs text-yellow-700 bg-yellow-50 border border-yellow-200 rounded px-2 py-1 mt-1">
+                    ⚠ Without a CA certificate the connection is encrypted, but the server&apos;s identity is not checked,
+                    so someone in the middle could read the traffic. Paste your provider&apos;s CA certificate to verify it.
+                  </p>
+                )}
+              </div>
+              <details className="text-sm">
+                <summary className="cursor-pointer text-gray-600">Client certificate (mutual TLS, optional)</summary>
+                <div className="mt-2 space-y-2">
+                  <textarea
+                    rows={3}
+                    aria-label="Client certificate (PEM)"
+                    placeholder="Client certificate: -----BEGIN CERTIFICATE-----"
+                    className="w-full px-3 py-2 text-xs font-mono border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    {...register('sslCert')}
+                  />
+                  <textarea
+                    rows={3}
+                    aria-label="Client private key (PEM)"
+                    placeholder={editing?.hasSslKey ? 'Leave empty to keep the saved key' : 'Client key: -----BEGIN PRIVATE KEY-----'}
+                    className="w-full px-3 py-2 text-xs font-mono border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    {...register('sslKey')}
+                  />
+                </div>
+              </details>
+            </div>
+          )}
+
           <div className="border-t pt-3">
             <button
               type="button"
@@ -293,6 +353,31 @@ export default function ConnectionsPage() {
                       />
                     </div>
                     <Input label="Key passphrase (optional)" type="password" {...register('sshPassphrase')} />
+                    <div className="text-xs bg-gray-50 border border-gray-200 rounded-lg p-2 space-y-1">
+                      <p className="font-medium text-gray-700">SSH server host key</p>
+                      {editing?.sshHostKey ? (
+                        <>
+                          <p className="font-mono break-all text-gray-600">{editing.sshHostKey}</p>
+                          <p className="text-gray-500">
+                            Pinned on the first connection. A different key is refused. If the server was reinstalled,
+                            check the new fingerprint with its admin, then forget the old one.
+                          </p>
+                          <Button
+                            type="button"
+                            size="sm"
+                            variant="outline"
+                            loading={resetHostKeyMutation.isPending}
+                            onClick={() => editId && resetHostKeyMutation.mutate(editId)}
+                          >
+                            Forget SSH host key
+                          </Button>
+                        </>
+                      ) : (
+                        <p className="text-gray-500">
+                          Not pinned yet: the key the server presents on the next connection (for example &quot;Test&quot;) is saved and checked every time after that.
+                        </p>
+                      )}
+                    </div>
                   </>
                 )}
               </div>

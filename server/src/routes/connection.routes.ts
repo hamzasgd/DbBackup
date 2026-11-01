@@ -10,6 +10,7 @@ import {
   updateConnection,
   deleteConnection,
   testConnection,
+  resetSshHostKey,
   getDbInfo,
   getHeartbeat,
   exportConfigBundle,
@@ -26,6 +27,7 @@ router.post('/', validate(connectionSchema), createConnection);
 router.put('/:id', validate(connectionSchema), updateConnection);
 router.delete('/:id', deleteConnection);
 router.post('/:id/test', testConnection);
+router.post('/:id/ssh-host-key/reset', resetSshHostKey);
 router.get('/:id/info', getDbInfo);
 router.get('/:id/heartbeat', getHeartbeat);
 router.post('/bundle/export', exportConfigBundle);

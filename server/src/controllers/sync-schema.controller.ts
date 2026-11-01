@@ -3,6 +3,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SchemaValidatorService } from '../services/sync/schema-validator.service';
 import { prisma } from '../config/database';
+import { toEngineConfig } from '../services/engines/connection-config';
 
 const schemaValidatorService = new SchemaValidatorService();
 
@@ -100,48 +101,9 @@ export async function createMissingTables(
       throw new AppError('No missing tables to create', 400);
     }
 
-    // Convert Prisma connection to ConnectionConfig
-    const sourceConfig = {
-      type: config.sourceConnection.type,
-      host: config.sourceConnection.host,
-      port: config.sourceConnection.port,
-      username: config.sourceConnection.username,
-      password: config.sourceConnection.password,
-      database: config.sourceConnection.database,
-      sslEnabled: config.sourceConnection.sslEnabled,
-      sslCa: config.sourceConnection.sslCa ?? undefined,
-      sslCert: config.sourceConnection.sslCert ?? undefined,
-      sslKey: config.sourceConnection.sslKey ?? undefined,
-      connectionTimeout: config.sourceConnection.connectionTimeout ?? 30000,
-      sshEnabled: config.sourceConnection.sshEnabled,
-      sshHost: config.sourceConnection.sshHost ?? undefined,
-      sshPort: config.sourceConnection.sshPort ?? undefined,
-      sshUsername: config.sourceConnection.sshUsername ?? undefined,
-      sshPrivateKey: config.sourceConnection.sshPrivateKey ?? undefined,
-      sshPrivateKeyPath: config.sourceConnection.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: config.sourceConnection.sshPassphrase ?? undefined,
-    };
-
-    const targetConfig = {
-      type: config.targetConnection.type,
-      host: config.targetConnection.host,
-      port: config.targetConnection.port,
-      username: config.targetConnection.username,
-      password: config.targetConnection.password,
-      database: config.targetConnection.database,
-      sslEnabled: config.targetConnection.sslEnabled,
-      sslCa: config.targetConnection.sslCa ?? undefined,
-      sslCert: config.targetConnection.sslCert ?? undefined,
-      sslKey: config.targetConnection.sslKey ?? undefined,
-      connectionTimeout: config.targetConnection.connectionTimeout ?? 30000,
-      sshEnabled: config.targetConnection.sshEnabled,
-      sshHost: config.targetConnection.sshHost ?? undefined,
-      sshPort: config.targetConnection.sshPort ?? undefined,
-      sshUsername: config.targetConnection.sshUsername ?? undefined,
-      sshPrivateKey: config.targetConnection.sshPrivateKey ?? undefined,
-      sshPrivateKeyPath: config.targetConnection.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: config.targetConnection.sshPassphrase ?? undefined,
-    };
+    // Decrypt the stored connections into engine configs
+    const sourceConfig = toEngineConfig(config.sourceConnection);
+    const targetConfig = toEngineConfig(config.targetConnection);
 
     // Create missing tables
     await schemaValidatorService.createMissingTables(

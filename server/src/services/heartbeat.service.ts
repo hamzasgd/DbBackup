@@ -1,9 +1,9 @@
 import { prisma } from '../config/database';
-import { decrypt, decryptIfPresent } from './crypto.service';
 import { engineFactory } from './engines/engine.factory';
 import { logger } from '../config/logger';
 import { notify } from './notification.service';
 import { logAudit } from './audit.service';
+import { toEngineConfig } from './engines/connection-config';
 
 const HEARTBEAT_TIMEOUT_MS = 5000;
 const PRUNE_DAYS = 7;
@@ -35,22 +35,7 @@ export async function runHeartbeatChecks(): Promise<HeartbeatSummary> {
 
     let result: { up: boolean; latencyMs: number; error?: string };
     try {
-      const engine = engineFactory({
-        type: conn.type as Parameters<typeof engineFactory>[0]['type'],
-        host: decrypt(conn.host),
-        port: conn.port,
-        username: decrypt(conn.username),
-        password: decrypt(conn.password),
-        database: decrypt(conn.database),
-        sslEnabled: conn.sslEnabled,
-        sshEnabled: conn.sshEnabled,
-        sshHost: decryptIfPresent(conn.sshHost) ?? undefined,
-        sshPort: conn.sshPort ?? 22,
-        sshUsername: decryptIfPresent(conn.sshUsername) ?? undefined,
-        sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) ?? undefined,
-        sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-        sshPassphrase: decryptIfPresent(conn.sshPassphrase) ?? undefined,
-      });
+      const engine = engineFactory(toEngineConfig(conn));
       result = await engine.ping(HEARTBEAT_TIMEOUT_MS);
     } catch (e) {
       result = { up: false, latencyMs: 0, error: e instanceof Error ? e.message : String(e) };

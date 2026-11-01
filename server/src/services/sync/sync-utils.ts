@@ -1,7 +1,7 @@
 import { Connection } from '@prisma/client';
 import { ConnectionConfig } from '../engines/base.engine';
-import { decrypt, decryptIfPresent } from '../crypto.service';
 import { logger } from '../../config/logger';
+import { toEngineConfig } from '../engines/connection-config';
 
 // ──────────────────────────────────────────────────────
 // Re-export shared types used across CDC trackers / worker
@@ -60,26 +60,7 @@ export function escapeIdentifierPG(name: string): string {
  * sync-engine.service.ts and sync.queue.ts.
  */
 export function connectionToConfig(connection: Connection): ConnectionConfig {
-  return {
-    type: connection.type,
-    host: decrypt(connection.host),
-    port: connection.port,
-    username: decrypt(connection.username),
-    password: decrypt(connection.password),
-    database: decrypt(connection.database),
-    sslEnabled: connection.sslEnabled,
-    sslCa: decryptIfPresent(connection.sslCa) ?? undefined,
-    sslCert: decryptIfPresent(connection.sslCert) ?? undefined,
-    sslKey: decryptIfPresent(connection.sslKey) ?? undefined,
-    sshEnabled: connection.sshEnabled,
-    sshHost: decryptIfPresent(connection.sshHost) ?? undefined,
-    sshPort: connection.sshPort ?? undefined,
-    sshUsername: decryptIfPresent(connection.sshUsername) ?? undefined,
-    sshPrivateKey: decryptIfPresent(connection.sshPrivateKey) ?? undefined,
-    sshPrivateKeyPath: connection.sshPrivateKeyPath ?? undefined,
-    sshPassphrase: decryptIfPresent(connection.sshPassphrase) ?? undefined,
-    connectionTimeout: connection.connectionTimeout ?? 30000,
-  };
+  return toEngineConfig(connection);
 }
 
 // ──────────────────────────────────────────────────────

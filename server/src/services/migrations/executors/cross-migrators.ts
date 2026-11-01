@@ -6,6 +6,7 @@ import { getMySQLTableMeta } from './mysql-executor';
 import { getPGTableMeta } from './pg-executor';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
 import { getEngineHostPort } from '../utils/engine-host';
+import { nodeTlsOptions } from '../../engines/tls';
 
 /**
  * Migrate MySQL/MariaDB to PostgreSQL.
@@ -24,7 +25,7 @@ export async function migrateMySQL2PG(
     user: src.username,
     password: src.password ?? undefined,
     database: src.database,
-    ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: nodeTlsOptions(src, 'mysql2'),
   });
 
   const dstPool = new Pool({
@@ -33,7 +34,7 @@ export async function migrateMySQL2PG(
     user: dst.username,
     password: dst.password ?? undefined,
     database: dst.database,
-    ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: nodeTlsOptions(dst),
     max: 5,
   });
 
@@ -144,7 +145,7 @@ export async function migratePG2MySQL(
     user: src.username,
     password: src.password ?? undefined,
     database: src.database,
-    ssl: src.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: nodeTlsOptions(src),
     max: 5,
   });
 
@@ -154,7 +155,7 @@ export async function migratePG2MySQL(
     user: dst.username,
     password: dst.password ?? undefined,
     database: dst.database,
-    ssl: dst.sslEnabled ? { rejectUnauthorized: false } : undefined,
+    ssl: nodeTlsOptions(dst, 'mysql2'),
   });
 
   try {

@@ -1,4 +1,6 @@
 export interface ConnectionConfig {
+  /** Id of the stored connection (used to pin the SSH host key on first connect). */
+  connectionId?: string;
   type: 'MYSQL' | 'MARIADB' | 'POSTGRESQL' | 'MONGODB' | 'REDIS';
   host: string;
   port: number;
@@ -17,6 +19,12 @@ export interface ConnectionConfig {
   sshPrivateKey?: string | null;
   sshPrivateKeyPath?: string | null;
   sshPassphrase?: string | null;
+  /** Pinned SSH host key fingerprint ("SHA256:…"), recorded on first successful connect. */
+  sshHostKey?: string | null;
+  /** Real DB host for TLS certificate checks, set by SSHTunnel when it rewrites `host` to 127.0.0.1. */
+  tlsHost?: string;
+  /** Real DB host/port behind the SSH tunnel, recorded before SSHTunnel rewrites host/port. */
+  sshTarget?: { host: string; port: number };
 }
 
 export interface BackupResult {

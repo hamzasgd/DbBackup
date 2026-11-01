@@ -11,9 +11,10 @@ import { notify } from '../services/notification.service';
 import { uploadBackupFile } from '../services/storage.service';
 import { encryptBackupFile, decryptBackupFile, sha256File } from '../services/backup-crypto.service';
 import { enforceRetentionForConnection, getRetentionPolicy } from '../services/retention.service';
-import { decrypt, decryptIfPresent } from '../services/crypto.service';
+import { decrypt } from '../services/crypto.service';
 import { sanitizeConfig } from '../utils/sanitize';
 import { logAudit } from '../services/audit.service';
+import { toEngineConfig } from '../services/engines/connection-config';
 
 export const BACKUP_QUEUE_NAME = 'backups';
 
@@ -28,22 +29,7 @@ export interface BackupJobData {
 async function decryptConn(connectionId: string): Promise<ConnectionConfig> {
   const conn = await prisma.connection.findUnique({ where: { id: connectionId } });
   if (!conn) throw new Error(`Connection not found: ${connectionId}`);
-  return {
-    type: conn.type as ConnectionConfig['type'],
-    host: decrypt(conn.host),
-    port: conn.port,
-    username: decrypt(conn.username),
-    password: decrypt(conn.password),
-    database: decrypt(conn.database),
-    sslEnabled: conn.sslEnabled,
-    sshEnabled: conn.sshEnabled,
-    sshHost: decryptIfPresent(conn.sshHost) || undefined,
-    sshPort: conn.sshPort || 22,
-    sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-    sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-    sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-    sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-  };
+  return toEngineConfig(conn);
 }
 
 let backupQueue: Queue<BackupJobData>;

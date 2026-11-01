@@ -1,8 +1,9 @@
 import mysql2 from 'mysql2/promise';
-import { spawn } from 'child_process';
 import { ConnectionConfig } from '../../engines/base.engine';
 import { getEngineHostPort } from '../utils/engine-host';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
+import { TlsFiles, mysqlCliTlsArgs } from '../../engines/tls';
+import { runPipe } from '../utils/process-pipe';
 
 /**
  * Get table metadata from MySQL/MariaDB database.
@@ -42,6 +43,7 @@ export async function getMySQLTableMeta(
 
 /**
  * Migrate MySQL/MariaDB to MySQL/MariaDB using piped mysqldump -> mysql.
+ * Passwords go through MYSQL_PWD (never argv, which other users can read with `ps`).
  */
 export async function migrateMySQL2MySQL(
   src: ConnectionConfig,
@@ -50,78 +52,54 @@ export async function migrateMySQL2MySQL(
 ): Promise<{ rowsMigrated: number }> {
   const srcRef = await getEngineHostPort(src);
   const dstRef = await getEngineHostPort(dst);
+  const files = new TlsFiles();
 
   try {
-    return await new Promise((resolve, reject) => {
-      const srcArgs = [
-        `-h${srcRef.host}`,
-        `-P${srcRef.port}`,
-        `-u${src.username}`,
-        src.password ? `-p${src.password}` : '',
-        '--single-transaction',
-        '--routines',
-        '--triggers',
-        '--events',
-        '--add-drop-table',
-        src.database,
-      ].filter(Boolean);
+    const dumpCmd = src.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
+    const restoreCmd = dst.type === 'MARIADB' ? 'mariadb' : 'mysql';
 
-      const dstArgs = [
-        `-h${dstRef.host}`,
-        `-P${dstRef.port}`,
-        `-u${dst.username}`,
-        dst.password ? `-p${dst.password}` : '',
-        dst.database,
-      ].filter(Boolean);
-
-      opts.onProgress?.({
-        currentTable: 'Starting dump pipe...',
-        tablesCompleted: 0,
-        tableCount: 1,
-        rowsMigrated: 0,
-        progress: 10,
-      });
-
-      const dumpCmd = src.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
-      const dump = spawn(dumpCmd, srcArgs);
-
-      const restoreCmd = dst.type === 'MARIADB' ? 'mariadb' : 'mysql';
-      const restore = spawn(restoreCmd, dstArgs);
-
-      let dumpError = '';
-      let restoreError = '';
-
-      dump.stderr.on('data', (d) => {
-        const msg = d.toString();
-        if (!msg.includes('Warning')) dumpError += msg;
-      });
-
-      restore.stderr.on('data', (d) => {
-        const msg = d.toString();
-        if (!msg.includes('Warning')) restoreError += msg;
-      });
-
-      dump.stdout.pipe(restore.stdin);
-
-      restore.on('close', (code) => {
-        if (code === 0) {
-          opts.onProgress?.({
-            currentTable: 'Finished',
-            tablesCompleted: 1,
-            tableCount: 1,
-            rowsMigrated: -1,
-            progress: 100,
-          });
-          resolve({ rowsMigrated: -1 }); // -1 indicates stream method
-        } else {
-          reject(new Error(`MySQL restore failed: ${restoreError || dumpError}`));
-        }
-      });
-
-      dump.on('error', reject);
-      restore.on('error', reject);
+    opts.onProgress?.({
+      currentTable: 'Starting dump pipe...',
+      tablesCompleted: 0,
+      tableCount: 1,
+      rowsMigrated: 0,
+      progress: 10,
     });
+
+    await runPipe(
+      {
+        cmd: dumpCmd,
+        args: [
+          `-h${srcRef.host}`, `-P${srcRef.port}`, `-u${src.username}`,
+          ...mysqlCliTlsArgs(src, dumpCmd, !!srcRef.tunnel, files),
+          '--single-transaction', '--routines', '--triggers', '--events', '--add-drop-table',
+          src.database,
+          ...(opts.tables ?? []),
+        ],
+        env: { ...process.env, MYSQL_PWD: src.password || undefined },
+      },
+      {
+        cmd: restoreCmd,
+        args: [
+          `-h${dstRef.host}`, `-P${dstRef.port}`, `-u${dst.username}`,
+          ...mysqlCliTlsArgs(dst, restoreCmd, !!dstRef.tunnel, files),
+          dst.database,
+        ],
+        env: { ...process.env, MYSQL_PWD: dst.password || undefined },
+      },
+      'MySQL migration',
+    );
+
+    opts.onProgress?.({
+      currentTable: 'Finished',
+      tablesCompleted: 1,
+      tableCount: 1,
+      rowsMigrated: -1,
+      progress: 100,
+    });
+    return { rowsMigrated: -1 }; // -1 indicates stream method
   } finally {
+    files.cleanup();
     if (srcRef.tunnel) srcRef.tunnel.close();
     if (dstRef.tunnel) dstRef.tunnel.close();
   }

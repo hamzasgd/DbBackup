@@ -4,6 +4,7 @@ import os from 'os';
 import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
+import { TlsFiles, mongoCliTlsArgs } from './tls';
 
 /**
  * NoSQL engines via native CLIs (same philosophy as the SQL engines):
@@ -58,8 +59,8 @@ export class MongoEngine extends CliEngine {
       '--port', String(port),
       ...(this.config.username ? ['--username', this.config.username] : []),
       '--authenticationDatabase', 'admin',
-      ...(this.config.sslEnabled ? ['--ssl'] : []),
-      '--connectTimeoutMS=10000',
+      // (no --connectTimeoutMS: the tools reject it as an unknown option, which made every
+      // MongoDB operation fail; runCli's own timeout bounds each command instead)
     ];
   }
 
@@ -68,17 +69,22 @@ export class MongoEngine extends CliEngine {
    * (mode 0600 inside a fresh temp dir, removed afterwards) instead of argv.
    */
   private async runMongo(cmd: 'mongodump' | 'mongorestore', port: number, extraArgs: string[], timeoutMs?: number) {
-    const args = [...this.commonArgs(port), ...extraArgs];
-    if (!this.config.password) return this.runCli(cmd, args, undefined, timeoutMs);
-
-    const dir = mkdtempSync(path.join(os.tmpdir(), 'dbbk-mongo-'));
-    const configFile = path.join(dir, 'auth.yaml');
+    const files = new TlsFiles();
     try {
-      // A JSON string literal is a valid YAML double-quoted scalar, so this escapes safely
-      writeFileSync(configFile, `password: ${JSON.stringify(this.config.password)}\n`, { mode: 0o600 });
-      return await this.runCli(cmd, [`--config=${configFile}`, ...args], undefined, timeoutMs);
+      const args = [...this.commonArgs(port), ...mongoCliTlsArgs(this.config, files), ...extraArgs];
+      if (!this.config.password) return await this.runCli(cmd, args, undefined, timeoutMs);
+
+      const dir = mkdtempSync(path.join(os.tmpdir(), 'dbbk-mongo-'));
+      const configFile = path.join(dir, 'auth.yaml');
+      try {
+        // A JSON string literal is a valid YAML double-quoted scalar, so this escapes safely
+        writeFileSync(configFile, `password: ${JSON.stringify(this.config.password)}\n`, { mode: 0o600 });
+        return await this.runCli(cmd, [`--config=${configFile}`, ...args], undefined, timeoutMs);
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
     } finally {
-      rmSync(dir, { recursive: true, force: true });
+      files.cleanup();
     }
   }
 

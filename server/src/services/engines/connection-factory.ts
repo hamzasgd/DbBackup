@@ -6,8 +6,8 @@
 import * as mysql2 from 'mysql2/promise';
 import { Pool, PoolClient } from 'pg';
 import { SSHTunnel } from '../ssh.service';
-import { decrypt, decryptIfPresent } from '../crypto.service';
 import { ConnectionConfig } from './base.engine';
+import { nodeTlsOptions } from './tls';
 
 /** MySQL connection result with optional SSH tunnel */
 export interface MySQLConnectionResult {
@@ -62,7 +62,7 @@ export class ConnectionFactory {
                 user: decryptedConfig.username,
                 password: decryptedConfig.password,
                 database: decryptedConfig.database,
-                ssl: decryptedConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
+                ssl: nodeTlsOptions(decryptedConfig, 'mysql2'),
                 connectTimeout: decryptedConfig.connectionTimeout || 30000,
             });
 
@@ -102,7 +102,7 @@ export class ConnectionFactory {
                 user: decryptedConfig.username,
                 password: decryptedConfig.password,
                 database: decryptedConfig.database,
-                ssl: decryptedConfig.sslEnabled ? { rejectUnauthorized: false } : undefined,
+                ssl: nodeTlsOptions(decryptedConfig),
                 connectionTimeoutMillis: decryptedConfig.connectionTimeout || 30000,
                 max: 5,
             });
@@ -125,18 +125,9 @@ export class ConnectionFactory {
      * Decrypt connection configuration
      */
     private static decryptConfig(config: ConnectionConfig): DecryptedConfig {
-        return {
-            ...config,
-            host: decrypt(config.host),
-            username: decrypt(config.username),
-            password: decrypt(config.password || ''),
-            database: decrypt(config.database),
-            sshHost: decryptIfPresent(config.sshHost) ?? undefined,
-            sshUsername: decryptIfPresent(config.sshUsername) ?? undefined,
-            sshPrivateKey: decryptIfPresent(config.sshPrivateKey) ?? undefined,
-            sshPrivateKeyPath: config.sshPrivateKeyPath ?? undefined,
-            sshPassphrase: decryptIfPresent(config.sshPassphrase) ?? undefined,
-        };
+        // Callers already pass decrypted configs (built by toEngineConfig); decrypting them
+        // a second time threw "Invalid initialization vector" and broke every sync run.
+        return { ...config, password: config.password ?? undefined };
     }
 
     /**

@@ -9,6 +9,8 @@ import { logAudit, logAuditReq } from '../services/audit.service';
 import { deleteBackupArtifact } from '../services/storage.service';
 import { logger } from '../config/logger';
 import { getHeartbeatSummary } from '../services/heartbeat.service';
+import { toEngineConfig } from '../services/engines/connection-config';
+import { isTlsUnverified } from '../services/engines/tls';
 
 function encryptConnection(data: {
   host: string; username: string; password: string; database: string;
@@ -43,7 +45,8 @@ function decryptConnection(conn: Record<string, unknown>) {
     database: decrypt(conn.database as string),
     sslCa: decryptIfPresent(conn.sslCa as string),
     sslCert: decryptIfPresent(conn.sslCert as string),
-    sslKey: decryptIfPresent(conn.sslKey as string),
+    sslKey: undefined, // client TLS private key: never sent back, like the SSH key
+    hasSslKey: !!conn.sslKey,
     sshHost: decryptIfPresent(conn.sshHost as string),
     sshUsername: decryptIfPresent(conn.sshUsername as string),
     sshPrivateKey: undefined, // never expose private keys
@@ -116,7 +119,8 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
       database: database ? encrypt(database) : existing.database,
       sslCa: rest.sslCa !== undefined ? encryptIfPresent(rest.sslCa) : existing.sslCa,
       sslCert: rest.sslCert !== undefined ? encryptIfPresent(rest.sslCert) : existing.sslCert,
-      sslKey: rest.sslKey !== undefined ? encryptIfPresent(rest.sslKey) : existing.sslKey,
+      // Not sent back to the edit form (secret), so an empty value means "keep"
+      sslKey: rest.sslKey ? encryptIfPresent(rest.sslKey) : (rest.sslCert === '' || rest.sslCert === null ? null : existing.sslKey),
       sshHost: rest.sshHost !== undefined ? encryptIfPresent(rest.sshHost) : existing.sshHost,
       sshUsername: rest.sshUsername !== undefined ? encryptIfPresent(rest.sshUsername) : existing.sshUsername,
       // sshPrivateKey/sshPassphrase are never sent back by the edit form (never
@@ -126,16 +130,23 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
       sshPassphrase: rest.sshPassphrase ? encryptIfPresent(rest.sshPassphrase) : existing.sshPassphrase,
     };
 
+    // A different SSH server (host or port) means the pinned host key no longer applies
+    const newSshPort = rest.sshPort ? parseInt(rest.sshPort, 10) : 22;
+    const sshTargetChanged =
+      (rest.sshHost !== undefined && (rest.sshHost || null) !== (decryptIfPresent(existing.sshHost) || null)) ||
+      newSshPort !== (existing.sshPort ?? 22);
+
     const updated = await prisma.connection.update({
       where: { id: req.params.id },
       data: {
         name, type, port: parseInt(port, 10),
+        ...(sshTargetChanged ? { sshHostKey: null } : {}),
         sslEnabled: !!sslEnabled,
         sshEnabled: !!sshEnabled,
         heartbeatEnabled: rest.heartbeatEnabled !== undefined ? !!rest.heartbeatEnabled : existing.heartbeatEnabled,
         expectedBackupHours: rest.expectedBackupHours !== undefined ? (rest.expectedBackupHours || null) : existing.expectedBackupHours,
         sshPrivateKeyPath: rest.sshPrivateKeyPath !== undefined ? (rest.sshPrivateKeyPath || null) : existing.sshPrivateKeyPath,
-        sshPort: rest.sshPort ? parseInt(rest.sshPort, 10) : 22,
+        sshPort: newSshPort,
         ...encrypted,
       },
     });
@@ -191,28 +202,16 @@ export async function testConnection(req: AuthRequest, res: Response, next: Next
     });
     if (!conn) throw new AppError('Connection not found', 404);
 
-    const engine = engineFactory({
-      type: conn.type,
-      host: decrypt(conn.host),
-      port: conn.port,
-      username: decrypt(conn.username),
-      password: decrypt(conn.password),
-      database: decrypt(conn.database),
-      sslEnabled: conn.sslEnabled,
-      sshEnabled: conn.sshEnabled,
-      sshHost: decryptIfPresent(conn.sshHost) || undefined,
-      sshPort: conn.sshPort || 22,
-      sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-      sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-    });
+    const engine = engineFactory(toEngineConfig(conn));
 
     const result = await engine.testConnection();
     await logAuditReq(req, req.user!.userId, 'TEST', 'connection', {
       connectionId: conn.id, name: conn.name, success: result.success, version: result.version,
     });
-    res.json({ success: true, data: result });
+    const warning = result.success && isTlsUnverified(toEngineConfig(conn))
+      ? 'SSL is on but no CA certificate is set: the connection is encrypted, but the server\'s identity is not verified. Add the CA certificate to verify it.'
+      : undefined;
+    res.json({ success: true, data: { ...result, ...(warning ? { warning } : {}) } });
   } catch (err) { next(err); }
 }
 
@@ -223,22 +222,7 @@ export async function getDbInfo(req: AuthRequest, res: Response, next: NextFunct
     });
     if (!conn) throw new AppError('Connection not found', 404);
 
-    const engine = engineFactory({
-      type: conn.type,
-      host: decrypt(conn.host),
-      port: conn.port,
-      username: decrypt(conn.username),
-      password: decrypt(conn.password),
-      database: decrypt(conn.database),
-      sslEnabled: conn.sslEnabled,
-      sshEnabled: conn.sshEnabled,
-      sshHost: decryptIfPresent(conn.sshHost) || undefined,
-      sshPort: conn.sshPort || 22,
-      sshUsername: decryptIfPresent(conn.sshUsername) || undefined,
-      sshPrivateKey: decryptIfPresent(conn.sshPrivateKey) || undefined,
-      sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
-      sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
-    });
+    const engine = engineFactory(toEngineConfig(conn));
 
     const info = await engine.getDbInfo();
     res.json({ success: true, data: info });
@@ -280,5 +264,21 @@ export async function importConfigBundle(req: AuthRequest, res: Response, next: 
     const data = Buffer.from(req.body);
     const result = await importBundle(req.user!.userId, data, passphrase);
     res.json({ success: true, data: result, message: `Imported ${result.connections} connections and ${result.schedules} schedules` });
+  } catch (err) { next(err); }
+}
+
+/** Forget the pinned SSH host key; the next connect pins whatever key the server presents. */
+export async function resetSshHostKey(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const conn = await prisma.connection.findFirst({
+      where: { id: req.params.id, userId: req.user!.userId },
+      select: { id: true, name: true, sshHostKey: true },
+    });
+    if (!conn) throw new AppError('Connection not found', 404);
+    await prisma.connection.update({ where: { id: conn.id }, data: { sshHostKey: null } });
+    await logAuditReq(req, req.user!.userId, 'SSH_HOST_KEY_RESET', 'connection', {
+      connectionId: conn.id, name: conn.name, previousFingerprint: conn.sshHostKey,
+    });
+    res.json({ success: true, message: 'SSH host key forgotten. The next connection will pin the key the server presents.' });
   } catch (err) { next(err); }
 }

@@ -1,34 +1,37 @@
 import { spawn } from 'child_process';
-import { createWriteStream, statSync, createReadStream, mkdirSync } from 'fs';
-import { createGunzip, createGzip } from 'zlib';
+import { statSync, createReadStream, mkdirSync } from 'fs';
+import { createGunzip } from 'zlib';
 import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
+import { dumpToFile } from './dump-to-file';
 import { Pool, Client } from 'pg';
+import { TlsFiles, nodeTlsOptions, pgCliTls } from './tls';
 
 export class PostgreSQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
     return `"${identifier.replace(/"/g, '""')}"`;
   }
 
-  private getEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, PGPASSWORD: this.config.password ?? undefined };
+  /** Environment for psql / pg_dump / pg_restore: password and TLS settings (never on argv). */
+  private getEnv(files: TlsFiles): NodeJS.ProcessEnv {
+    return { ...process.env, PGPASSWORD: this.config.password ?? undefined, ...this.cliTls(files).env };
   }
 
-  private getSslOptions(): { rejectUnauthorized: boolean; ca?: string } | undefined {
-    if (!this.config.sslEnabled) return undefined;
-    if (this.config.sslCa) {
-      return { rejectUnauthorized: true, ca: this.config.sslCa };
-    }
-    // No CA provided - warn and allow self-signed
-    console.warn('SSL enabled but no CA cert provided - using rejectUnauthorized: false');
-    return { rejectUnauthorized: false };
+  private cliTls(files: TlsFiles) {
+    const connectHost = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+    return pgCliTls(this.config, connectHost, files);
   }
 
-  private getBaseArgs(): string[] {
-    const host = this.config.sshEnabled ? '127.0.0.1' : this.config.host;
+  private getSslOptions() {
+    return nodeTlsOptions(this.config);
+  }
+
+  private getBaseArgs(files: TlsFiles): string[] {
+    // With a verified certificate through an SSH tunnel, -h is the real host and PGHOSTADDR the tunnel
+    const host = this.cliTls(files).host;
     const port = this.config.sshEnabled ? (this.config as any)._localPort || this.config.port : this.config.port;
-    
+
     return [
       '-h', host,
       '-p', String(port),
@@ -38,6 +41,7 @@ export class PostgreSQLEngine extends BaseEngine {
 
   async testConnection(): Promise<TestConnectionResult> {
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -48,13 +52,13 @@ export class PostgreSQLEngine extends BaseEngine {
       return await new Promise((resolve, reject) => {
         const timeout = this.config.connectionTimeout ? Math.floor(this.config.connectionTimeout / 1000).toString() : '30';
         const proc = spawn('psql', [
-          ...this.getBaseArgs(),
+          ...this.getBaseArgs(files),
           '-d', this.config.database,
           '-c', 'SELECT version();',
           '-t'
         ], { 
           env: {
-            ...this.getEnv(),
+            ...this.getEnv(files),
             PGCONNECT_TIMEOUT: timeout
           }
         });
@@ -75,6 +79,7 @@ export class PostgreSQLEngine extends BaseEngine {
       });
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
@@ -82,6 +87,7 @@ export class PostgreSQLEngine extends BaseEngine {
     const { format = 'COMPRESSED_SQL', onProgress } = options;
 
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -110,7 +116,7 @@ export class PostgreSQLEngine extends BaseEngine {
 
       await new Promise<void>((resolve, reject) => {
         const args = [
-          ...this.getBaseArgs(),
+          ...this.getBaseArgs(files),
           '-d', this.config.database,
           flag,
           '--no-password',
@@ -120,27 +126,19 @@ export class PostgreSQLEngine extends BaseEngine {
         if (format === 'DIRECTORY') {
           // parallel jobs for directory format
           args.push('--jobs=4', '-f', outputPath);
-          const dump = spawn('pg_dump', args, { env: this.getEnv() });
+          const dump = spawn('pg_dump', args, { env: this.getEnv(files) });
           let error = '';
           dump.stderr.on('data', (d: Buffer) => error += d.toString());
           dump.on('close', (code: number) => code === 0 ? resolve() : reject(new Error(`pg_dump failed: ${error}`)));
           dump.on('error', reject);
         } else if (format === 'COMPRESSED_SQL') {
-          // pipe plain SQL through gzip
-          args.push('-f', '-'); // write to stdout
-          const dump = spawn('pg_dump', [...this.getBaseArgs(), '-d', this.config.database, '-Fp', '--no-password', '--no-tablespaces'], { env: this.getEnv() });
-          const gzip = createGzip();
-          const out = createWriteStream(outputPath);
-          dump.stdout.pipe(gzip).pipe(out);
-          let error = '';
-          dump.stderr.on('data', (d: Buffer) => error += d.toString());
-          out.on('finish', resolve);
-          dump.on('close', (code: number) => { if (code !== 0) reject(new Error(`pg_dump failed: ${error}`)); });
-          dump.on('error', reject);
+          // plain SQL through gzip; resolves only when pg_dump exited 0 and the file is complete
+          dumpToFile('pg_dump', [...this.getBaseArgs(files), '-d', this.config.database, '-Fp', '--no-password', '--no-tablespaces'], this.getEnv(files), outputPath, true)
+            .then(resolve, reject);
         } else {
           // CUSTOM, TAR, PLAIN_SQL — write direct to file
-          const dumpArgs = [...this.getBaseArgs(), '-d', this.config.database, flag, '--no-password', '--no-tablespaces', '-f', outputPath];
-          const dump = spawn('pg_dump', dumpArgs, { env: this.getEnv() });
+          const dumpArgs = [...this.getBaseArgs(files), '-d', this.config.database, flag, '--no-password', '--no-tablespaces', '-f', outputPath];
+          const dump = spawn('pg_dump', dumpArgs, { env: this.getEnv(files) });
           let error = '';
           dump.stderr.on('data', (d: Buffer) => error += d.toString());
           dump.on('close', (code: number) => code === 0 ? resolve() : reject(new Error(`pg_dump failed: ${error}`)));
@@ -167,11 +165,13 @@ export class PostgreSQLEngine extends BaseEngine {
       return { fileName, filePath: outputPath, fileSize };
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
   async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
     let tunnel: SSHTunnel | null = null;
+    const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
         tunnel = new SSHTunnel(this.config);
@@ -190,7 +190,7 @@ export class PostgreSQLEngine extends BaseEngine {
 
         if (usePgRestore) {
           const args = [
-            ...this.getBaseArgs(),
+            ...this.getBaseArgs(files),
             '-d', dbName,
             '--no-password',
             '--clean',
@@ -199,13 +199,13 @@ export class PostgreSQLEngine extends BaseEngine {
           if (isDirectory) args.push('--jobs=4');
           args.push(backupFilePath);
 
-          proc = spawn('pg_restore', args, { env: this.getEnv() });
+          proc = spawn('pg_restore', args, { env: this.getEnv(files) });
         } else {
           proc = spawn('psql', [
-            ...this.getBaseArgs(),
+            ...this.getBaseArgs(files),
             '-d', dbName,
             '--no-password',
-          ], { env: this.getEnv() });
+          ], { env: this.getEnv(files) });
 
           const fileStream = backupFilePath.endsWith('.gz')
             ? createReadStream(backupFilePath).pipe(createGunzip())
@@ -233,6 +233,7 @@ export class PostgreSQLEngine extends BaseEngine {
       });
     } finally {
       tunnel?.close();
+      files.cleanup();
     }
   }
 
@@ -590,13 +591,15 @@ export class PostgreSQLEngine extends BaseEngine {
     const safe = database.replace(/"/g, '');
     const { client, tunnel } = await this.drillClient(safe);
     try {
+      // Every user schema, not only public. Tables are qualified by SCHEMA (the old
+      // code used the database name as the schema, so every Postgres drill failed).
       const { rows: tables } = await client.query(
-        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'",
+        "SELECT schemaname, tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') AND schemaname NOT LIKE 'pg_toast%'",
       );
       let total = 0n;
-      for (const t of tables as { tablename: string }[]) {
+      for (const t of tables as { schemaname: string; tablename: string }[]) {
         const { rows: [{ c }] } = await client.query(
-          `SELECT COUNT(*)::bigint AS c FROM "${safe}"."${String(t.tablename).replace(/"/g, '')}"`,
+          `SELECT COUNT(*)::bigint AS c FROM ${this.quoteIdentifier(t.schemaname)}.${this.quoteIdentifier(t.tablename)}`,
         );
         total += BigInt(c as string | number);
       }
