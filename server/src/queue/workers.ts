@@ -1,7 +1,7 @@
 import { createBackupWorker } from './backup.queue';
 import { createScheduleWorker } from './schedule.queue';
 import { createMigrationWorker } from './migration.queue';
-import { createSyncWorker } from './sync.queue';
+import { createSyncWorker } from './sync';
 import { createRetentionWorker, scheduleRetentionSweep } from './retention.queue';
 import { createRestoreWorker } from './restore.queue';
 import { createHeartbeatWorker, scheduleHeartbeatChecks } from './heartbeat.queue';

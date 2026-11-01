@@ -379,7 +379,7 @@ export class SyncEngineService {
     // Perform initial full sync if requested
     if (performInitialSync) {
       try {
-        const { addSyncJob } = await import('../../queue/sync.queue');
+        const { addSyncJob } = await import('../../queue/sync');
         await addSyncJob({
           configId: id,
           mode: 'full',
@@ -632,7 +632,7 @@ export class SyncEngineService {
     if (!jobId) return;
 
     try {
-      const { getSyncQueue } = await import('../../queue/sync.queue');
+      const { getSyncQueue } = await import('../../queue/sync');
       const queue = getSyncQueue();
       const job = await queue.getJob(jobId);
 
@@ -747,7 +747,7 @@ export class SyncEngineService {
     // Check if a sync job is already running (with atomic update to prevent race conditions)
     if (config.syncState.currentJobId) {
       // Check if the job actually exists in the queue
-      const { getSyncQueue } = await import('../../queue/sync.queue');
+      const { getSyncQueue } = await import('../../queue/sync');
       const queue = getSyncQueue();
       
       try {
@@ -802,7 +802,7 @@ export class SyncEngineService {
     }
 
     // Enqueue sync job using BullMQ
-    const { addSyncJob } = await import('../../queue/sync.queue');
+    const { addSyncJob } = await import('../../queue/sync');
     const jobId = await addSyncJob({
       configId: id,
       mode: force ? 'full' : 'incremental',

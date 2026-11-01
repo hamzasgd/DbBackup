@@ -2,7 +2,7 @@ import { Queue, Worker, Job } from 'bullmq';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { ConnectionConfig } from '../services/engines/base.engine';
-import { runMigration } from '../services/migration.service';
+import { runMigration } from '../services/migrations';
 import { logger } from '../config/logger';
 import { publishProgress, MIGRATION_PROGRESS_CHANNEL } from '../services/sse.service';
 import { notify } from '../services/notification.service';

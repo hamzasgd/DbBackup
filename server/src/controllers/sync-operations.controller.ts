@@ -3,7 +3,7 @@ import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
 import { streamSSE } from '../services/sse.service';
-import { SYNC_PROGRESS_CHANNEL } from '../queue/sync.queue';
+import { SYNC_PROGRESS_CHANNEL } from '../queue/sync';
 import { prisma } from '../config/database';
 
 const syncEngineService = new SyncEngineService();
