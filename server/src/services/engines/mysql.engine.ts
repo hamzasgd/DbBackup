@@ -6,6 +6,7 @@ import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
+import { cliEnv, mysqlRestoreGuardArgs } from './cli-safety';
 
 export class MySQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
@@ -24,8 +25,9 @@ export class MySQLEngine extends BaseEngine {
     ];
   }
 
+  /** Minimal environment (none of the app's secrets) plus the password, which stays off argv. */
   private getEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, MYSQL_PWD: this.config.password ?? undefined };
+    return cliEnv({ MYSQL_PWD: this.config.password ?? undefined });
   }
 
   private getSslOptions() {
@@ -129,7 +131,8 @@ export class MySQLEngine extends BaseEngine {
       const isGzip = backupFilePath.endsWith('.gz');
 
       await new Promise<void>((resolve, reject) => {
-        const mysqlArgs = [...this.getArgs('mysql', files), '--', dbName];
+        // The dump is only SQL to execute: client commands in it (\! shell, source, tee, connect) are refused
+        const mysqlArgs = [...this.getArgs('mysql', files), ...mysqlRestoreGuardArgs('mysql'), '--', dbName];
         const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';

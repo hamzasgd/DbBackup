@@ -4,6 +4,7 @@ import { getEngineHostPort } from '../utils/engine-host';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
 import { TlsFiles, mysqlCliTlsArgs } from '../../engines/tls';
 import { runPipe } from '../utils/process-pipe';
+import { cliEnv, mysqlRestoreGuardArgs } from '../../engines/cli-safety';
 
 /**
  * Get table metadata from MySQL/MariaDB database.
@@ -77,17 +78,19 @@ export async function migrateMySQL2MySQL(
           src.database,
           ...(opts.tables ?? []),
         ],
-        env: { ...process.env, MYSQL_PWD: src.password || undefined },
+        env: cliEnv({ MYSQL_PWD: src.password || undefined }),
       },
       {
         cmd: restoreCmd,
         args: [
           `-h${dstRef.host}`, `-P${dstRef.port}`, `-u${dst.username}`,
           ...mysqlCliTlsArgs(dst, restoreCmd, !!dstRef.tunnel, files),
+          // The source server controls the dump: run its SQL, refuse client commands (\! shell, source, connect)
+          ...mysqlRestoreGuardArgs(restoreCmd),
           '--',
           dst.database,
         ],
-        env: { ...process.env, MYSQL_PWD: dst.password || undefined },
+        env: cliEnv({ MYSQL_PWD: dst.password || undefined }),
       },
       'MySQL migration',
     );
