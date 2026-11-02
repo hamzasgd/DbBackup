@@ -120,8 +120,10 @@ jobs:
           docker run -d --name mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=pw -v "$c:/certs:ro" mariadb:11.4 \
             --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key
           # Host network on 127.0.0.1, as the MongoDB suite expects: it creates its user
-          # through the localhost exception, which a port-mapped container never sees
-          docker run -d --name mongo --network host mongo:8.0 --auth --bind_ip 127.0.0.1 --port 27017
+          # through the localhost exception, which a port-mapped container never sees.
+          # 7.0, not 8.x: MongoDB 8 refuses to start on Linux kernels 6.19 to 7.0.13
+          # (TCMalloc rseq bug, SERVER-121912), and the runner's kernel is in that range.
+          docker run -d --name mongo --network host mongo:7.0 --auth --bind_ip 127.0.0.1 --port 27017
           docker run -d --name redis-backup -p 6380:6379 redis:7.4 redis-server --requirepass pw
           docker run -d --name redis-queues -p 6379:6379 redis:7.4
           # Checked from the host, each try limited to 5 s: on first start the postgres and
