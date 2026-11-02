@@ -1,7 +1,20 @@
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import { SyncEngineService, CreateSyncConfigDto } from './sync-engine.service';
 import { prisma } from '../../config/database';
+import { encrypt } from '../crypto.service';
 import { SyncDirection, SyncMode, ConflictStrategy, DatabaseType } from '@prisma/client';
+
+// activateSyncConfiguration/triggerSync build engine configs via toEngineConfig,
+// which decrypts the stored connection credentials. Provide a throwaway key so
+// the fixtures below can be encrypted and round-tripped even when the runner
+// hasn't exported one. A real ENCRYPTION_KEY from the environment always wins.
+if (
+  !process.env.ENCRYPTION_KEY &&
+  !process.env.ENCRYPTION_KEY_PRIMARY &&
+  !process.env.KMS_WRAPPED_MASTER_KEY
+) {
+  process.env.ENCRYPTION_KEY = '0123456789abcdef'.repeat(4);
+}
 
 describe('SyncEngineService', () => {
   let service: SyncEngineService;
@@ -22,17 +35,19 @@ describe('SyncEngineService', () => {
     });
     testUserId = user.id;
 
-    // Create test connections (note: these won't actually connect to real databases)
+    // Create test connections (note: these won't actually connect to real
+    // databases). Credentials are stored encrypted, exactly as the app writes
+    // them, so the sync engine can decrypt them via toEngineConfig.
     const sourceConnection = await prisma.connection.create({
       data: {
         userId: testUserId,
         name: 'Test Source',
         type: DatabaseType.MYSQL,
-        host: 'localhost',
+        host: encrypt('localhost'),
         port: 3306,
-        username: 'test',
-        password: 'test',
-        database: 'test_source',
+        username: encrypt('test'),
+        password: encrypt('test'),
+        database: encrypt('test_source'),
       },
     });
     sourceConnectionId = sourceConnection.id;
@@ -42,11 +57,11 @@ describe('SyncEngineService', () => {
         userId: testUserId,
         name: 'Test Target',
         type: DatabaseType.MYSQL,
-        host: 'localhost',
+        host: encrypt('localhost'),
         port: 3306,
-        username: 'test',
-        password: 'test',
-        database: 'test_target',
+        username: encrypt('test'),
+        password: encrypt('test'),
+        database: encrypt('test_target'),
       },
     });
     targetConnectionId = targetConnection.id;
@@ -63,6 +78,16 @@ describe('SyncEngineService', () => {
     await prisma.user.delete({
       where: { id: testUserId },
     });
+  });
+
+  afterAll(async () => {
+    // triggerSync enqueues real BullMQ jobs during these tests and no worker
+    // runs, so they linger as 'waiting'. Drain and close the queue so reruns
+    // start clean and the Redis connection doesn't keep the process alive.
+    const { getSyncQueue } = await import('../../queue/sync');
+    const queue = getSyncQueue();
+    await queue.obliterate({ force: true }).catch(() => {});
+    await queue.close();
   });
 
   describe('createSyncConfiguration', () => {
@@ -625,8 +650,9 @@ describe('SyncEngineService', () => {
 
       const jobId = await service.triggerSync(config.id, false);
 
-      expect(jobId).toBeDefined();
-      expect(jobId).toContain('sync-');
+      // BullMQ assigns a numeric id (e.g. "1"), not a "sync-" prefixed string.
+      expect(typeof jobId).toBe('string');
+      expect(jobId.length).toBeGreaterThan(0);
 
       // Verify sync state was updated with job ID
       const updated = await prisma.syncConfiguration.findUnique({
@@ -668,7 +694,15 @@ describe('SyncEngineService', () => {
         targetConnectionId,
       });
 
-      // Create active sync state with existing job
+      // Enqueue a REAL job so the queue lookup finds a live ('waiting') job.
+      // triggerSync only rejects when the recorded job still exists and is
+      // neither completed nor failed; a fabricated id would be treated as
+      // stale and cleared, and the trigger would proceed. No worker runs in
+      // tests, so the enqueued job stays 'waiting'.
+      const { addSyncJob, getSyncQueue } = await import('../../queue/sync');
+      const runningJobId = await addSyncJob({ configId: config.id, mode: 'incremental' });
+
+      // Create active sync state pointing at the live job
       await prisma.syncConfiguration.update({
         where: { id: config.id },
         data: { isActive: true },
@@ -677,13 +711,17 @@ describe('SyncEngineService', () => {
         data: {
           syncConfigId: config.id,
           status: 'ACTIVE',
-          currentJobId: 'existing-job-id',
+          currentJobId: runningJobId,
         },
       });
 
       await expect(service.triggerSync(config.id, false)).rejects.toThrow(
         'A sync job is already running for this configuration'
       );
+
+      // Remove the job we enqueued so it doesn't linger in Redis
+      const queued = await getSyncQueue().getJob(runningJobId);
+      await queued?.remove();
 
       service['validateConnectionAccessibility'] = originalValidate;
     });
@@ -715,8 +753,9 @@ describe('SyncEngineService', () => {
 
       const jobId = await service.performFullSync(config.id);
 
-      expect(jobId).toBeDefined();
-      expect(jobId).toContain('sync-');
+      // BullMQ assigns a numeric id (e.g. "1"), not a "sync-" prefixed string.
+      expect(typeof jobId).toBe('string');
+      expect(jobId.length).toBeGreaterThan(0);
 
       service['validateConnectionAccessibility'] = originalValidate;
     });
