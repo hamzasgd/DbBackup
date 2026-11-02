@@ -745,7 +745,8 @@ function PasskeysCard() {
   const removeMutation = useMutation({
     mutationFn: (id: string) => authApi.deletePasskey(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['passkeys'] }); toast.success('Passkey removed') },
-    onError: () => toast.error('Failed to remove passkey'),
+    // Show the server's reason (e.g. the last passkey can't be removed in passkey-only mode)
+    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to remove passkey'),
   })
 
   return (

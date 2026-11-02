@@ -8,6 +8,7 @@ import type {
   RegistrationResponseJSON,
   AuthenticationResponseJSON,
 } from '@simplewebauthn/server';
+import { Prisma } from '@prisma/client';
 import { prisma } from '../config/database';
 
 /**
@@ -179,7 +180,21 @@ export async function listPasskeys(userId: string) {
   });
 }
 
-export async function deletePasskey(userId: string, id: string): Promise<boolean> {
-  const deleted = await prisma.passkeyCredential.deleteMany({ where: { id, userId } });
-  return deleted.count > 0;
+/**
+ * Remove one of the user's passkeys. In passkey-only mode (password sign-in
+ * disabled) the last passkey is the only way to sign in, so it can't be removed
+ * until password sign-in is turned back on. Serializable, so two concurrent
+ * deletes (or a delete racing togglePasswordLogin) can't both pass the check.
+ */
+export async function deletePasskey(userId: string, id: string): Promise<'deleted' | 'not-found' | 'last-passkey'> {
+  return prisma.$transaction(async (tx) => {
+    const cred = await tx.passkeyCredential.findFirst({ where: { id, userId }, select: { id: true } });
+    if (!cred) return 'not-found';
+    const user = await tx.user.findUnique({ where: { id: userId }, select: { passwordLoginDisabled: true } });
+    if (user?.passwordLoginDisabled && (await tx.passkeyCredential.count({ where: { userId } })) <= 1) {
+      return 'last-passkey';
+    }
+    await tx.passkeyCredential.delete({ where: { id: cred.id } });
+    return 'deleted';
+  }, { isolationLevel: Prisma.TransactionIsolationLevel.Serializable });
 }
