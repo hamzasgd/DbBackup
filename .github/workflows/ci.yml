@@ -1,8 +1,11 @@
 name: CI
 
-# Type-check and build the server and client, then run the server unit tests,
-# on every pull request and on main. CodeQL (codeql.yml) only scans for
-# security issues; it does not run tsc, so a type error could reach main.
+# On every pull request and on main:
+#   build-and-test  type-check and build the server and client, run the unit tests
+#   e2e             backups, restores, migrations, exports, TLS, SSH tunnels and the
+#                   app itself against real PostgreSQL, MariaDB, MongoDB and Redis
+#                   servers with the real CLI tools, plus the integration tests
+# CodeQL (codeql.yml) only scans for security issues; it does not run tsc.
 
 on:
   push:
@@ -40,3 +43,106 @@ jobs:
 
       - name: Unit tests
         run: npm test
+
+  e2e:
+    name: E2E and integration tests (real databases and CLI tools)
+    # The real engines against throwaway servers with the real CLI tools
+    # (server/src/test/e2e/README.md), plus the integration tests (Prisma + Redis).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      E2E_POSTGRES_URL: postgresql://postgres:pw@127.0.0.1:5432/postgres
+      E2E_APP_DATABASE_URL: postgresql://postgres:pw@127.0.0.1:5432/dbbackup_e2e_app
+      E2E_MARIADB_URL: mysql://root:pw@127.0.0.1:3306
+      E2E_MONGODB_URL: mongodb://e2e:pw@127.0.0.1:27017
+      E2E_REDIS_URL: redis://:pw@127.0.0.1:6380 # flushed by the Redis backup test
+      REDIS_HOST: 127.0.0.1 # the app's queues (app suite, integration tests)
+      REDIS_PORT: '6379'
+      TEST_DATABASE_URL: postgresql://postgres:pw@127.0.0.1:5432/dbbackup_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        working-directory: server
+        run: npx prisma generate
+
+      - name: Install database CLI tools
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          # PostgreSQL 17 client (pg_dump refuses servers newer than itself; the runner has 16)
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -q postgresql-client-17
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+          # MariaDB client: mariadb, mariadb-dump and the mysql / mysqldump names.
+          # It conflicts with the runner's preinstalled MySQL, which apt removes.
+          sudo apt-get install -y -q mariadb-client redis-tools
+          curl -fsSLo "$RUNNER_TEMP/mdt.deb" https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-x86_64-100.13.0.deb
+          sudo apt-get install -y -q "$RUNNER_TEMP/mdt.deb"
+
+      - name: Create TLS certificates for the test servers
+        run: |
+          # Server certificate for DNS:localhost only (no IP): the TLS suite checks
+          # that 127.0.0.1 / 127.0.0.2 fail name verification and another CA is refused.
+          d="$RUNNER_TEMP/certs" && mkdir -p "$d" && cd "$d"
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=DbBackup e2e CA" -keyout ca.key -out ca.crt
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 -subj "/CN=Other CA" -keyout other-ca.key -out other-ca.crt
+          openssl req -newkey rsa:2048 -nodes -subj "/CN=localhost" -keyout server.key -out server.csr
+          printf 'subjectAltName=DNS:localhost\n' > san.ext
+          openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key -CAcreateserial -days 2 -extfile san.ext -out server.crt
+          chmod 644 server.key
+          # Postgres (uid 999 in its image) only accepts a key that it owns and nobody else can read
+          cp server.key pg-server.key && sudo chown 999:999 pg-server.key && sudo chmod 600 pg-server.key
+          key=$(openssl rand -hex 32)
+          echo "::add-mask::$key"
+          {
+            echo "E2E_TLS_CA_FILE=$d/ca.crt"
+            echo "E2E_TLS_WRONG_CA_FILE=$d/other-ca.crt"
+            echo "ENCRYPTION_KEY=$key"
+          } >> "$GITHUB_ENV"
+
+      - name: Start test servers
+        run: |
+          c="$RUNNER_TEMP/certs"
+          docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=pw -v "$c:/certs:ro" postgres:17 \
+            -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/pg-server.key
+          docker run -d --name mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=pw -v "$c:/certs:ro" mariadb:11.4 \
+            --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key
+          docker run -d --name mongo -p 27017:27017 -e MONGO_INITDB_ROOT_USERNAME=e2e -e MONGO_INITDB_ROOT_PASSWORD=pw mongo:8.0
+          docker run -d --name redis-backup -p 6380:6379 redis:7.4 redis-server --requirepass pw
+          docker run -d --name redis-queues -p 6379:6379 redis:7.4
+          ready() { for _ in $(seq 1 60); do "$@" >/dev/null 2>&1 && return 0; sleep 2; done; echo "Not ready: $*"; return 1; }
+          ready pg_isready -h 127.0.0.1 -p 5432 -U postgres
+          ready mariadb-admin -h 127.0.0.1 -P 3306 -uroot -ppw ping
+          # From the host: the images' first-start init runs a temporary server that only
+          # listens inside the container, so these succeed once the real server is up
+          ready mongodump --host 127.0.0.1 --port 27017 -u e2e -p pw --authenticationDatabase admin \
+            --db admin --collection system.version --archive=/dev/null
+          ready redis-cli -p 6380 -a pw --no-auth-warning ping
+          ready redis-cli -p 6379 ping
+          PGPASSWORD=pw psql -h 127.0.0.1 -U postgres -qX -c 'CREATE DATABASE dbbackup_e2e_app' -c 'CREATE DATABASE dbbackup_test'
+          psql --version; mariadb --version; mongodump --version | head -1; redis-cli --version
+
+      - name: E2E tests
+        working-directory: server
+        run: npm run test:e2e
+
+      - name: Integration tests
+        working-directory: server
+        run: |
+          DATABASE_URL="$TEST_DATABASE_URL" npx prisma migrate deploy
+          npm run test:integration
+
+      - name: Server logs
+        if: failure()
+        run: for c in pg mariadb mongo redis-backup redis-queues; do echo "::group::$c"; docker logs --tail 80 "$c" 2>&1; echo "::endgroup::"; done
