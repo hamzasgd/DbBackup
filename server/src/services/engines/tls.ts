@@ -3,9 +3,9 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import tls from 'tls';
-import { spawnSync } from 'child_process';
 import { ConnectionConfig } from './base.engine';
 import { logger } from '../../config/logger';
+import { toolVersionText } from './cli-safety';
 
 /**
  * TLS settings for database connections, shared by every code path.
@@ -131,16 +131,9 @@ export function pgCliTls(
   return { host: connectHost, env };
 }
 
-const mysqlFlavorCache = new Map<string, 'mariadb' | 'mysql'>();
-
 /** The `mysql` binary on many systems (e.g. Alpine's mysql-client) is really the MariaDB client; their TLS flags differ. */
 export function mysqlClientFlavor(bin: string): 'mariadb' | 'mysql' {
-  const cached = mysqlFlavorCache.get(bin);
-  if (cached) return cached;
-  const out = spawnSync(bin, ['--version'], { encoding: 'utf8' });
-  const flavor = /mariadb/i.test(`${out.stdout ?? ''}${out.stderr ?? ''}`) ? 'mariadb' : 'mysql';
-  mysqlFlavorCache.set(bin, flavor);
-  return flavor;
+  return /mariadb/i.test(toolVersionText(bin)) ? 'mariadb' : 'mysql';
 }
 
 /** TLS flags for mysql / mysqldump / mariadb-dump. `tunnelled` = connecting through an SSH tunnel. */

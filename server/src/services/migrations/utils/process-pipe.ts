@@ -1,9 +1,13 @@
 import { spawn } from 'child_process';
+import { cliEnv } from '../../engines/cli-safety';
 
 export interface PipeSide {
   cmd: string;
   args: string[];
+  /** Defaults to the minimal CLI environment (none of the app's secrets), never process.env. */
   env?: NodeJS.ProcessEnv;
+  /** Restore side only: written to stdin before the dump output (e.g. psql's \restrict line). */
+  stdinPrefix?: string;
 }
 
 /**
@@ -14,8 +18,8 @@ export interface PipeSide {
  */
 export function runPipe(dump: PipeSide, restore: PipeSide, label: string): Promise<void> {
   return new Promise((resolve, reject) => {
-    const d = spawn(dump.cmd, dump.args, { env: dump.env ?? process.env });
-    const r = spawn(restore.cmd, restore.args, { env: restore.env ?? process.env });
+    const d = spawn(dump.cmd, dump.args, { env: dump.env ?? cliEnv() });
+    const r = spawn(restore.cmd, restore.args, { env: restore.env ?? cliEnv() });
 
     let dumpError = '';
     let restoreError = '';
@@ -29,6 +33,7 @@ export function runPipe(dump: PipeSide, restore: PipeSide, label: string): Promi
 
     // If the restore side dies early the dump gets EPIPE; report it through the exit codes
     r.stdin.on('error', () => undefined);
+    if (restore.stdinPrefix) r.stdin.write(restore.stdinPrefix);
     d.stdout.pipe(r.stdin);
 
     const finish = () => {

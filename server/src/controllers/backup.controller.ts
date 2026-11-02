@@ -5,6 +5,7 @@ import fs from 'fs';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
+import { cliEnv } from '../services/engines/cli-safety';
 import { decrypt } from '../services/crypto.service';
 import { addBackupJob } from '../queue/backup.queue';
 import { verifyBackup } from '../services/verification.service';
@@ -261,7 +262,7 @@ export async function restoreDryRun(req: AuthRequest, res: Response, next: NextF
         fs.unlinkSync(tmpPlain);
       } else if (backup.format === 'CUSTOM' || localPath.endsWith('.dump')) {
         try {
-          content = execFileSync('pg_restore', ['--list', localPath], { encoding: 'utf8', timeout: 30000 });
+          content = execFileSync('pg_restore', ['--list', localPath], { encoding: 'utf8', timeout: 30000, env: cliEnv() });
         } catch { content = ''; }
       } else {
         content = fs.readFileSync(localPath, 'utf8').slice(0, 5 * 1024 * 1024);

@@ -4,6 +4,7 @@ import { getEngineHostPort } from '../utils/engine-host';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
 import { TlsFiles, nodeTlsOptions, pgCliTls } from '../../engines/tls';
 import { runPipe } from '../utils/process-pipe';
+import { cliEnv, psqlRestrictLine } from '../../engines/cli-safety';
 
 /**
  * Get table metadata from PostgreSQL database.
@@ -70,7 +71,8 @@ function pgSide(cfg: ConnectionConfig, ref: { host: string; port: number }, file
   return {
     // Passwords and TLS settings go through the environment, never argv (argv is visible in `ps`)
     conn: ['-h', tls.host, '-p', String(ref.port), '-U', cfg.username, '-d', cfg.database, '--no-password'],
-    env: { ...process.env, PGPASSWORD: cfg.password || undefined, ...tls.env },
+    // Minimal environment: none of the app's own secrets reach pg_dump / psql
+    env: cliEnv({ PGPASSWORD: cfg.password || undefined, ...tls.env }),
     pool: () => new Pool({
       host: ref.host, port: ref.port, user: cfg.username, password: cfg.password ?? undefined,
       database: cfg.database, ssl: nodeTlsOptions(cfg), max: 1, connectionTimeoutMillis: 15000,
@@ -126,7 +128,14 @@ export async function migratePG2PG(
   try {
     const source = pgSide(src, srcRef, files);
     const target = pgSide(dst, dstRef, files);
-    const psql = (extra: string[] = []) => ({ cmd: 'psql', args: [...target.conn, '-q', '-v', 'ON_ERROR_STOP=1', ...extra], env: target.env });
+    // The source server controls what pg_dump prints: psql runs it in restricted mode
+    // (no \! shell, \o files, \c servers). See psqlRestrictLine() for when the line is needed.
+    const psql = (extra: string[] = []) => ({
+      cmd: 'psql',
+      args: [...target.conn, '-q', '-v', 'ON_ERROR_STOP=1', ...extra],
+      env: target.env,
+      stdinPrefix: psqlRestrictLine('psql', 'pg_dump'),
+    });
 
     // ── which tables
     const sourceTables = await listUserTables(source);

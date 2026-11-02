@@ -6,6 +6,7 @@ import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, Connecti
 import { SSHTunnel } from '../ssh.service';
 import { TlsFiles, mongoCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
+import { cliEnv } from './cli-safety';
 
 /**
  * NoSQL engines via native CLIs (same philosophy as the SQL engines):
@@ -23,7 +24,7 @@ import { buildBackupPath } from './backup-path';
 
 abstract class CliEngine extends BaseEngine {
   /** Run a CLI command; resolves stdout, rejects with stderr on non-zero exit. */
-  protected runCli(cmd: string, args: string[], env: NodeJS.ProcessEnv = process.env, timeoutMs = 300_000): Promise<{ stdout: string; stderr: string }> {
+  protected runCli(cmd: string, args: string[], env: NodeJS.ProcessEnv = cliEnv(), timeoutMs = 300_000): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const proc = spawn(cmd, args, { env });
       let stdout = '';
@@ -176,21 +177,21 @@ export class RedisEngine extends CliEngine {
   }
 
   /** redis-cli reads the password from REDISCLI_AUTH, which keeps it out of argv. */
-  private cliEnv(): NodeJS.ProcessEnv {
-    return { ...process.env, REDISCLI_AUTH: this.config.password || undefined };
+  private redisEnv(): NodeJS.ProcessEnv {
+    return cliEnv({ REDISCLI_AUTH: this.config.password || undefined });
   }
 
   async testConnection(): Promise<TestConnectionResult> {
     const { tunnel, port } = await this.openTunnel();
     try {
-      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.cliEnv(), 10_000);
+      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.redisEnv(), 10_000);
       if (!stdout.includes('PONG')) {
         return { success: false, message: `Unexpected reply: ${stdout.trim().slice(0, 100)}` };
       }
       // Try to surface the server version for the UI
       let version = '';
       try {
-        const info = await this.runCli('redis-cli', [...this.cliArgs(port), 'INFO', 'server'], this.cliEnv(), 10_000);
+        const info = await this.runCli('redis-cli', [...this.cliArgs(port), 'INFO', 'server'], this.redisEnv(), 10_000);
         const m = /redis_version:([^\r\n]+)/.exec(info.stdout);
         if (m) version = m[1].trim();
       } catch { /* version is optional */ }
@@ -210,7 +211,7 @@ export class RedisEngine extends CliEngine {
       options.onProgress?.(10);
 
       // redis-cli --rdb streams a BGSAVE snapshot to the given file
-      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath], this.cliEnv());
+      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath], this.redisEnv());
       void stderr;
       options.onProgress?.(95);
       const stats = statSync(filePath);
@@ -234,7 +235,7 @@ export class RedisEngine extends CliEngine {
     const started = Date.now();
     const { tunnel, port } = await this.openTunnel();
     try {
-      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.cliEnv(), timeoutMs);
+      const { stdout } = await this.runCli('redis-cli', [...this.cliArgs(port), 'PING'], this.redisEnv(), timeoutMs);
       if (!stdout.includes('PONG')) throw new Error(`Unexpected reply: ${stdout.trim()}`);
       return { up: true, latencyMs: Date.now() - started };
     } catch (e) {

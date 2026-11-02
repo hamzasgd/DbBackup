@@ -8,15 +8,16 @@ import { dumpToFile } from './dump-to-file';
 import { Pool, Client } from 'pg';
 import { TlsFiles, nodeTlsOptions, pgCliTls } from './tls';
 import { buildBackupPath } from './backup-path';
+import { cliEnv, psqlRestrictLine } from './cli-safety';
 
 export class PostgreSQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
     return `"${identifier.replace(/"/g, '""')}"`;
   }
 
-  /** Environment for psql / pg_dump / pg_restore: password and TLS settings (never on argv). */
+  /** Environment for psql / pg_dump / pg_restore: minimal (none of the app's secrets) plus password and TLS settings (never on argv). */
   private getEnv(files: TlsFiles): NodeJS.ProcessEnv {
-    return { ...process.env, PGPASSWORD: this.config.password ?? undefined, ...this.cliTls(files).env };
+    return cliEnv({ PGPASSWORD: this.config.password ?? undefined, ...this.cliTls(files).env });
   }
 
   private cliTls(files: TlsFiles) {
@@ -220,6 +221,12 @@ export class PostgreSQLEngine extends BaseEngine {
             }
           });
           fileStream.on('error', reject);
+          // Restricted mode first: psql then runs the dump's SQL but none of its backslash
+          // commands (\! shell, \o files, \c servers). Dumps from pg_dump 17.6+ carry their
+          // own \restrict / \unrestrict lines; psql reports those two as errors and goes on,
+          // which is why this restore must not use ON_ERROR_STOP.
+          const restrict = psqlRestrictLine('psql');
+          if (restrict) proc.stdin.write(restrict);
           fileStream.pipe(proc.stdin);
         }
 
