@@ -38,7 +38,7 @@ export interface StoredConnection {
  * bundle import or predate that check, so enforce it where every engine config
  * is built: a leading "-" would be parsed as an option (option injection).
  */
-function assertCliSafe(label: string, value: string | undefined): void {
+function assertCliSafe(label: string, value: string | null | undefined): void {
   if (value && (value.startsWith('-') || /[\r\n\0]/.test(value))) {
     throw new Error(`Connection ${label} is not allowed: it must not start with "-" or contain control characters`);
   }
