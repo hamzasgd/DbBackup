@@ -112,24 +112,34 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Start test servers
+        timeout-minutes: 8
         run: |
           c="$RUNNER_TEMP/certs"
           docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=pw -v "$c:/certs:ro" postgres:17 \
             -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/pg-server.key
           docker run -d --name mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=pw -v "$c:/certs:ro" mariadb:11.4 \
             --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key
-          docker run -d --name mongo -p 27017:27017 -e MONGO_INITDB_ROOT_USERNAME=e2e -e MONGO_INITDB_ROOT_PASSWORD=pw mongo:8.0
+          # Host network on 127.0.0.1, as the MongoDB suite expects: it creates its user
+          # through the localhost exception, which a port-mapped container never sees
+          docker run -d --name mongo --network host mongo:8.0 --auth --bind_ip 127.0.0.1 --port 27017
           docker run -d --name redis-backup -p 6380:6379 redis:7.4 redis-server --requirepass pw
           docker run -d --name redis-queues -p 6379:6379 redis:7.4
-          ready() { for _ in $(seq 1 60); do "$@" >/dev/null 2>&1 && return 0; sleep 2; done; echo "Not ready: $*"; return 1; }
+          # Checked from the host, each try limited to 5 s: on first start the postgres and
+          # mariadb images run a temporary server that only listens inside the container,
+          # so a check passes once the real server is up.
+          ready() {
+            local out="$RUNNER_TEMP/ready.log"
+            for _ in $(seq 1 45); do
+              if timeout 5 "$@" >"$out" 2>&1; then echo "ready: $1"; return 0; fi
+              sleep 2
+            done
+            echo "::error::not ready: $*"; tail -n 20 "$out"; return 1
+          }
           ready pg_isready -h 127.0.0.1 -p 5432 -U postgres
           ready mariadb-admin -h 127.0.0.1 -P 3306 -uroot -ppw ping
-          # From the host: the images' first-start init runs a temporary server that only
-          # listens inside the container, so these succeed once the real server is up
-          ready mongodump --host 127.0.0.1 --port 27017 -u e2e -p pw --authenticationDatabase admin \
-            --db admin --collection system.version --archive=/dev/null
           ready redis-cli -p 6380 -a pw --no-auth-warning ping
           ready redis-cli -p 6379 ping
+          ready docker exec mongo mongosh --quiet --eval 'db.runCommand({ ping: 1 }).ok'
           PGPASSWORD=pw psql -h 127.0.0.1 -U postgres -qX -c 'CREATE DATABASE dbbackup_e2e_app' -c 'CREATE DATABASE dbbackup_test'
           psql --version; mariadb --version; mongodump --version | head -1; redis-cli --version
 
@@ -144,5 +154,7 @@ jobs:
           npm run test:integration
 
       - name: Server logs
-        if: failure()
-        run: for c in pg mariadb mongo redis-backup redis-queues; do echo "::group::$c"; docker logs --tail 80 "$c" 2>&1; echo "::endgroup::"; done
+        if: failure() || cancelled()
+        run: |
+          docker ps -a
+          for c in pg mariadb mongo redis-backup redis-queues; do echo "::group::$c"; docker logs --tail 80 "$c" 2>&1; echo "::endgroup::"; done
