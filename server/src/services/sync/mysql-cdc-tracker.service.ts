@@ -10,6 +10,15 @@ import {
 } from './sync-utils';
 import type { ChangeLog, PrimaryKeyValues, RowData } from './types';
 
+/**
+ * Quote a value as a MySQL string literal. Table/column names come from the
+ * catalog; doubling only `'` left a trailing backslash able to escape the
+ * closing quote (default sql_mode treats `\` as an escape character).
+ */
+function mysqlStringLiteral(value: string): string {
+  return "'" + String(value).replace(/\\/g, '\\\\').replace(/'/g, "''") + "'";
+}
+
 interface BinlogPosition {
   file: string;
   position: number;
@@ -140,12 +149,11 @@ export class MySQLCDCTracker extends BaseCDCTracker {
     `);
 
     // Build primary key JSON object for triggers using escaped column refs
-    const pkJsonParts = pkColumns.map((col) => `'${col.replace(/'/g, "''")}', OLD.${escapeIdentifierMySQL(col)}`).join(', ');
-    const pkJsonPartsNew = pkColumns.map((col) => `'${col.replace(/'/g, "''")}', NEW.${escapeIdentifierMySQL(col)}`).join(', ');
+    const pkJsonParts = pkColumns.map((col) => `${mysqlStringLiteral(col)}, OLD.${escapeIdentifierMySQL(col)}`).join(', ');
+    const pkJsonPartsNew = pkColumns.map((col) => `${mysqlStringLiteral(col)}, NEW.${escapeIdentifierMySQL(col)}`).join(', ');
     const allColumnsJsonNew = this.buildAllColumnsJson(allColumns, 'NEW');
     const allColumnsJsonOld = this.buildAllColumnsJson(allColumns, 'OLD');
 
-    const escapedSyncConfigId = syncConfigId.replace(/'/g, "''");
 
     // INSERT trigger
     const insertTriggerName = `${triggerPrefix}_${sanitizedConfigId}_insert`;
@@ -157,8 +165,8 @@ export class MySQLCDCTracker extends BaseCDCTracker {
       BEGIN
         INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${escapedSyncConfigId}',
-          '${tableName.replace(/'/g, "''")}',
+          ${mysqlStringLiteral(syncConfigId)},
+          ${mysqlStringLiteral(tableName)},
           'INSERT',
           JSON_OBJECT(${pkJsonPartsNew}),
           JSON_OBJECT(${allColumnsJsonNew})
@@ -176,8 +184,8 @@ export class MySQLCDCTracker extends BaseCDCTracker {
       BEGIN
         INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${escapedSyncConfigId}',
-          '${tableName.replace(/'/g, "''")}',
+          ${mysqlStringLiteral(syncConfigId)},
+          ${mysqlStringLiteral(tableName)},
           'UPDATE',
           JSON_OBJECT(${pkJsonPartsNew}),
           JSON_OBJECT(${allColumnsJsonNew})
@@ -195,8 +203,8 @@ export class MySQLCDCTracker extends BaseCDCTracker {
       BEGIN
         INSERT INTO ${escapedDb}.\`_cdc_changelog\` (sync_config_id, table_name, operation, primary_key_values, change_data)
         VALUES (
-          '${escapedSyncConfigId}',
-          '${tableName.replace(/'/g, "''")}',
+          ${mysqlStringLiteral(syncConfigId)},
+          ${mysqlStringLiteral(tableName)},
           'DELETE',
           JSON_OBJECT(${pkJsonParts}),
           NULL
@@ -230,7 +238,7 @@ export class MySQLCDCTracker extends BaseCDCTracker {
     if (columns.length === 0) {
       return "'{}'";
     }
-    const parts = columns.map((col) => `'${col.replace(/'/g, "''")}', ${prefix}.${escapeIdentifierMySQL(col)}`).join(', ');
+    const parts = columns.map((col) => `${mysqlStringLiteral(col)}, ${prefix}.${escapeIdentifierMySQL(col)}`).join(', ');
     return parts;
   }
 

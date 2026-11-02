@@ -58,14 +58,21 @@ export class KeyManager {
       index++;
     }
 
-    if (this.keys.size === 0) {
-      if (process.env.KMS_WRAPPED_MASTER_KEY) {
-        // Master key lives (wrapped) in AWS KMS — unwrapped in-memory at boot
-        // via initializeFromKms(). Nothing key-shaped ever touches this disk.
-        this.awaitingKmsUnwrap = true;
-        logger.info('KeyManager awaiting KMS-wrapped master key unwrap');
-        return;
+    if (process.env.KMS_WRAPPED_MASTER_KEY) {
+      // Master key lives (wrapped) in AWS KMS — unwrapped in-memory at boot via
+      // initializeFromKms() and always becomes the primary key. Any plaintext
+      // ENCRYPTION_KEY* still loaded is decrypt-only (for rows written before
+      // KMS was enabled), so new ciphertext never depends on a key on disk.
+      for (const k of this.keys.values()) k.isPrimary = false;
+      this.awaitingKmsUnwrap = true;
+      logger.info(`KeyManager awaiting KMS-wrapped master key unwrap (${this.keys.size} env key(s) loaded decrypt-only)`);
+      if (this.keys.size > 0) {
+        logger.warn('⚠️  KMS_WRAPPED_MASTER_KEY is set but plaintext ENCRYPTION_KEY* values are still configured — they can still decrypt older rows. Re-encrypt under KMS and remove them to make the kill switch effective.');
       }
+      return;
+    }
+
+    if (this.keys.size === 0) {
       throw new Error('No encryption keys configured. Set ENCRYPTION_KEY, ENCRYPTION_KEY_PRIMARY or KMS_WRAPPED_MASTER_KEY.');
     }
 
@@ -103,13 +110,20 @@ export class KeyManager {
   }
 
   private addKey(id: string, hexKey: string, isPrimary: boolean): void {
-    if (hexKey.length !== 64) {
-      throw new Error(`Encryption key ${id} must be 64 hex characters (32 bytes)`);
+    // Buffer.from(s, 'hex') silently stops at the first non-hex character, so a
+    // 64-char base64 string or passphrase would become a 0-byte key. Require
+    // exactly 64 hex characters that decode to 32 bytes.
+    if (!/^[0-9a-fA-F]{64}$/.test(hexKey)) {
+      throw new Error(`Encryption key ${id} must be exactly 64 hex characters (32 bytes) — generate one with: openssl rand -hex 32`);
+    }
+    const key = Buffer.from(hexKey, 'hex');
+    if (key.length !== 32) {
+      throw new Error(`Encryption key ${id} did not decode to 32 bytes`);
     }
 
     this.keys.set(id, {
       id,
-      key: Buffer.from(hexKey, 'hex'),
+      key,
       createdAt: new Date(),
       isPrimary,
     });

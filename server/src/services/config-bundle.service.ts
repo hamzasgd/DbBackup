@@ -4,6 +4,34 @@ import { logger } from '../config/logger';
 import { logAudit } from './audit.service';
 import { notify } from './notification.service';
 import crypto from 'crypto';
+import { CronExpressionParser } from 'cron-parser';
+
+// Bundles are decrypted JSON written by whoever made the file, so only these
+// scalar columns may be imported. Spreading the raw object let a bundle add
+// relation writes (e.g. nested `backups: { create: [...] }` rows with an
+// arbitrary filePath that retention would later delete recursively).
+const CONNECTION_OPTIONAL_FIELDS = [
+  'sslCa', 'sslCert', 'sslKey', 'sshHost', 'sshUsername', 'sshPrivateKey',
+  'sshPrivateKeyPath', 'sshPassphrase', 'sshHostKey',
+] as const;
+const NOTIFICATION_FIELDS = [
+  'emailEnabled', 'emailAddress', 'smtpHost', 'smtpPort', 'smtpUser', 'smtpPass', 'smtpSecure',
+  'slackEnabled', 'slackWebhookUrl', 'ntfyEnabled', 'ntfyServerUrl', 'ntfyTopic',
+  'telegramEnabled', 'telegramBotToken', 'telegramChatId', 'discordEnabled', 'discordWebhookUrl',
+  'whatsappEnabled', 'whatsappPhoneNumberId', 'whatsappAccessToken', 'whatsappRecipient',
+  'notifyOnSuccess', 'notifyOnFailure', 'notifyOnRetention', 'notifyOnLogin', 'notifyOnStorage',
+] as const;
+const CONNECTION_TYPES = ['MYSQL', 'MARIADB', 'POSTGRESQL', 'MONGODB', 'REDIS'];
+
+function optString(v: unknown): string | null {
+  return v === null || v === undefined || v === '' ? null : String(v);
+}
+
+function optInt(v: unknown): number | null {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) ? n : null;
+}
 
 /**
  * Config bundle — "backup DbBackup itself". Exports ALL connections,
@@ -93,22 +121,27 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
     const newId = uuidv4();
     const oldId = String(conn.id ?? '');
     if (oldId) idMap.set(oldId, newId);
+    const type = String(conn.type ?? 'MYSQL');
+    if (!CONNECTION_TYPES.includes(type)) throw new Error(`Bundle connection has an unknown type: ${type}`);
+    const optional = Object.fromEntries(CONNECTION_OPTIONAL_FIELDS.map((k) => [k, optString(conn[k])]));
     await prisma.connection.create({
       data: {
         id: newId,
         userId,
         name: String(conn.name ?? 'imported'),
-        type: String(conn.type ?? 'MYSQL') as never,
+        type: type as never,
         host: String(conn.host ?? ''),
-        port: Number(conn.port ?? 3306),
+        port: optInt(conn.port) ?? 3306,
         username: String(conn.username ?? ''),
         password: String(conn.password ?? ''),
         database: String(conn.database ?? ''),
         sslEnabled: Boolean(conn.sslEnabled),
         sshEnabled: Boolean(conn.sshEnabled),
+        sshPort: optInt(conn.sshPort) ?? 22,
+        connectionTimeout: optInt(conn.connectionTimeout) ?? 30000,
         heartbeatEnabled: Boolean(conn.heartbeatEnabled),
-        expectedBackupHours: conn.expectedBackupHours ? Number(conn.expectedBackupHours) : null,
-        ...Object.fromEntries(Object.entries(conn).filter(([k]) => !['id', 'userId', 'createdAt', 'updatedAt', 'heartbeats', 'type'].includes(k))),
+        expectedBackupHours: optInt(conn.expectedBackupHours),
+        ...optional,
       },
     });
     connCount++;
@@ -119,17 +152,22 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
   for (const sched of bundle.schedules ?? []) {
     const mappedConnId = sched._originalConnectionId ? idMap.get(sched._originalConnectionId) : null;
     if (!mappedConnId) continue; // schedule references a connection that wasn't imported
+    const cronExpression = String(sched.cronExpression ?? '0 3 * * *');
+    try {
+      CronExpressionParser.parse(cronExpression);
+    } catch {
+      throw new Error(`Bundle schedule "${String(sched.name ?? '')}" has an invalid cron expression`);
+    }
     await prisma.schedule.create({
       data: {
         id: uuidv4(),
         connectionId: mappedConnId,
         name: String(sched.name ?? 'imported'),
         frequency: String(sched.frequency ?? 'DAILY') as never,
-        cronExpression: String(sched.cronExpression ?? '0 3 * * *'),
+        cronExpression,
         isActive: Boolean(sched.isActive ?? true),
-        retentionDays: Number(sched.retentionDays ?? 30),
-        retentionCount: sched.retentionCount ? Number(sched.retentionCount) : null,
-        ...Object.fromEntries(Object.entries(sched).filter(([k]) => !['id', 'userId', 'connectionId', 'createdAt', 'updatedAt', 'lastRunAt', 'nextRunAt', '_originalConnectionId', 'frequency'].includes(k))),
+        retentionDays: optInt(sched.retentionDays) ?? 30,
+        retentionCount: optInt(sched.retentionCount),
       },
     });
     schedCount++;
@@ -137,9 +175,9 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
 
   // Import notification settings
   if (bundle.notificationSettings) {
-    // Never let the bundle set identity/ownership columns (e.g. override userId)
-    const { id: _id, userId: _uid, createdAt: _c, updatedAt: _u, ...nsData } = bundle.notificationSettings as Record<string, unknown>;
-    void _id; void _uid; void _c; void _u;
+    // Only known notification columns; never identity/ownership or relation fields
+    const raw = bundle.notificationSettings as Record<string, unknown>;
+    const nsData = Object.fromEntries(NOTIFICATION_FIELDS.filter((k) => k in raw).map((k) => [k, raw[k]]));
     await prisma.notificationSettings.upsert({
       where: { userId },
       create: { userId, ...nsData } as never,

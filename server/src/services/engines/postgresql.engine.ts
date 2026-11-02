@@ -7,6 +7,7 @@ import { SSHTunnel } from '../ssh.service';
 import { dumpToFile } from './dump-to-file';
 import { Pool, Client } from 'pg';
 import { TlsFiles, nodeTlsOptions, pgCliTls } from './tls';
+import { buildBackupPath } from './backup-path';
 
 export class PostgreSQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
@@ -107,8 +108,7 @@ export class PostgreSQLEngine extends BaseEngine {
         COMPRESSED_SQL: { flag: '-Fp', ext: '.sql.gz' },
       };
       const { flag, ext } = formatMap[format] ?? formatMap['CUSTOM'];
-      const fileName = `postgres_${this.config.database}_${timestamp}${ext}`;
-      const outputPath = path.join(outputDir, fileName);
+      const { fileName, filePath: outputPath } = buildBackupPath(outputDir, 'postgres', this.config.database, timestamp, ext);
 
       if (format === 'DIRECTORY') {
         mkdirSync(outputPath, { recursive: true });

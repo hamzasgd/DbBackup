@@ -5,6 +5,7 @@ import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { TlsFiles, mongoCliTlsArgs } from './tls';
+import { buildBackupPath } from './backup-path';
 
 /**
  * NoSQL engines via native CLIs (same philosophy as the SQL engines):
@@ -109,8 +110,7 @@ export class MongoEngine extends CliEngine {
     const { tunnel, port } = await this.openTunnel();
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `mongodb_${this.config.database}_${timestamp}.archive.gz`;
-      const filePath = path.join(outputDir, fileName);
+      const { fileName, filePath } = buildBackupPath(outputDir, 'mongodb', this.config.database, timestamp, '.archive.gz');
       options.onProgress?.(5);
 
       await this.runMongo('mongodump', port, [
@@ -206,8 +206,7 @@ export class RedisEngine extends CliEngine {
     const { tunnel, port } = await this.openTunnel();
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-      const fileName = `redis_${this.config.database}_${timestamp}.rdb`;
-      const filePath = path.join(outputDir, fileName);
+      const { fileName, filePath } = buildBackupPath(outputDir, 'redis', this.config.database, timestamp, '.rdb');
       options.onProgress?.(10);
 
       // redis-cli --rdb streams a BGSAVE snapshot to the given file

@@ -47,6 +47,21 @@ function buildEngineConfig(conn: StoredConnection) {
   return toEngineConfig(conn);
 }
 
+/**
+ * Keep only the arguments a tool declares in its inputSchema. Agents can send
+ * any JSON object; undeclared keys are never read by handlers, but they used to
+ * be stored on pending approvals, where padding could push the real target
+ * (e.g. backupId) out of the owner's view.
+ */
+function pickDeclaredArgs(tool: McpToolDef, args: Record<string, unknown>): Record<string, unknown> {
+  const props = (tool.inputSchema as { properties?: Record<string, unknown> }).properties ?? {};
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(props)) {
+    if (args && Object.prototype.hasOwnProperty.call(args, key)) out[key] = args[key];
+  }
+  return out;
+}
+
 async function ownedConnection(ctx: McpToolContext, connectionId: unknown) {
   if (typeof connectionId !== 'string' || !connectionId) throw new Error('connectionId (string) is required');
   const conn = await prisma.connection.findFirst({ where: { id: connectionId, userId: ctx.userId } });
@@ -287,9 +302,10 @@ export function toolSummaries(scopes: McpScope[]) {
     .map((t) => ({ name: t.name, description: t.description, inputSchema: t.inputSchema }));
 }
 
-export async function dispatchTool(name: string, args: Record<string, unknown>, ctx: McpToolContext): Promise<{ text: string; isError: boolean; approvalId?: string; pendingApproval?: boolean }> {
+export async function dispatchTool(name: string, rawArgs: Record<string, unknown>, ctx: McpToolContext): Promise<{ text: string; isError: boolean; approvalId?: string; pendingApproval?: boolean }> {
   const tool = MCP_TOOLS.find((t) => t.name === name);
   if (!tool) return { text: `Unknown tool: ${name}`, isError: true };
+  const args = pickDeclaredArgs(tool, rawArgs ?? {});
   if (!ctx.scopes.includes(tool.scope)) {
     return { text: `Tool "${name}" requires the "${tool.scope}" scope (key "${ctx.keyName}" has: ${ctx.scopes.join(', ') || 'none'})`, isError: true };
   }
@@ -316,25 +332,28 @@ export async function dispatchTool(name: string, args: Record<string, unknown>, 
 
   try {
     // Per-key daily quota
-    const key = await prisma.mcpApiKey.findUnique({ where: { id: ctx.keyId }, select: { dailyCallLimit: true, callsToday: true, callsResetAt: true } });
+    const key = await prisma.mcpApiKey.findUnique({ where: { id: ctx.keyId }, select: { dailyCallLimit: true } });
     if (key?.dailyCallLimit && key.dailyCallLimit > 0) {
+      // Reserve one call atomically in the database. A read-then-write here let
+      // concurrent requests all pass the check and overwrite each other's count.
       const now = new Date();
-      const needsReset = !key.callsResetAt || new Date(key.callsResetAt) < now;
-      const todayCount = needsReset ? 0 : key.callsToday;
-
-      if (todayCount >= key.dailyCallLimit) {
+      const nextReset = new Date(now);
+      nextReset.setUTCHours(24, 0, 0, 0);
+      // Roll the window first (only the first caller after reset matches)
+      await prisma.mcpApiKey.updateMany({
+        where: { id: ctx.keyId, OR: [{ callsResetAt: null }, { callsResetAt: { lt: now } }] },
+        data: { callsToday: 0, callsResetAt: nextReset },
+      });
+      const reserved = await prisma.mcpApiKey.updateMany({
+        where: { id: ctx.keyId, callsToday: { lt: key.dailyCallLimit } },
+        data: { callsToday: { increment: 1 } },
+      });
+      if (reserved.count === 0) {
         return {
           text: `Daily call limit reached (${key.dailyCallLimit}). Resets at midnight UTC. Current key: "${ctx.keyName}".`,
           isError: true,
         };
       }
-
-      const nextReset = new Date(now);
-      nextReset.setUTCHours(24, 0, 0, 0);
-      await prisma.mcpApiKey.update({
-        where: { id: ctx.keyId },
-        data: { callsToday: todayCount + 1, callsResetAt: nextReset },
-      });
     }
 
     const text = await tool.handler(args, ctx);

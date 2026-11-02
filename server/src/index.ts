@@ -24,7 +24,9 @@ function auditEnvFileSecurity(): void {
   if (process.env.NODE_ENV === 'production' && typeof process.getuid === 'function' && process.getuid() === 0) {
     logger.warn('⚠️  Running as root in production — use a dedicated unprivileged user for the app');
   }
-  if (process.env.NODE_ENV === 'production' && !process.env.KMS_WRAPPED_MASTER_KEY && process.env.ENCRYPTION_KEY) {
+  // KMS mode always makes the KMS key primary (key-manager.ts); plaintext env keys
+  // left alongside it are decrypt-only and KeyManager warns about them itself.
+  if (process.env.NODE_ENV === 'production' && !process.env.KMS_WRAPPED_MASTER_KEY && (process.env.ENCRYPTION_KEY || process.env.ENCRYPTION_KEY_PRIMARY)) {
     logger.warn('⚠️  ENCRYPTION_KEY is a plaintext env var — consider the KMS kill-switch (KMS_WRAPPED_MASTER_KEY) so the master key never touches disk');
   }
 }

@@ -1,3 +1,4 @@
+import { randomBytes } from 'crypto';
 import { Pool, PoolClient } from 'pg';
 import { BaseCDCTracker } from './base-cdc-tracker';
 import { prisma } from '../../config/database';
@@ -166,10 +167,15 @@ export class PostgreSQLCDCTracker extends BaseCDCTracker {
     const escapedTableName = tableName.replace(/'/g, "''");
     const funcName = escapeIdentifierPG(`${triggerPrefix}_${tableName}_fn`);
 
+    // The function body is dollar-quoted. Table/column names from the catalog are
+    // embedded in it, so a fixed `$$` tag could be closed early by a name that
+    // contains `$$`. Use a random tag and refuse to run if it appears anywhere else.
+    const bodyTag = `$cdc_${randomBytes(8).toString('hex')}$`;
+
     // Create trigger function for this table
-    await client.query(`
+    const functionSql = `
       CREATE OR REPLACE FUNCTION ${funcName}()
-      RETURNS TRIGGER AS $$
+      RETURNS TRIGGER AS ${bodyTag}
       BEGIN
         IF (TG_OP = 'INSERT') THEN
           INSERT INTO "_cdc_changelog" (sync_config_id, table_name, operation, primary_key_values, change_data)
@@ -204,8 +210,12 @@ export class PostgreSQLCDCTracker extends BaseCDCTracker {
         END IF;
         RETURN NULL;
       END;
-      $$ LANGUAGE plpgsql;
-    `);
+      ${bodyTag} LANGUAGE plpgsql;
+    `;
+    if (functionSql.split(bodyTag).length !== 3) {
+      throw new Error(`Refusing to create CDC trigger for table ${JSON.stringify(tableName)}: unsafe identifier`);
+    }
+    await client.query(functionSql);
 
     // Create triggers
     const insertTrigger = escapeIdentifierPG(`${triggerPrefix}_${tableName}_insert`);

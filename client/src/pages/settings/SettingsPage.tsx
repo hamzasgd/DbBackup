@@ -1071,9 +1071,10 @@ function McpTab() {
                     <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded">{a.tool}</code>
                     <span className="text-gray-400 ml-2">via {a.keyName}</span>
                   </p>
-                  <p className="text-xs text-gray-500 mt-0.5 truncate">
-                    {JSON.stringify(a.args ?? {})}
-                  </p>
+                  {/* Show every argument in full: the owner must see exactly what will run */}
+                  <pre className="text-xs text-gray-600 mt-1 whitespace-pre-wrap break-all font-mono bg-white/60 rounded p-1.5 max-h-48 overflow-auto">
+                    {JSON.stringify(a.args ?? {}, null, 2)}
+                  </pre>
                 </div>
                 <div className="flex gap-2 shrink-0">
                   <Button size="sm" onClick={() => approveMutation.mutate(a.id)} loading={approveMutation.isPending && approveMutation.variables === a.id}>

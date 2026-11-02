@@ -1,7 +1,7 @@
 import mysql2 from 'mysql2/promise';
 import { Pool, PoolClient } from 'pg';
 import { ConnectionConfig } from '../../engines/base.engine';
-import { buildPGCreateTable, escapeValue } from '../schema/schema-builder';
+import { buildPGCreateTable, buildMySQLCreateTable, escapeValue, quotePG, quoteMySQL } from '../schema/schema-builder';
 import { getMySQLTableMeta } from './mysql-executor';
 import { getPGTableMeta } from './pg-executor';
 import { TableMeta, MigrationOptions } from '../types/migration.types';
@@ -56,7 +56,7 @@ export async function migrateMySQL2PG(
       const dstClient = await dstPool.connect();
 
       try {
-        await dstClient.query(`DROP TABLE IF EXISTS "${meta.name}" CASCADE`);
+        await dstClient.query(`DROP TABLE IF EXISTS ${quotePG(meta.name)} CASCADE`);
         await dstClient.query(createSQL);
         opts.onProgress?.({
           currentTable: meta.name,
@@ -72,13 +72,13 @@ export async function migrateMySQL2PG(
 
         while (true) {
           const [rows] = await srcConn.query<mysql2.RowDataPacket[]>(
-            `SELECT * FROM \`${meta.name}\` LIMIT ? OFFSET ?`,
+            `SELECT * FROM ${quoteMySQL(meta.name)} LIMIT ? OFFSET ?`,
             [batchSize, offset]
           );
 
           if (rows.length === 0) break;
 
-          const columns = meta.columns.map((c) => c.name).join(', ');
+          const columns = meta.columns.map((c) => quotePG(c.name)).join(', ');
           const placeholders = meta.columns.map((_, idx) => `$${idx + 1}`).join(', ');
           const values = rows.map((row) =>
             meta.columns.map((col) => {
@@ -90,7 +90,7 @@ export async function migrateMySQL2PG(
           );
 
           if (values.length > 0) {
-            const insertSQL = `INSERT INTO "${meta.name}" (${columns}) VALUES ${values
+            const insertSQL = `INSERT INTO ${quotePG(meta.name)} (${columns}) VALUES ${values
               .map(
                 (vals) =>
                   `(${vals
@@ -170,9 +170,11 @@ export async function migratePG2MySQL(
     let totalRows = 0;
     for (let i = 0; i < metas.length; i++) {
       const meta = metas[i];
-      await dstConn.query(`DROP TABLE IF EXISTS \`${meta.name}\``);
+      await dstConn.query(`DROP TABLE IF EXISTS ${quoteMySQL(meta.name)}`);
 
-      const createSQL = `CREATE TABLE \`${meta.name}\` (${meta.columns.map((c) => `\`${c.name}\` ${c.type}`).join(', ')}) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+      // Column names are quoted and source types mapped to MySQL types (a raw
+      // udt_name from the source catalog is never pasted into the DDL).
+      const createSQL = buildMySQLCreateTable(meta, 'POSTGRESQL');
       await dstConn.query(createSQL);
 
       opts.onProgress?.({
@@ -188,7 +190,7 @@ export async function migratePG2MySQL(
       let rowCount = 0;
 
       while (true) {
-        const result = await srcPool.query(`SELECT * FROM "${meta.name}" LIMIT $1 OFFSET $2`, [
+        const result = await srcPool.query(`SELECT * FROM ${quotePG(meta.name)} LIMIT $1 OFFSET $2`, [
           batchSize,
           offset,
         ]);
@@ -196,7 +198,7 @@ export async function migratePG2MySQL(
 
         if (rows.length === 0) break;
 
-        const columns = meta.columns.map((c) => `\`${c.name}\``).join(', ');
+        const columns = meta.columns.map((c) => quoteMySQL(c.name)).join(', ');
         const placeholders = rows
           .map(
             () =>
@@ -215,7 +217,7 @@ export async function migratePG2MySQL(
 
         if (values.length > 0) {
           await dstConn.query(
-            `INSERT INTO \`${meta.name}\` (${columns}) VALUES ${placeholders}`,
+            `INSERT INTO ${quoteMySQL(meta.name)} (${columns}) VALUES ${placeholders}`,
             values
           );
         }
