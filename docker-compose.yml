@@ -4,7 +4,7 @@ version: "3.9"
 # Usage:
 #   1. Generate secrets:  openssl rand -hex 32  (for both JWT keys + ENCRYPTION_KEY)
 #   2. Create a .env file (see .env.example) with at minimum:
-#      JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, ENCRYPTION_KEY
+#      JWT_ACCESS_SECRET, JWT_REFRESH_SECRET, and ENCRYPTION_KEY (or KMS_WRAPPED_MASTER_KEY)
 #   3. Run:  docker compose up -d
 #   4. Open: http://localhost:3001
 
@@ -18,7 +18,8 @@ services:
     environment:
       JWT_ACCESS_SECRET: ${JWT_ACCESS_SECRET:?Set in .env}
       JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?Set in .env}
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY:?Set in .env}
+      # Required unless KMS_WRAPPED_MASTER_KEY is set (startup fails if neither is).
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY:-}
       KMS_WRAPPED_MASTER_KEY: ${KMS_WRAPPED_MASTER_KEY:-}
       AWS_KMS_KEY_ID: ${AWS_KMS_KEY_ID:-}
       AWS_REGION: ${AWS_REGION:-us-east-1}
@@ -28,6 +29,10 @@ services:
       REDIS_HOST: redis
       NODE_ENV: production
       CLIENT_URL: ${CLIENT_URL:-http://localhost:3001}
+      # This stack publishes the app port directly (no proxy), so X-Forwarded-For
+      # must not be trusted by default. Set TRUST_PROXY=1 (or the hop count / proxy
+      # IP) only when a reverse proxy that overwrites X-Forwarded-For sits in front.
+      TRUST_PROXY: ${TRUST_PROXY:-false}
       PASSKEY_RP_ID: ${PASSKEY_RP_ID:-}
       PASSKEY_EXTRA_ORIGINS: ${PASSKEY_EXTRA_ORIGINS:-}
       BACKUP_STORAGE_PATH: /app/backups

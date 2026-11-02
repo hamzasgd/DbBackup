@@ -32,7 +32,29 @@ export interface StoredConnection {
  * fields (none passed the SSL CA / client certificate, so "verify with CA"
  * never reached a backup), and SSH host-key pinning needs the connection id.
  */
+/**
+ * Values below reach CLI tools (mysqldump, psql, mongodump, redis-cli) as argv.
+ * The API schema already rejects a leading "-", but rows can also arrive via
+ * bundle import or predate that check, so enforce it where every engine config
+ * is built: a leading "-" would be parsed as an option (option injection).
+ */
+function assertCliSafe(label: string, value: string | undefined): void {
+  if (value && (value.startsWith('-') || /[\r\n\0]/.test(value))) {
+    throw new Error(`Connection ${label} is not allowed: it must not start with "-" or contain control characters`);
+  }
+}
+
 export function toEngineConfig(conn: StoredConnection): ConnectionConfig {
+  const config = buildConfig(conn);
+  assertCliSafe('host', config.host);
+  assertCliSafe('username', config.username);
+  assertCliSafe('database', config.database);
+  assertCliSafe('SSH host', config.sshHost);
+  assertCliSafe('SSH username', config.sshUsername);
+  return config;
+}
+
+function buildConfig(conn: StoredConnection): ConnectionConfig {
   return {
     connectionId: conn.id,
     type: conn.type as ConnectionConfig['type'],

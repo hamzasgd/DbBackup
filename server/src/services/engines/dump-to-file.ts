@@ -1,5 +1,5 @@
 import { spawn } from 'child_process';
-import { createWriteStream } from 'fs';
+import { createWriteStream, rmSync } from 'fs';
 import { createGzip } from 'zlib';
 import { pipeline } from 'stream/promises';
 
@@ -39,6 +39,10 @@ export async function dumpToFile(
 
   // Report the dump's own error first: it explains why the file is short
   const [exitResult, writeResult] = await Promise.allSettled([exited, written]);
+  if (exitResult.status === 'rejected' || writeResult.status === 'rejected') {
+    // Don't leave a partial/empty artifact behind for a failed dump
+    try { rmSync(filePath, { force: true }); } catch { /* best effort */ }
+  }
   if (exitResult.status === 'rejected') throw exitResult.reason;
   if (writeResult.status === 'rejected') throw writeResult.reason;
 }

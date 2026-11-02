@@ -73,6 +73,7 @@ export async function migrateMySQL2MySQL(
           `-h${srcRef.host}`, `-P${srcRef.port}`, `-u${src.username}`,
           ...mysqlCliTlsArgs(src, dumpCmd, !!srcRef.tunnel, files),
           '--single-transaction', '--routines', '--triggers', '--events', '--add-drop-table',
+          '--', // end of options: database + table names below can never be read as flags
           src.database,
           ...(opts.tables ?? []),
         ],
@@ -83,6 +84,7 @@ export async function migrateMySQL2MySQL(
         args: [
           `-h${dstRef.host}`, `-P${dstRef.port}`, `-u${dst.username}`,
           ...mysqlCliTlsArgs(dst, restoreCmd, !!dstRef.tunnel, files),
+          '--',
           dst.database,
         ],
         env: { ...process.env, MYSQL_PWD: dst.password || undefined },

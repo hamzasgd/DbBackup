@@ -2,12 +2,31 @@ import { ColumnMeta, TableMeta } from '../types/migration.types';
 import { mapType } from '../type-mapping/type-mapper';
 
 /**
+ * Quote an identifier taken from a source database catalog. Table and column
+ * names are controlled by whoever owns the source schema, so they must never
+ * be pasted into target SQL unquoted (a name like `x"; DROP TABLE t; --` would
+ * otherwise run on the target with the target's credentials).
+ */
+export function quotePG(name: string): string {
+  return '"' + String(name).replace(/"/g, '""') + '"';
+}
+
+export function quoteMySQL(name: string): string {
+  return '`' + String(name).replace(/`/g, '``') + '`';
+}
+
+/** Only emit column types that look like a plain SQL type (no free text from the source). */
+function safeType(t: string): string {
+  return /^[a-z][a-z0-9 ]*(\(\d+(,\s*\d+)?\))?$/i.test(t) ? t : 'text';
+}
+
+/**
  * Build PostgreSQL CREATE TABLE statement from table metadata.
  */
 export function buildPGCreateTable(meta: TableMeta, srcEngine: string): string {
   const columnDefs = meta.columns.map((col) => {
-    const pgType = mapType(col.type, srcEngine, 'POSTGRESQL', col.length);
-    let def = `  ${col.name} ${pgType}`;
+    const pgType = safeType(mapType(col.type, srcEngine, 'POSTGRESQL', col.length));
+    let def = `  ${quotePG(col.name)} ${pgType}`;
     if (!col.nullable) def += ' NOT NULL';
     if (col.extra) {
       if (col.extra.includes('auto_increment')) def += ' GENERATED ALWAYS AS IDENTITY';
@@ -18,10 +37,10 @@ export function buildPGCreateTable(meta: TableMeta, srcEngine: string): string {
 
   const pkColumns = meta.columns.filter((c) => c.isPrimaryKey);
   if (pkColumns.length > 0) {
-    columnDefs.push(`  PRIMARY KEY (${pkColumns.map((c) => c.name).join(', ')})`);
+    columnDefs.push(`  PRIMARY KEY (${pkColumns.map((c) => quotePG(c.name)).join(', ')})`);
   }
 
-  return `CREATE TABLE ${meta.name} (\n${columnDefs.join(',\n')}\n)`;
+  return `CREATE TABLE ${quotePG(meta.name)} (\n${columnDefs.join(',\n')}\n)`;
 }
 
 /**
@@ -29,8 +48,8 @@ export function buildPGCreateTable(meta: TableMeta, srcEngine: string): string {
  */
 export function buildMySQLCreateTable(meta: TableMeta, srcEngine: string): string {
   const columnDefs = meta.columns.map((col) => {
-    const mysqlType = mapType(col.type, srcEngine, 'MYSQL', col.length);
-    let def = `  \`${col.name}\` ${mysqlType}`;
+    const mysqlType = safeType(mapType(col.type, srcEngine, 'MYSQL', col.length));
+    let def = `  ${quoteMySQL(col.name)} ${mysqlType}`;
     if (!col.nullable) def += ' NOT NULL';
     if (col.extra) {
       if (col.extra.includes('auto_increment')) def += ' AUTO_INCREMENT';
@@ -41,10 +60,10 @@ export function buildMySQLCreateTable(meta: TableMeta, srcEngine: string): strin
 
   const pkColumns = meta.columns.filter((c) => c.isPrimaryKey);
   if (pkColumns.length > 0) {
-    columnDefs.push(`  PRIMARY KEY (${pkColumns.map((c) => `\`${c.name}\``).join(', ')})`);
+    columnDefs.push(`  PRIMARY KEY (${pkColumns.map((c) => quoteMySQL(c.name)).join(', ')})`);
   }
 
-  return `CREATE TABLE \`${meta.name}\` (\n${columnDefs.join(',\n')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
+  return `CREATE TABLE ${quoteMySQL(meta.name)} (\n${columnDefs.join(',\n')}\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`;
 }
 
 /**

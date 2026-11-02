@@ -3,6 +3,33 @@ import { ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from '../engines/base
 import { prisma } from '../../config/database';
 import { toEngineConfig, type StoredConnection } from '../engines/connection-config';
 import { nodeTlsOptions } from '../engines/tls';
+import { escapeIdentifierMySQL, escapeIdentifierPG } from './sync-utils';
+
+// Column types and defaults below come from the SOURCE database catalog and are
+// written into DDL that runs on the TARGET. Anything that is not a plain type
+// name / simple literal is dropped instead of being pasted into the SQL.
+// Both patterns are written so every input can be matched only one way (no
+// nested or overlapping quantifiers), which keeps matching linear-time.
+const SAFE_TYPE = /^[A-Za-z][A-Za-z0-9_ ]*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\)(?: (?:unsigned|zerofill))*)?(?:\[\])?$/i;
+const SAFE_ENUM = /^(?:enum|set)\(\s*'(?:[^'\\]|'')*'(?:\s*,\s*'(?:[^'\\]|'')*')*\s*\)$/i;
+const SAFE_DEFAULTS = [
+  /^-?\d+(\.\d+)?$/,                               // numbers
+  /^'(?:[^'\\]|'')*'(::[A-Za-z][A-Za-z0-9_ ]*)?$/,  // quoted string, optional PG cast
+  /^(null|true|false|current_timestamp(\(\d\))?|current_date|current_time|now\(\)|localtimestamp)$/i,
+];
+
+function safeColumnType(type: string, targetType: string): string {
+  const t = String(type ?? '').trim();
+  if (SAFE_TYPE.test(t)) return t;
+  if (targetType !== 'POSTGRESQL' && SAFE_ENUM.test(t)) return t;
+  return 'TEXT';
+}
+
+function safeDefault(value: string | null): string | null {
+  if (value === null || value === undefined) return null;
+  const v = String(value).trim();
+  return SAFE_DEFAULTS.some((re) => re.test(v)) ? v : null;
+}
 
 export interface ColumnMismatch {
   tableName: string;
@@ -353,11 +380,13 @@ export class SchemaValidatorService {
     }).join(',\n');
 
     // Get primary key columns
+    // Names come from the source catalog: always quote them for the target dialect
+    const q = targetType === 'POSTGRESQL' ? escapeIdentifierPG : escapeIdentifierMySQL;
     const pkColumns = table.columns
       .filter(col => col.isPrimaryKey)
-      .map(col => col.name);
+      .map(col => q(col.name));
 
-    let sql = `CREATE TABLE IF NOT EXISTS ${table.name} (\n${columns}`;
+    let sql = `CREATE TABLE IF NOT EXISTS ${q(table.name)} (\n${columns}`;
 
     if (pkColumns.length > 0) {
       sql += `,\n  PRIMARY KEY (${pkColumns.join(', ')})`;
@@ -377,13 +406,17 @@ export class SchemaValidatorService {
     targetType: string
   ): string {
     // Convert type if needed
-    const convertedType = this.convertTypeForTarget(
+    const convertedType = safeColumnType(this.convertTypeForTarget(
       column.type,
       sourceType,
       targetType
-    );
+    ), targetType);
 
-    let def = `${column.name} ${convertedType}`;
+    const q = targetType === 'POSTGRESQL' ? escapeIdentifierPG : escapeIdentifierMySQL;
+    // PostgreSQL uses SERIAL instead of AUTO_INCREMENT (decided before building the
+    // definition so a column name can never be rewritten by a string replace)
+    const autoIncrement = Boolean(column.extra && column.extra.includes('auto_increment'));
+    let def = `${q(column.name)} ${autoIncrement && targetType === 'POSTGRESQL' ? 'SERIAL' : convertedType}`;
 
     // Add NOT NULL constraint
     if (!column.nullable) {
@@ -391,18 +424,15 @@ export class SchemaValidatorService {
     }
 
     // Add default value if present
-    if (column.defaultValue !== null) {
-      def += ` DEFAULT ${column.defaultValue}`;
+    // Only simple literal defaults are copied; expressions from the source are dropped
+    const defaultValue = safeDefault(column.defaultValue);
+    if (defaultValue !== null) {
+      def += ` DEFAULT ${defaultValue}`;
     }
 
     // Add extra attributes (like AUTO_INCREMENT)
-    if (column.extra) {
-      if (column.extra.includes('auto_increment') && targetType === 'POSTGRESQL') {
-        // PostgreSQL uses SERIAL instead of AUTO_INCREMENT
-        def = def.replace(convertedType, 'SERIAL');
-      } else if (column.extra.includes('auto_increment')) {
-        def += ' AUTO_INCREMENT';
-      }
+    if (autoIncrement && targetType !== 'POSTGRESQL') {
+      def += ' AUTO_INCREMENT';
     }
 
     return def;

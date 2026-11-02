@@ -20,7 +20,7 @@ import { decrypt } from './crypto.service';
 import { logger } from '../config/logger';
 import { assertSafeEndpoint, parseSafeEndpoint, UnsafeEndpointError } from '../utils/endpoint-guard';
 import { uploadToGdrive, downloadFromGdrive, deleteFromGdrive } from './gdrive.service';
-import { isEncryptedFile, decryptBackupFile } from './backup-crypto.service';
+import { isEncryptedFile, isEncryptedName, decryptBackupFile } from './backup-crypto.service';
 
 export type StorageProviderType = 'LOCAL' | 'S3' | 'GOOGLE_DRIVE';
 
@@ -262,6 +262,13 @@ export interface BackupArtifact {
   filePath: string;
 }
 
+/** True when `target` resolves to a path strictly inside `dir`. */
+function isInsideDir(target: string, dir: string): boolean {
+  const base = path.resolve(dir);
+  const resolved = path.resolve(target);
+  return resolved.startsWith(base + path.sep);
+}
+
 /**
  * Delete every artifact of a backup: the S3 object (if S3-stored) and the local
  * file/directory. Used by manual delete and retention cleanup so S3 objects
@@ -285,6 +292,12 @@ export async function deleteBackupArtifact(userId: string, backup: BackupArtifac
   }
 
   if (!backup.filePath || backup.filePath === 'pending') return;
+  // Only delete inside the backup storage directory or the temp dir. filePath is
+  // a stored value; a recursive delete must never be pointed at another path.
+  if (!isInsideDir(backup.filePath, getStoragePath()) && !isInsideDir(backup.filePath, os.tmpdir())) {
+    logger.warn(`Refusing to delete backup artifact outside the storage directory: ${backup.filePath}`);
+    return;
+  }
   try {
     const stat = fs.statSync(backup.filePath);
     if (stat.isDirectory()) {
@@ -307,10 +320,18 @@ export async function ensureLocalBackupFile(
   userId: string,
   backup: BackupArtifact & { fileName?: string | null },
 ): Promise<{ localPath: string; downloaded: boolean }> {
+  // The record (not the file content) says whether the backup was encrypted.
+  // An object swapped into S3/Drive or onto disk without the DBB1 header must not
+  // be accepted as plaintext for a backup that was stored encrypted.
+  const expectEncrypted = isEncryptedName(backup.fileName ?? '') || isEncryptedName(backup.filePath ?? '');
+
   if (backup.filePath && backup.filePath !== 'pending' && fs.existsSync(backup.filePath)) {
     if (isEncryptedFile(backup.filePath)) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-decrypt-'));
-      return maybeDecrypt(userId, backup.filePath, tempDir);
+      return maybeDecrypt(userId, backup.filePath, tempDir, expectEncrypted);
+    }
+    if (expectEncrypted) {
+      throw new Error('Backup is recorded as encrypted but the file on disk is not an encrypted DbBackup file — refusing to use it');
     }
     return { localPath: backup.filePath, downloaded: false };
   }
@@ -326,7 +347,12 @@ export async function ensureLocalBackupFile(
   } else {
     await downloadFromS3(userId, backup.storageKey, destPath);
   }
-  return maybeDecrypt(userId, destPath, tempDir);
+  try {
+    return await maybeDecrypt(userId, destPath, tempDir, expectEncrypted);
+  } catch (err) {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+    throw err;
+  }
 }
 
 /**
@@ -334,8 +360,11 @@ export async function ensureLocalBackupFile(
  * temp dir so every consumer (restore / verify / download) gets plaintext and
  * the existing cleanup removes it.
  */
-async function maybeDecrypt(userId: string, filePath: string, tempDir: string): Promise<{ localPath: string; downloaded: boolean }> {
+async function maybeDecrypt(userId: string, filePath: string, tempDir: string, expectEncrypted: boolean): Promise<{ localPath: string; downloaded: boolean }> {
   if (!isEncryptedFile(filePath)) {
+    if (expectEncrypted) {
+      throw new Error('Backup is recorded as encrypted but the stored object is not an encrypted DbBackup file — refusing to use it');
+    }
     return { localPath: filePath, downloaded: filePath.startsWith(tempDir) };
   }
 

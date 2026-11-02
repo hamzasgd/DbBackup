@@ -1,11 +1,11 @@
 import { spawn } from 'child_process';
 import { statSync } from 'fs';
-import path from 'path';
 import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
+import { buildBackupPath } from './backup-path';
 
 export class MySQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
@@ -88,8 +88,7 @@ export class MySQLEngine extends BaseEngine {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const ext = useGzip ? '.sql.gz' : '.sql';
       const enginePrefix = this.config.type === 'MARIADB' ? 'mariadb' : 'mysql';
-      const fileName = `${enginePrefix}_${this.config.database}_${timestamp}${ext}`;
-      const filePath = path.join(outputDir, fileName);
+      const { fileName, filePath } = buildBackupPath(outputDir, enginePrefix, this.config.database, timestamp, ext);
 
       onProgress?.(5);
 
