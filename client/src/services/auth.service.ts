@@ -8,7 +8,7 @@ export const authApi = {
     api.post('/auth/login', data),
   // Refresh token lives in an httpOnly cookie, cleared server-side
   logout: () => api.post('/auth/logout'),
-  me: () => api.get('/auth/me'),
+  me: () => api.get<{ success: boolean; data: Me }>('/auth/me'),
   togglePasswordLogin: (disabled: boolean) =>
     api.put<{ success: boolean; message: string }>('/auth/password-login', { disabled }),
   changePassword: (data: { currentPassword: string; newPassword: string }) =>
@@ -32,6 +32,16 @@ export const authApi = {
     api.post<{ success: boolean; data: { options: PublicKeyCredentialRequestOptionsJSON } }>('/auth/passkey/login/options'),
   passkeyLoginVerify: (response: unknown) =>
     api.post<{ success: boolean; data: { user: { id: string; name: string; email: string }; accessToken: string } }>('/auth/passkey/login/verify', { response }),
+}
+
+export interface Me {
+  id: string
+  name: string
+  email: string
+  createdAt: string
+  updatedAt: string
+  /** Passkey-only mode: password sign-in is disabled */
+  passwordLoginDisabled: boolean
 }
 
 export interface ActiveSession {

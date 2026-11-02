@@ -682,13 +682,17 @@ function SessionsTab() {
 
 
 function PasswordLoginToggle() {
-  const [passkeyOnly, setPasskeyOnly] = useState(false)
+  const qc = useQueryClient()
+  // The saved setting (it used to start as "off" after every reload, whatever was saved)
+  const { data: meData, isLoading: meLoading } = useQuery({ queryKey: ['me'], queryFn: () => authApi.me() })
+  const passkeyOnly = meData?.data.data.passwordLoginDisabled ?? false
   const { data: pkData } = useQuery({ queryKey: ['passkeys'], queryFn: () => authApi.passkeys() })
   const hasPasskeys = (pkData?.data.data.passkeys ?? []).length > 0
 
   const mutation = useMutation({
     mutationFn: (disabled: boolean) => authApi.togglePasswordLogin(disabled),
-    onSuccess: (res) => { setPasskeyOnly(res.data.message.includes('disabled')); toast.success(res.data.message) },
+    // Re-read the saved state before the mutation settles, so the toggle shows what the server stored
+    onSuccess: async (res) => { await qc.invalidateQueries({ queryKey: ['me'] }); toast.success(res.data.message) },
     onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed'),
   })
 
@@ -697,6 +701,7 @@ function PasswordLoginToggle() {
       <Toggle
         checked={passkeyOnly}
         onChange={(v) => {
+          if (meLoading || mutation.isPending) return // state unknown or a change in flight
           if (v && !hasPasskeys) { toast.error('Register a passkey first'); return }
           mutation.mutate(v)
         }}
