@@ -74,10 +74,17 @@ app.use(cors({
   credentials: true,
 }));
 
-// Rate limiting
+// Rate limiting — a coarse per-IP flood guard for the whole API.
+// 100 requests / 15 min was far below normal use: the dashboard alone loads 5
+// endpoints, polls backups every 5–30 s and refetches on window focus, and the
+// sync/settings pages poll every 5–10 s, so one active user hit 429 within
+// minutes and stayed locked out for the rest of the window. Brute force on
+// login/register/refresh is limited separately (authLimiter, 10 / 15 min, plus
+// the per-IP login lockout), so a higher general limit doesn't weaken that.
+const apiRateLimitMax = Number(process.env.API_RATE_LIMIT_MAX) || 2000;
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100,
+  max: apiRateLimitMax,
   standardHeaders: true,
   legacyHeaders: false,
 });
