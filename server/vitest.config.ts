@@ -42,7 +42,9 @@ export default defineConfig({
           include: integrationTests,
           setupFiles: ['./src/test/setup.ts'],
           env: { DATABASE_URL: process.env.TEST_DATABASE_URL ?? '' },
-          // Tests share one database and wipe it in beforeEach
+          // Tests share one database and wipe it in beforeEach.
+          // sync-engine.service.test.ts also enqueues real BullMQ jobs, so it
+          // needs a reachable Redis (REDIS_HOST/REDIS_PORT, default :6379).
           fileParallelism: false,
         },
       },
