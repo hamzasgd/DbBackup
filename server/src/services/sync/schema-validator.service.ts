@@ -8,8 +8,10 @@ import { escapeIdentifierMySQL, escapeIdentifierPG } from './sync-utils';
 // Column types and defaults below come from the SOURCE database catalog and are
 // written into DDL that runs on the TARGET. Anything that is not a plain type
 // name / simple literal is dropped instead of being pasted into the SQL.
-const SAFE_TYPE = /^[A-Za-z][A-Za-z0-9_ ]*(\(\s*\d+(\s*,\s*\d+)?\s*\))?( unsigned| zerofill)*(\[\])?$/i;
-const SAFE_ENUM = /^(enum|set)\((\s*'(?:[^'\\]|'')*'\s*,?)+\)$/i;
+// Both patterns are written so every input can be matched only one way (no
+// nested or overlapping quantifiers), which keeps matching linear-time.
+const SAFE_TYPE = /^[A-Za-z][A-Za-z0-9_ ]*(?:\(\s*\d+(?:\s*,\s*\d+)?\s*\)(?: (?:unsigned|zerofill))*)?(?:\[\])?$/i;
+const SAFE_ENUM = /^(?:enum|set)\(\s*'(?:[^'\\]|'')*'(?:\s*,\s*'(?:[^'\\]|'')*')*\s*\)$/i;
 const SAFE_DEFAULTS = [
   /^-?\d+(\.\d+)?$/,                               // numbers
   /^'(?:[^'\\]|'')*'(::[A-Za-z][A-Za-z0-9_ ]*)?$/,  // quoted string, optional PG cast
