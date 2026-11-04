@@ -1,4 +1,4 @@
-import { Queue, Worker, Job } from 'bullmq';
+import { Queue, Worker, Job, UnrecoverableError } from 'bullmq';
 import fs from 'fs';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
@@ -14,6 +14,7 @@ import { enforceRetentionForConnection, getRetentionPolicy } from '../services/r
 import { decrypt } from '../services/crypto.service';
 import { sanitizeConfig } from '../utils/sanitize';
 import { logAudit } from '../services/audit.service';
+import { assertQuotaAllowsFile } from '../services/quota.service';
 import { toEngineConfig } from '../services/engines/connection-config';
 
 export const BACKUP_QUEUE_NAME = 'backups';
@@ -94,6 +95,20 @@ export function createBackupWorker(): Worker<BackupJobData> {
           format: resolvedFormat,
           onProgress: (pct) => { void onProgress(pct); },
         });
+
+        // ── Step 0: Storage quota (authoritative check — covers HTTP,
+        // scheduled and MCP backups; the dump size is only known now) ──
+        if (userId) {
+          const verdict = await assertQuotaAllowsFile(userId, result.fileSize);
+          if (!verdict.ok) {
+            // Discard the dump and fail WITHOUT retry: a quota block is not a
+            // transient error, so throwing UnrecoverableError stops BullMQ's
+            // 3-attempt retry while still flowing into the FAILED path below.
+            try { fs.rmSync(result.filePath, { force: true, recursive: true }); } catch { /* best effort */ }
+            logger.warn(`Backup ${backupId} rejected by storage quota: ${verdict.message}`);
+            throw new UnrecoverableError(verdict.message);
+          }
+        }
 
         // ── Step 1: Verify integrity (plaintext) ──
         const verification = await verifyBackup(result.filePath, config.type, resolvedFormat);

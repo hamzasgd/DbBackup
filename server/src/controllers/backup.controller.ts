@@ -12,6 +12,7 @@ import { verifyBackup } from '../services/verification.service';
 import { streamFromS3, deleteBackupArtifact, ensureLocalBackupFile, cleanupTempFile, ensureStorageDir, getStoragePath } from '../services/storage.service';
 import { streamFromGdrive } from '../services/gdrive.service';
 import { logAudit } from '../services/audit.service';
+import { assertQuotaAllowsFile } from '../services/quota.service';
 import { runGlobalRetentionSweep } from '../services/retention.service';
 import { startRestoreDrill, cancelStaleDrill } from '../services/restore-drill.service';
 
@@ -63,6 +64,12 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
       where: { id: connectionId, userId: req.user!.userId },
     });
     if (!conn) throw new AppError('Connection not found', 404);
+
+    // Fast-fail when the user is already at/over their storage quota. The
+    // authoritative per-file check runs in the worker once the dump size is
+    // known (this pre-check cannot know the dump size yet).
+    const verdict = await assertQuotaAllowsFile(req.user!.userId, BigInt(0));
+    if (!verdict.ok) throw new AppError(verdict.message, 403);
 
     // Ensure storage dir exists (owner-only permissions)
     ensureStorageDir(STORAGE_PATH);

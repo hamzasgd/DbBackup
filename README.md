@@ -398,6 +398,14 @@ What the admin can and cannot see — deliberate guardrails:
 
 Every admin action is audit-logged (`ADMIN_VIEW_USER`, `ADMIN_SUSPEND`, `ADMIN_REACTIVATE`, `ADMIN_ACCESS_DENIED`, `ADMIN_PROMOTED`).
 
+### Storage quotas
+
+Every user gets a **storage quota — 1 GB free by default** (null = unlimited). It counts the user's COMPLETED backups across all providers (local disk, S3, Google Drive); retention cleanup frees space automatically.
+
+- **Over quota**: new backups are rejected — instantly on the API when already over, and in the backup worker once the dump size is known (covering manual, scheduled and MCP-triggered backups). The dump is discarded and the backup is marked FAILED with a clear message; quota failures do **not** retry.
+- **Near-limit alert**: at the same threshold as storage alerts (default 80%, `STORAGE_ALERT_THRESHOLD_PERCENT`), throttled to once per 24h, delivered through every configured notification channel.
+- **Admin control**: Super Admin → user detail → Storage quota (set GB, or Unlimit). Every change is audit-logged (`ADMIN_SET_QUOTA`).
+
 ### Securing your environment file (.env)
 
 An env file always holds *some* plaintext bootstrap secrets — that's unavoidable — but you can shrink the blast radius:

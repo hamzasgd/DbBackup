@@ -143,6 +143,7 @@ export default function AdminPage() {
                     <th className="px-6 py-3 font-medium">Status</th>
                     <th className="px-6 py-3 font-medium">Connections</th>
                     <th className="px-6 py-3 font-medium">Backups</th>
+                    <th className="px-6 py-3 font-medium">Storage</th>
                     <th className="px-6 py-3 font-medium">Last backup</th>
                     <th className="px-6 py-3 font-medium">Joined</th>
                     <th className="px-6 py-3 font-medium text-right">Actions</th>
@@ -158,6 +159,11 @@ export default function AdminPage() {
                       <td className="px-6 py-3">{statusBadge(u)}</td>
                       <td className="px-6 py-3 text-gray-600 tabular-nums">{u.connections}</td>
                       <td className="px-6 py-3 text-gray-600 tabular-nums">{u.backups}</td>
+                      <td className="px-6 py-3 text-gray-600 whitespace-nowrap">
+                        {u.storageQuotaBytes == null
+                          ? `${formatBytes(Number(u.storageUsed))} · unlimited`
+                          : `${formatBytes(Number(u.storageUsed))} / ${formatBytes(Number(u.storageQuotaBytes))}`}
+                      </td>
                       <td className="px-6 py-3 text-gray-500 whitespace-nowrap">{u.lastBackupAt ? formatDate(u.lastBackupAt) : '—'}</td>
                       <td className="px-6 py-3 text-gray-500 whitespace-nowrap">{formatDate(u.createdAt)}</td>
                       <td className="px-6 py-3">
@@ -263,6 +269,14 @@ function UserDetailModal({
               <span>{detail.user.termsAcceptedAt ? 'ToS accepted' : 'ToS not accepted'}</span>
             </div>
           </div>
+
+          {/* Quota */}
+          <QuotaEditor
+            userId={detail.user.id}
+            usedBytes={detail.quota.usedBytes}
+            quotaBytes={detail.quota.quotaBytes}
+            percent={detail.quota.percent}
+          />
 
           {/* Connections (masked) */}
           <div>
@@ -378,5 +392,77 @@ function UserDetailModal({
         </div>
       )}
     </Modal>
+  )
+}
+
+/* ───────────────────────── quota editor ───────────────────────── */
+
+function QuotaEditor({ userId, usedBytes, quotaBytes, percent }: {
+  userId: string
+  usedBytes: number
+  quotaBytes: number | null
+  percent: number | null
+}) {
+  const qc = useQueryClient()
+  const [input, setInput] = useState('')
+  const [syncedFor, setSyncedFor] = useState(userId)
+  if (syncedFor !== userId) {
+    setSyncedFor(userId)
+    setInput('')
+  }
+
+  const mutation = useMutation({
+    mutationFn: (gb: number | null) => adminApi.setUserQuota(userId, gb),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['admin-users'] })
+      void qc.invalidateQueries({ queryKey: ['admin-user'] })
+      void qc.invalidateQueries({ queryKey: ['admin-stats'] })
+      toast.success('Storage quota updated')
+      setInput('')
+    },
+    onError: (e) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to update quota'),
+  })
+
+  const save = () => {
+    const trimmed = input.trim()
+    if (trimmed === '') return
+    const gb = Number(trimmed)
+    if (!Number.isFinite(gb) || gb <= 0) {
+      toast.error('Enter a positive number of GB, or use Unlimit for no cap')
+      return
+    }
+    mutation.mutate(gb)
+  }
+
+  return (
+    <div className="rounded-lg border border-gray-200 p-4">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">Storage quota</p>
+        <span className="text-xs text-gray-500 tabular-nums">
+          {percent != null ? `${percent}% · ${formatBytes(usedBytes)} / ${formatBytes(quotaBytes ?? 0)}` : `${formatBytes(usedBytes)} · unlimited`}
+        </span>
+      </div>
+      <div className="h-2 bg-gray-100 rounded-full overflow-hidden mb-3">
+        <div
+          className={`h-full rounded-full ${percent != null && percent >= 80 ? 'bg-red-500' : percent != null && percent >= 70 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+          style={{ width: `${Math.min(100, percent ?? 0)}%` }}
+        />
+      </div>
+      <div className="flex gap-2 items-end">
+        <div className="w-32">
+          <Input
+            label="New quota (GB)"
+            placeholder="e.g. 5"
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+          />
+        </div>
+        <Button variant="primary" size="sm" loading={mutation.isPending} onClick={save}>Save</Button>
+        {quotaBytes != null && (
+          <Button variant="outline" size="sm" loading={mutation.isPending} onClick={() => mutation.mutate(null)}>Unlimit</Button>
+        )}
+      </div>
+      <p className="text-[11px] text-gray-400 mt-2">New backups are blocked once used storage reaches the quota. Enter GB and Save; Unlimit removes the cap entirely.</p>
+    </div>
   )
 }

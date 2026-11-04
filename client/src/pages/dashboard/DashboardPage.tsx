@@ -311,8 +311,9 @@ export default function DashboardPage() {
                 <Link to="/settings" className="text-xs text-blue-600 hover:underline">manage</Link>
               </CardHeader>
               <CardContent className="space-y-4 pt-0">
-                {usage && (usage.local || usage.gdrive || usage.s3) ? (
+                {usage && (usage.local || usage.gdrive || usage.s3 || usage.quota) ? (
                   <>
+                    {usage.quota && <StorageRow label="Your quota" usage={usage.quota} threshold={usage.thresholdPercent} />}
                     <StorageRow label="Local disk" usage={usage.local} threshold={usage.thresholdPercent} />
                     <StorageRow label="Google Drive" usage={usage.gdrive} threshold={usage.thresholdPercent} />
                     <StorageRow label="S3 (budget)" usage={usage.s3} threshold={usage.thresholdPercent} />

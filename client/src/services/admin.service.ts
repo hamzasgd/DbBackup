@@ -20,6 +20,8 @@ export interface AdminUser {
   connections: number
   backups: number
   lastBackupAt: string | null
+  storageUsed: number
+  storageQuotaBytes: number | null
 }
 
 export interface AdminConnection {
@@ -72,12 +74,14 @@ export interface AdminUserDetail {
   user: {
     id: string; email: string; name: string; role: UserRole; isActive: boolean
     createdAt: string; termsAcceptedAt: string | null; passwordLoginDisabled: boolean
+    storageQuotaBytes: number | null
   }
   connections: AdminConnection[]
   backups: AdminBackup[]
   schedules: number
   mcpKeys: AdminMcpKey[]
   auditLogs: AdminAuditEntry[]
+  quota: { usedBytes: number; quotaBytes: number | null; percent: number | null }
 }
 
 export const adminApi = {
@@ -89,4 +93,6 @@ export const adminApi = {
     api.get<{ success: boolean; data: AdminUserDetail }>(`/admin/users/${id}`),
   setUserStatus: (id: string, isActive: boolean) =>
     api.patch<{ success: boolean; data: { id: string; isActive: boolean; unchanged?: boolean } }>(`/admin/users/${id}/status`, { isActive }),
+  setUserQuota: (id: string, storageQuotaGb: number | null) =>
+    api.patch<{ success: boolean; data: { id: string; storageQuotaBytes: number | null } }>(`/admin/users/${id}/quota`, { storageQuotaGb }),
 }

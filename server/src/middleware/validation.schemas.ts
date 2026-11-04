@@ -103,3 +103,8 @@ export const logoutSchema = z.object({
 export const adminUserStatusSchema = z.object({
   isActive: z.boolean(),
 });
+
+// Super admin: change a user's storage quota in GB (null = unlimited)
+export const adminUserQuotaSchema = z.object({
+  storageQuotaGb: z.number().positive().nullable(),
+});

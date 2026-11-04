@@ -3,6 +3,7 @@ import { prisma } from '../config/database';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { AppError } from '../middleware/errorHandler';
 import { logAuditReq } from '../services/audit.service';
+import { getQuotaUsage } from '../services/quota.service';
 import { decryptIfPresent } from '../services/crypto.service';
 
 /** All handlers sit behind `authenticate` + `requireAdmin`. */
@@ -98,24 +99,25 @@ export async function listUsers(req: AuthRequest, res: Response, next: NextFunct
     const [users, total, connCounts, backupStats] = await Promise.all([
       prisma.user.findMany({
         where,
-        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true },
+        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true, storageQuotaBytes: true },
         orderBy: { createdAt: 'asc' },
         skip,
         take: limit,
       }),
       prisma.user.count({ where }),
       prisma.connection.groupBy({ by: ['userId'], _count: { _all: true } }),
-      prisma.backup.groupBy({ by: ['userId'], _count: { _all: true }, _max: { createdAt: true } }),
+      prisma.backup.groupBy({ by: ['userId'], _count: { _all: true }, _max: { createdAt: true }, _sum: { fileSize: true } }),
     ]);
 
     const connMap = new Map(connCounts.map((c) => [c.userId, c._count._all]));
-    const backupMap = new Map(backupStats.map((b) => [b.userId, { count: b._count._all, last: b._max.createdAt }]));
+    const backupMap = new Map(backupStats.map((b) => [b.userId, { count: b._count._all, last: b._max.createdAt, bytes: b._sum.fileSize ?? BigInt(0) }]));
 
     const items = users.map((u) => ({
       ...u,
       connections: connMap.get(u.id) ?? 0,
       backups: backupMap.get(u.id)?.count ?? 0,
       lastBackupAt: backupMap.get(u.id)?.last ?? null,
+      storageUsed: backupMap.get(u.id)?.bytes ?? BigInt(0),
     }));
 
     res.json({ success: true, data: { users: items, total, page, limit } });
@@ -137,6 +139,7 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
       select: {
         id: true, email: true, name: true, role: true, isActive: true,
         createdAt: true, termsAcceptedAt: true, passwordLoginDisabled: true,
+        storageQuotaBytes: true,
       },
     });
     if (!user) throw new AppError('User not found', 404);
@@ -178,6 +181,8 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
       }),
     ]);
 
+    const quotaUsage = await getQuotaUsage(targetId);
+
     // The support view exposes another user's setup: always leave a trail.
     await logAuditReq(req, req.user!.userId, 'ADMIN_VIEW_USER', 'user', {
       targetUserId: targetId, targetEmail: user.email,
@@ -192,6 +197,11 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
         schedules,
         mcpKeys,
         auditLogs,
+        quota: {
+          usedBytes: Number(quotaUsage.usedBytes),
+          quotaBytes: quotaUsage.quotaBytes === null ? null : Number(quotaUsage.quotaBytes),
+          percent: quotaUsage.percent,
+        },
       },
     });
   } catch (err) { next(err); }
@@ -233,5 +243,39 @@ export async function setUserStatus(req: AuthRequest, res: Response, next: NextF
     });
 
     res.json({ success: true, data: updated });
+  } catch (err) { next(err); }
+}
+
+export async function setUserQuota(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const targetId = req.params.id;
+    if (!targetId) throw new AppError('User id is required', 400);
+    // storageQuotaGb: number (GB, 1 decimal ok) or null = unlimited
+    const { storageQuotaGb } = req.body as { storageQuotaGb?: number | null };
+    if (storageQuotaGb !== null && storageQuotaGb !== undefined && (typeof storageQuotaGb !== 'number' || !Number.isFinite(storageQuotaGb) || storageQuotaGb <= 0)) {
+      throw new AppError('storageQuotaGb must be a positive number, or null for unlimited', 400);
+    }
+    const quotaBytes = storageQuotaGb == null ? null : BigInt(Math.round(storageQuotaGb * 1024 * 1024 * 1024));
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, email: true, storageQuotaBytes: true },
+    });
+    if (!target) throw new AppError('User not found', 404);
+
+    const updated = await prisma.user.update({
+      where: { id: targetId },
+      data: { storageQuotaBytes: quotaBytes },
+      select: { id: true, email: true, storageQuotaBytes: true },
+    });
+
+    await logAuditReq(req, req.user!.userId, 'ADMIN_SET_QUOTA', 'user', {
+      targetUserId: targetId,
+      targetEmail: updated.email,
+      oldQuotaBytes: target.storageQuotaBytes === null ? null : Number(target.storageQuotaBytes),
+      newQuotaBytes: quotaBytes === null ? null : Number(quotaBytes),
+    });
+
+    res.json({ success: true, data: { id: updated.id, storageQuotaBytes: updated.storageQuotaBytes === null ? null : Number(updated.storageQuotaBytes) } });
   } catch (err) { next(err); }
 }

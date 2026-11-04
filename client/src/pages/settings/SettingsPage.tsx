@@ -327,11 +327,12 @@ function StorageUsageCard() {
     refetchInterval: 5 * 60_000,
   })
   const usage = data?.data.data
-  if (!usage || (!usage.local && !usage.gdrive && !usage.s3)) return null
+  if (!usage || (!usage.local && !usage.gdrive && !usage.s3 && !usage.quota)) return null
   return (
     <Card>
       <CardHeader><CardTitle className="text-sm">Current usage <span className="font-normal text-gray-400">(alert at {usage.thresholdPercent}%)</span></CardTitle></CardHeader>
       <CardContent className="space-y-3">
+        <UsageBar label="Your storage quota" usage={usage.quota} threshold={usage.thresholdPercent} />
         <UsageBar label="Local backup disk" usage={usage.local} threshold={usage.thresholdPercent} />
         <UsageBar label="Google Drive" usage={usage.gdrive} threshold={usage.thresholdPercent} />
         <UsageBar label="S3 (budget)" usage={usage.s3} threshold={usage.thresholdPercent} />

@@ -68,6 +68,8 @@ export const storageApi = {
       local: { usedBytes: number | null; totalBytes: number | null; percent: number | null } | null
       gdrive: { usedBytes: number | null; totalBytes: number | null; percent: number | null } | null
       s3: { usedBytes: number | null; totalBytes: number | null; percent: number | null } | null
+      /** Per-user storage quota (default 1 GB); null = unlimited */
+      quota: { usedBytes: number | null; totalBytes: number | null; percent: number | null } | null
     } }>('/storage/usage'),
 }
 

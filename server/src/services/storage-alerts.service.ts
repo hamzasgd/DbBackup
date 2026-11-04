@@ -1,5 +1,6 @@
 import fs from 'fs';
 import { prisma } from '../config/database';
+import { getQuotaUsage } from './quota.service';
 import { logger } from '../config/logger';
 import { notify } from './notification.service';
 import { logAudit } from './audit.service';
@@ -96,13 +97,20 @@ export async function getStorageUsage(userId: string): Promise<{
   local: UsageInfo | null;
   gdrive: UsageInfo | null;
   s3: UsageInfo | null;
+  quota: UsageInfo | null;
 }> {
-  const [local, gdrive, s3] = await Promise.all([
+  const [local, gdrive, s3, quotaUsage] = await Promise.all([
     measureLocalUsage(),
     measureGdriveUsage(userId),
     measureS3Usage(),
+    getQuotaUsage(userId),
   ]);
-  return { thresholdPercent: THRESHOLD, local, gdrive, s3 };
+  const quota: UsageInfo | null = quotaUsage.quotaBytes === null ? null : {
+    usedBytes: Number(quotaUsage.usedBytes),
+    totalBytes: Number(quotaUsage.quotaBytes),
+    percent: quotaUsage.percent,
+  };
+  return { thresholdPercent: THRESHOLD, local, gdrive, s3, quota };
 }
 
 async function alertIfOver(
@@ -149,13 +157,20 @@ export async function runStorageChecks(userId: string): Promise<void> {
   if (now - lastCheckAt < CHECK_THROTTLE_MS) return;
   lastCheckAt = now;
 
-  const [local, gdrive, s3] = await Promise.all([
+  const [local, gdrive, s3, quotaUsage] = await Promise.all([
     measureLocalUsage(),
     measureGdriveUsage(userId),
     measureS3Usage(),
+    getQuotaUsage(userId),
   ]);
 
   await alertIfOver(userId, 'local', 'Local backup disk', local);
   await alertIfOver(userId, 'gdrive', 'Google Drive', gdrive);
   await alertIfOver(userId, 's3', 'S3 backups budget', s3);
+  const quotaInfo: UsageInfo | null = quotaUsage.quotaBytes === null ? null : {
+    usedBytes: Number(quotaUsage.usedBytes),
+    totalBytes: Number(quotaUsage.quotaBytes),
+    percent: quotaUsage.percent,
+  };
+  if (quotaInfo) await alertIfOver(userId, 'quota', 'Storage quota', quotaInfo);
 }

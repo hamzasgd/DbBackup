@@ -209,7 +209,8 @@ export async function notify(userId: string, payload: NotificationPayload): Prom
       (isFailure && settings.notifyOnFailure) ||
       (isSuccess && settings.notifyOnSuccess) ||
       (isRetention && settings.notifyOnRetention) ||
-      (isLogin && settings.notifyOnLogin);
+      (isLogin && settings.notifyOnLogin) ||
+      (isStorage && settings.notifyOnStorage);
 
     if (!shouldSend) return;
 
