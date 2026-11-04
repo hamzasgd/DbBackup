@@ -128,11 +128,6 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
   try {
     const targetId = req.params.id;
     if (!targetId) throw new AppError('User id is required', 400);
-    if (targetId === req.user!.userId) {
-      // Own account — the regular app pages already show everything there is,
-      // and the support view must never become a shortcut around masking.
-      throw new AppError('Use the regular app pages for your own account', 400);
-    }
 
     const user = await prisma.user.findUnique({
       where: { id: targetId },

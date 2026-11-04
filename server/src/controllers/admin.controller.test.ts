@@ -158,12 +158,15 @@ describe('AdminController', () => {
       expect(audit).toBe(1);
     });
 
-    it('blocks self-view and 404s unknown users', async () => {
+    it('allows self-view (single-user installs) and 404s unknown users', async () => {
       const reqSelf = mkReq({ userId: admin.id, email: admin.email, role: 'ADMIN' }, { params: { id: admin.id } });
       const resSelf = mkRes();
       const nextSelf = vi.fn() as NextFunction;
       await getUserDetail(reqSelf, resSelf, nextSelf);
-      expect(nextSelf).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400 }));
+      expect(nextSelf).not.toHaveBeenCalled();
+      const selfPayload = (resSelf.json as ReturnType<typeof vi.fn>).mock.calls[0][0];
+      expect(selfPayload.success).toBe(true);
+      expect(selfPayload.data.user.id).toBe(admin.id);
 
       const reqMissing = mkReq({ userId: admin.id, email: admin.email, role: 'ADMIN' }, { params: { id: 'no-such-user' } });
       const resMissing = mkRes();

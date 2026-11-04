@@ -223,9 +223,11 @@ export default function AdminPage() {
       <UserDetailModal
         open={!!detailId}
         onClose={() => setDetailId(null)}
-
         detail={detail.data?.data.data}
         isLoading={detail.isLoading}
+        isError={detail.isError}
+        errorMessage={detail.error instanceof Error ? detail.error.message : 'Request failed'}
+        onRetry={() => detail.refetch()}
       />
     </div>
   )
@@ -234,13 +236,15 @@ export default function AdminPage() {
 /* ───────────────────────── support view (modal) ───────────────────────── */
 
 function UserDetailModal({
-  open, onClose, detail, isLoading,
+  open, onClose, detail, isLoading, isError, errorMessage, onRetry,
 }: {
   open: boolean
   onClose: () => void
-
   detail: AdminUserDetail | undefined
   isLoading: boolean
+  isError: boolean
+  errorMessage: string
+  onRetry: () => void
 }) {
   const backups = detail?.backups ?? []
   const connections = detail?.connections ?? []
@@ -249,7 +253,14 @@ function UserDetailModal({
 
   return (
     <Modal open={open} onClose={onClose} title="Support view" className="max-w-4xl">
-      {isLoading || !detail ? (
+      {isError ? (
+        <div className="py-10 text-center">
+          <p className="text-sm text-red-600 mb-3">Couldn't load user — {errorMessage}</p>
+          <Button variant="outline" size="sm" onClick={onRetry}>
+            <RefreshCw className="h-4 w-4" />Retry
+          </Button>
+        </div>
+      ) : isLoading || !detail ? (
         <div className="py-8"><TableSkeleton rows={5} /></div>
       ) : (
         <div className="space-y-5">
