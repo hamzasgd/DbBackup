@@ -81,7 +81,7 @@ describe('storage quota', () => {
 
   it('triggerBackup rejects with 403 when already over quota', async () => {
     await prisma.user.update({ where: { id: user.id }, data: { storageQuotaBytes: BigInt(1000) } });
-    await addBackup(BigInt(1000));
+    await addBackup(BigInt(1500)); // over the 1000-byte quota: used(1500) > quota → pre-check 403
     const conn = await prisma.connection.create({
       data: {
         userId: user.id, name: 'C2', type: DatabaseType.MYSQL,
