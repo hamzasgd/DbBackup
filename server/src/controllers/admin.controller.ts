@@ -99,7 +99,7 @@ export async function listUsers(req: AuthRequest, res: Response, next: NextFunct
     const [users, total, connCounts, backupStats] = await Promise.all([
       prisma.user.findMany({
         where,
-        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true, storageQuotaBytes: true, connectionLimit: true },
+        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true, storageQuotaBytes: true, connectionLimit: true, maxRetentionDays: true },
         orderBy: { createdAt: 'asc' },
         skip,
         take: limit,
@@ -134,7 +134,7 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
       select: {
         id: true, email: true, name: true, role: true, isActive: true,
         createdAt: true, termsAcceptedAt: true, passwordLoginDisabled: true,
-        storageQuotaBytes: true, connectionLimit: true,
+        storageQuotaBytes: true, connectionLimit: true, maxRetentionDays: true,
       },
     });
     if (!user) throw new AppError('User not found', 404);
@@ -305,5 +305,38 @@ export async function setUserConnectionLimit(req: AuthRequest, res: Response, ne
     });
 
     res.json({ success: true, data: { id: updated.id, connectionLimit: updated.connectionLimit } });
+  } catch (err) { next(err); }
+}
+
+export async function setUserRetentionLimit(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const targetId = req.params.id;
+    if (!targetId) throw new AppError('User id is required', 400);
+    // maxRetentionDays: positive integer or null = unlimited
+    const { maxRetentionDays } = req.body as { maxRetentionDays?: number | null };
+    if (maxRetentionDays !== null && maxRetentionDays !== undefined && (typeof maxRetentionDays !== 'number' || !Number.isInteger(maxRetentionDays) || maxRetentionDays <= 0)) {
+      throw new AppError('maxRetentionDays must be a positive integer, or null for unlimited', 400);
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, email: true, maxRetentionDays: true },
+    });
+    if (!target) throw new AppError('User not found', 404);
+
+    const updated = await prisma.user.update({
+      where: { id: targetId },
+      data: { maxRetentionDays },
+      select: { id: true, email: true, maxRetentionDays: true },
+    });
+
+    await logAuditReq(req, req.user!.userId, 'ADMIN_SET_RETENTION_LIMIT', 'user', {
+      targetUserId: targetId,
+      targetEmail: updated.email,
+      oldDays: target.maxRetentionDays,
+      newDays: updated.maxRetentionDays,
+    });
+
+    res.json({ success: true, data: { id: updated.id, maxRetentionDays: updated.maxRetentionDays } });
   } catch (err) { next(err); }
 }

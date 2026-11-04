@@ -2,8 +2,8 @@ import { Router } from 'express';
 import rateLimit from 'express-rate-limit';
 import { authenticate, requireAdmin } from '../middleware/auth.middleware';
 import { validate } from '../middleware/validate.middleware';
-import { adminUserStatusSchema, adminUserQuotaSchema, adminConnectionLimitSchema } from '../middleware/validation.schemas';
-import { getPlatformStats, listUsers, getUserDetail, setUserStatus, setUserQuota, setUserConnectionLimit } from '../controllers/admin.controller';
+import { adminUserStatusSchema, adminUserQuotaSchema, adminConnectionLimitSchema, adminRetentionLimitSchema } from '../middleware/validation.schemas';
+import { getPlatformStats, listUsers, getUserDetail, setUserStatus, setUserQuota, setUserConnectionLimit, setUserRetentionLimit } from '../controllers/admin.controller';
 
 // Admin surface is small and sensitive: stricter than the global API limiter.
 const adminLimiter = rateLimit({
@@ -25,5 +25,6 @@ router.get('/users/:id', adminLimiter, getUserDetail);
 router.patch('/users/:id/status', adminLimiter, validate(adminUserStatusSchema), setUserStatus);
 router.patch('/users/:id/quota', adminLimiter, validate(adminUserQuotaSchema), setUserQuota);
 router.patch('/users/:id/connection-limit', adminLimiter, validate(adminConnectionLimitSchema), setUserConnectionLimit);
+router.patch('/users/:id/retention-limit', adminLimiter, validate(adminRetentionLimitSchema), setUserRetentionLimit);
 
 export default router;

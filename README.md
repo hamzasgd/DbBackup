@@ -404,9 +404,11 @@ Every user gets a **storage quota — 1 GB free by default** (null = unlimited).
 
 Users also get a **connection limit — 5 free by default** (null = unlimited). Creating the (N+1)th connection is rejected with 403, and config-bundle imports that would exceed the limit fail atomically before creating anything.
 
+Backups are also capped by a **max retention period — 30 days free by default** (null = unlimited, admin presets: 7/14/30/60/90/180/365). Schedules above the cap are rejected at save time (403), the daily sweep clamps existing schedules to the cap, and bundle imports with longer retentions are rejected up front — backups are never deleted sooner than a bundle promised.
+
 - **Over quota**: new backups are rejected — instantly on the API when already over, and in the backup worker once the dump size is known (covering manual, scheduled and MCP-triggered backups). The dump is discarded and the backup is marked FAILED with a clear message; quota failures do **not** retry.
 - **Near-limit alert**: at the same threshold as storage alerts (default 80%, `STORAGE_ALERT_THRESHOLD_PERCENT`), throttled to once per 24h, delivered through every configured notification channel.
-- **Admin control**: Super Admin → user detail → Storage quota and Connection limit editors (set a value or Unlimit). Changes are audit-logged (`ADMIN_SET_QUOTA`, `ADMIN_SET_CONNECTION_LIMIT`).
+- **Admin control**: Super Admin → user detail → Storage quota, Connection limit and Max retention period editors (set a value or Unlimit). Changes are audit-logged (`ADMIN_SET_QUOTA`, `ADMIN_SET_CONNECTION_LIMIT`, `ADMIN_SET_RETENTION_LIMIT`).
 
 ### Securing your environment file (.env)
 

@@ -309,7 +309,7 @@ export async function getMe(req: Request & { user?: { userId: string; email: str
     const user = await prisma.user.findUnique({
       where: { id: req.user!.userId },
       // passwordLoginDisabled: the settings page shows the saved passkey-only state
-      select: { id: true, name: true, email: true, createdAt: true, updatedAt: true, passwordLoginDisabled: true, role: true, connectionLimit: true },
+      select: { id: true, name: true, email: true, createdAt: true, updatedAt: true, passwordLoginDisabled: true, role: true, connectionLimit: true, maxRetentionDays: true },
     });
     if (!user) throw new AppError('User not found', 404);
     res.json({ success: true, data: user });

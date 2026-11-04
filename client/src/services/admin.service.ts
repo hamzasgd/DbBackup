@@ -23,6 +23,7 @@ export interface AdminUser {
   storageUsed: number
   storageQuotaBytes: number | null
   connectionLimit: number | null
+  maxRetentionDays: number | null
 }
 
 export interface AdminConnection {
@@ -77,6 +78,7 @@ export interface AdminUserDetail {
     createdAt: string; termsAcceptedAt: string | null; passwordLoginDisabled: boolean
     storageQuotaBytes: number | null
     connectionLimit: number | null
+    maxRetentionDays: number | null
   }
   connections: AdminConnection[]
   backups: AdminBackup[]
@@ -99,4 +101,6 @@ export const adminApi = {
     api.patch<{ success: boolean; data: { id: string; storageQuotaBytes: number | null } }>(`/admin/users/${id}/quota`, { storageQuotaGb }),
   setUserConnectionLimit: (id: string, connectionLimit: number | null) =>
     api.patch<{ success: boolean; data: { id: string; connectionLimit: number | null } }>(`/admin/users/${id}/connection-limit`, { connectionLimit }),
+  setUserRetentionLimit: (id: string, maxRetentionDays: number | null) =>
+    api.patch<{ success: boolean; data: { id: string; maxRetentionDays: number | null } }>(`/admin/users/${id}/retention-limit`, { maxRetentionDays }),
 }

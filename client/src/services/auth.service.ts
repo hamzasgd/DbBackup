@@ -46,6 +46,8 @@ export interface Me {
   role?: 'USER' | 'ADMIN'
   /** Max connections (default 5); null = unlimited */
   connectionLimit?: number | null
+  /** Max schedule retention in days (default 30); null = unlimited */
+  maxRetentionDays?: number | null
 }
 
 export interface ActiveSession {

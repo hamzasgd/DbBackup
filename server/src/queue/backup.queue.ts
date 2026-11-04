@@ -230,8 +230,12 @@ export function createBackupWorker(): Worker<BackupJobData> {
           }
 
           // ── Step 6: Enforce retention ──
-          // Schedule policy if one exists, otherwise env-default fallback
-          const policy = await getRetentionPolicy(connectionId);
+          // Schedule policy if one exists, otherwise env-default fallback,
+          // clamped to the user's maxRetentionDays cap
+          const capRow = userId
+            ? await prisma.user.findUnique({ where: { id: userId }, select: { maxRetentionDays: true } })
+            : null;
+          const policy = await getRetentionPolicy(connectionId, capRow?.maxRetentionDays ?? null);
           if (policy.retentionDays > 0 || policy.retentionCount) {
             void enforceRetentionForConnection(
               connectionId,

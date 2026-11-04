@@ -113,3 +113,8 @@ export const adminUserQuotaSchema = z.object({
 export const adminConnectionLimitSchema = z.object({
   connectionLimit: z.number().int().positive().nullable(),
 });
+
+// Super admin: change a user's max backup retention in days (null = unlimited)
+export const adminRetentionLimitSchema = z.object({
+  maxRetentionDays: z.number().int().positive().nullable(),
+});

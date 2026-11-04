@@ -10,6 +10,8 @@ interface User {
   role?: 'USER' | 'ADMIN'
   // Max connections (default 5); null = unlimited. undefined on stale sessions.
   connectionLimit?: number | null
+  // Max schedule retention in days (default 30); null = unlimited.
+  maxRetentionDays?: number | null
 }
 
 interface AuthState {

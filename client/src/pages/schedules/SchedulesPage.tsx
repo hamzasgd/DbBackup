@@ -1,5 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useAuthStore } from '../../store/auth.store'
 import { Plus, Trash2, Edit2, Clock, ToggleLeft, ToggleRight } from 'lucide-react'
 import { schedulesApi } from '../../services/schedules.service'
 import { connectionsApi } from '../../services/connections.service'
@@ -50,6 +51,7 @@ export default function SchedulesPage() {
   const schedules = schedulesData?.data.data ?? []
   const connections = connsData?.data.data ?? []
 
+  const me = useAuthStore((st) => st.user)
   const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
     defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined },
@@ -209,7 +211,14 @@ export default function SchedulesPage() {
             {...register('cronExpression')}
           />
           <div className="grid grid-cols-2 gap-4">
-            <Input label="Retention (days)" type="number" defaultValue={30} error={errors.retentionDays?.message} {...register('retentionDays')} />
+            <Input
+              label="Retention (days)"
+              type="number"
+              defaultValue={30}
+              hint={me?.maxRetentionDays != null ? `Max ${me.maxRetentionDays} days on your plan` : undefined}
+              error={errors.retentionDays?.message}
+              {...register('retentionDays')}
+            />
             <Input
               label="Keep last N (optional)"
               type="number"

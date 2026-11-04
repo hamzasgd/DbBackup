@@ -72,6 +72,18 @@ export async function getSchedules(req: AuthRequest, res: Response, next: NextFu
   } catch (err) { next(err); }
 }
 
+/** Reject retentionDays above the user's cap (User.maxRetentionDays; null = unlimited). */
+async function assertRetentionAllowed(userId: string, retentionDays: number): Promise<void> {
+  const user = await prisma.user.findUnique({ where: { id: userId }, select: { maxRetentionDays: true } });
+  const max = user?.maxRetentionDays ?? null;
+  if (max !== null && retentionDays > max) {
+    throw new AppError(
+      `Retention period too long: ${retentionDays} days exceeds your maximum of ${max} days. Ask the administrator for a longer retention.`,
+      403,
+    );
+  }
+}
+
 export async function createSchedule(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { connectionId, name, frequency, cronExpression, retentionDays, retentionCount } = req.body;
@@ -80,6 +92,8 @@ export async function createSchedule(req: AuthRequest, res: Response, next: Next
       where: { id: connectionId, userId: req.user!.userId },
     });
     if (!conn) throw new AppError('Connection not found', 404);
+
+    await assertRetentionAllowed(req.user!.userId, retentionDays || 30);
 
     const schedule = await prisma.schedule.create({
       data: {
@@ -111,6 +125,7 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
     if (!existing) throw new AppError('Schedule not found', 404);
 
     const { name, frequency, cronExpression, isActive, retentionDays, retentionCount } = req.body;
+    await assertRetentionAllowed(req.user!.userId, retentionDays || 30);
     const nextRunAt = isActive === false
       ? null
       : (cronExpression ? getNextRunAt(cronExpression) : getNextRunAt(existing.cronExpression));

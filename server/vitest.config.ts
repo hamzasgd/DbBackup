@@ -8,6 +8,7 @@ const integrationTests = [
   'src/controllers/admin.controller.test.ts',
   'src/services/quota.service.test.ts',
   'src/controllers/connection-limit.test.ts',
+  'src/controllers/retention-limit.test.ts',
   'src/services/sync/sync-engine.service.test.ts',
   'src/test/sync/config-roundtrip.property.test.ts',
   'src/test/sync/conflict-resolver.test.ts',

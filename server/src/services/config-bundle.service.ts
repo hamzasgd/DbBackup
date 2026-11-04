@@ -131,6 +131,22 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
     );
   }
 
+  // Retention cap: a bundle schedule may not keep data longer than the
+  // user's maxRetentionDays. Reject the WHOLE import up front — silently
+  // deleting backups sooner than the bundle promised would lose data.
+  const capRow = await prisma.user.findUnique({ where: { id: userId }, select: { maxRetentionDays: true } });
+  const retentionCap = capRow?.maxRetentionDays ?? null;
+  if (retentionCap !== null) {
+    const over = (bundle.schedules ?? []).filter((sc) => (optInt(sc.retentionDays) ?? 30) > retentionCap);
+    if (over.length > 0) {
+      throw new AppError(
+        `Retention cap exceeded: ${over.length} schedule(s) in the bundle keep backups longer than your maximum of ${retentionCap} days. ` +
+        `Ask the administrator for a longer retention, or re-export the bundle with shorter schedules.`,
+        403,
+      );
+    }
+  }
+
   // Import connections (create new, map old IDs to new)
   const idMap = new Map<string, string>();
   let connCount = 0;

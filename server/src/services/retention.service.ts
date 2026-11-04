@@ -109,6 +109,7 @@ function envDefaultRetention(): { retentionDays: number; retentionCount: number 
  */
 export async function getRetentionPolicy(
   connectionId: string | null,
+  maxDays?: number | null,
 ): Promise<{ retentionDays: number; retentionCount: number | null }> {
   // Detached backups (connection deleted) fall back to the env default policy
   if (!connectionId) return envDefaultRetention();
@@ -127,8 +128,14 @@ export async function getRetentionPolicy(
     .map((s) => s.retentionCount)
     .filter((c): c is number => typeof c === 'number' && c > 0);
 
+  // Per-user cap: schedules may not keep data longer than maxRetentionDays.
+  // (A disabled day-rule, 0, is left alone — the operator turned it off
+  // deliberately; surprise deletions are worse than a soft cap.)
+  let effectiveDays = days.length ? Math.min(...days) : 0;
+  if (maxDays != null && effectiveDays > 0) effectiveDays = Math.min(effectiveDays, maxDays);
+
   return {
-    retentionDays: days.length ? Math.min(...days) : 0,
+    retentionDays: effectiveDays,
     retentionCount: counts.length ? Math.min(...counts) : null,
   };
 }
@@ -146,9 +153,17 @@ export async function runGlobalRetentionSweep(userId?: string): Promise<Retentio
     distinct: ['connectionId'],
   });
 
+  // Per-owner retention caps, fetched once for the whole sweep
+  const ownerIds = [...new Set(connections.map((c) => c.userId))];
+  const capRows = await prisma.user.findMany({
+    where: { id: { in: ownerIds } },
+    select: { id: true, maxRetentionDays: true },
+  });
+  const caps = new Map(capRows.map((u) => [u.id, u.maxRetentionDays]));
+
   const results: RetentionResult[] = [];
   for (const { connectionId, userId: ownerId } of connections) {
-    const policy = await getRetentionPolicy(connectionId);
+    const policy = await getRetentionPolicy(connectionId, caps.get(ownerId) ?? null);
     if (policy.retentionDays <= 0 && !policy.retentionCount) continue;
     try {
       const result = await enforceRetentionForConnection(

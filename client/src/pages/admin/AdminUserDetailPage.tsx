@@ -9,6 +9,7 @@ import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
 import { Badge } from '../../components/ui/Badge'
 import { Input } from '../../components/ui/Input'
+import { Select } from '../../components/ui/Select'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton, StatCardSkeleton } from '../../components/ui/Skeleton'
 import { StatCard } from '../../components/ui/StatCard'
@@ -120,6 +121,12 @@ export default function AdminUserDetailPage() {
             userId={data.user.id}
             used={data.connections.length}
             limit={data.user.connectionLimit}
+          />
+
+          {/* Retention limit editor (presets) */}
+          <RetentionLimitEditor
+            userId={data.user.id}
+            current={data.user.maxRetentionDays}
           />
 
           {/* Connections (masked) */}
@@ -380,6 +387,73 @@ function ConnectionLimitEditor({ userId, used, limit }: {
           )}
         </div>
         <p className="text-[11px] text-gray-400 mt-2">New connections (including config-bundle imports) are blocked once the count reaches the limit.</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ───────────────────── retention limit editor (presets) ───────────────────── */
+
+const RETENTION_PRESETS: { label: string; value: string }[] = [
+  { label: '7 days', value: '7' },
+  { label: '14 days', value: '14' },
+  { label: '30 days', value: '30' },
+  { label: '60 days', value: '60' },
+  { label: '90 days', value: '90' },
+  { label: '180 days', value: '180' },
+  { label: '365 days', value: '365' },
+  { label: 'Unlimited', value: '' },
+]
+
+function RetentionLimitEditor({ userId, current }: {
+  userId: string
+  current: number | null
+}) {
+  const qc = useQueryClient()
+  const [preset, setPreset] = useState(current == null ? '' : String(current))
+  const [syncedFor, setSyncedFor] = useState(userId)
+  if (syncedFor !== userId) {
+    setSyncedFor(userId)
+    setPreset(current == null ? '' : String(current))
+  }
+  const mutation = useMutation({
+    mutationFn: (v: number | null) => adminApi.setUserRetentionLimit(userId, v),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['admin-users'] })
+      void qc.invalidateQueries({ queryKey: ['admin-user'] })
+      void qc.invalidateQueries({ queryKey: ['admin-stats'] })
+      toast.success('Retention limit updated')
+    },
+    onError: (e) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to update retention limit'),
+  })
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Max retention period</CardTitle>
+        <span className="text-xs text-gray-500">{current == null ? 'Unlimited' : `${current} days`}</span>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 items-end flex-wrap">
+          <div className="w-48">
+            <Select
+              label="Allowed retention"
+              value={preset}
+              onChange={(e) => setPreset(e.target.value)}
+              options={RETENTION_PRESETS}
+            />
+          </div>
+          <Button
+            variant="primary"
+            size="sm"
+            loading={mutation.isPending}
+            disabled={preset === (current == null ? '' : String(current))}
+            onClick={() => mutation.mutate(preset === '' ? null : Number(preset))}
+          >
+            Save
+          </Button>
+        </div>
+        <p className="text-[11px] text-gray-400 mt-2">Schedules may not keep backups longer than this; existing schedules are clamped at the next sweep. Bundle imports with longer retentions are rejected.</p>
       </CardContent>
     </Card>
   )

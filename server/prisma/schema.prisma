@@ -122,6 +122,9 @@ model User {
   storageQuotaBytes    BigInt?               @default(1073741824)
   // Max connections a user may create. Default 5 free; null = unlimited.
   connectionLimit      Int?                  @default(5)
+  // Max backup retention a user may configure on schedules, in days.
+  // Default 30 free; null = unlimited. Sweeps clamp to this too.
+  maxRetentionDays     Int?                  @default(30)
   connections          Connection[]
   auditLogs            AuditLog[]
   refreshTokens        RefreshToken[]
