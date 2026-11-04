@@ -2,12 +2,33 @@ import { Request, Response, NextFunction } from 'express';
 import { verifyAccessToken } from '../services/token.service';
 import { prisma } from '../config/database';
 import { AppError } from './errorHandler';
+import { logAudit } from '../services/audit.service';
 
 export interface AuthRequest extends Request {
   user?: {
     userId: string;
     email: string;
+    role: 'USER' | 'ADMIN';
   };
+}
+
+/** Rejects non-admins on the /api/admin/* routers. Role comes from the DB per
+ * request (authenticate re-reads the user each call), so a demotion or a
+ * suspended-admin situation takes effect on the very next request. */
+export async function requireAdmin(
+  req: AuthRequest,
+  _res: Response,
+  next: NextFunction
+): Promise<void> {
+  if (req.user?.role !== 'ADMIN') {
+    // Security-relevant: log every non-admin that reaches an admin endpoint.
+    logAudit(req.user?.userId ?? null, 'ADMIN_ACCESS_DENIED', 'admin_api', {
+      path: req.originalUrl,
+    }, req.ip, req.headers['user-agent']);
+    next(new AppError('Forbidden — admin access required', 403));
+    return;
+  }
+  next();
 }
 
 /** Bearer header first, then ?token= (EventSource can't set headers). Throws 401 when absent. */
@@ -36,7 +57,7 @@ export async function authenticate(
     // Verify user still exists and is active
     const user = await prisma.user.findUnique({
       where: { id: payload.userId },
-      select: { id: true, email: true, isActive: true, tokenVersion: true },
+      select: { id: true, email: true, isActive: true, tokenVersion: true, role: true },
     });
 
     if (!user || !user.isActive) {
@@ -49,7 +70,7 @@ export async function authenticate(
       throw new AppError('Session no longer valid — please sign in again', 401);
     }
 
-    req.user = { userId: payload.userId, email: payload.email };
+    req.user = { userId: payload.userId, email: payload.email, role: user.role };
     next();
   } catch (error) {
     if (error instanceof AppError) {

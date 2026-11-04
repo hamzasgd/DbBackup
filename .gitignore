@@ -35,3 +35,6 @@ Thumbs.db
 # Tool state
 .v2c/
 .video_agent/
+
+# TypeScript incremental build artifacts
+*.tsbuildinfo

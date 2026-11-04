@@ -5,6 +5,7 @@ import { defineConfig } from 'vitest/config';
 // against TEST_DATABASE_URL — never the app's DATABASE_URL.
 const integrationTests = [
   'src/controllers/sync-conflict.controller.test.ts',
+  'src/controllers/admin.controller.test.ts',
   'src/services/sync/sync-engine.service.test.ts',
   'src/test/sync/config-roundtrip.property.test.ts',
   'src/test/sync/conflict-resolver.test.ts',

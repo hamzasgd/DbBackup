@@ -139,7 +139,7 @@ export async function register(req: Request, res: Response, next: NextFunction):
     const passwordHash = await bcrypt.hash(password, 12);
     const user = await prisma.user.create({
       data: { id: uuidv4(), name, email, passwordHash, termsAcceptedAt: new Date() },
-      select: { id: true, name: true, email: true, createdAt: true },
+      select: { id: true, name: true, email: true, createdAt: true, role: true },
     });
 
     const accessToken = generateAccessToken({ userId: user.id, email: user.email, tokenVersion: 0 });
@@ -226,7 +226,7 @@ export async function login(req: Request, res: Response, next: NextFunction): Pr
     res.json({
       success: true,
       data: {
-        user: { id: user.id, name: user.name, email: user.email },
+        user: { id: user.id, name: user.name, email: user.email, role: user.role },
         accessToken,
       },
     });
@@ -309,7 +309,7 @@ export async function getMe(req: Request & { user?: { userId: string; email: str
     const user = await prisma.user.findUnique({
       where: { id: req.user!.userId },
       // passwordLoginDisabled: the settings page shows the saved passkey-only state
-      select: { id: true, name: true, email: true, createdAt: true, updatedAt: true, passwordLoginDisabled: true },
+      select: { id: true, name: true, email: true, createdAt: true, updatedAt: true, passwordLoginDisabled: true, role: true },
     });
     if (!user) throw new AppError('User not found', 404);
     res.json({ success: true, data: user });
@@ -537,7 +537,7 @@ export async function passkeyLoginVerify(req: Request, res: Response, next: Next
     res.json({
       success: true,
       data: {
-        user: { id: user.id, name: user.name, email: user.email },
+        user: { id: user.id, name: user.name, email: user.email, role: user.role },
         accessToken,
       },
     });

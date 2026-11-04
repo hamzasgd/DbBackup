@@ -99,3 +99,7 @@ export const refreshTokenSchema = z.object({
 export const logoutSchema = z.object({
   refreshToken: z.string().optional(),
 });
+// Super admin: suspend/reactivate a user (admin.routes.ts → setUserStatus)
+export const adminUserStatusSchema = z.object({
+  isActive: z.boolean(),
+});

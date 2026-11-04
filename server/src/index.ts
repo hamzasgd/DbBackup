@@ -32,6 +32,30 @@ function auditEnvFileSecurity(): void {
 }
 import { ensureStorageDir, getStoragePath } from './services/storage.service';
 import { cleanupOrphanedDrills } from './services/restore-drill.service';
+import { logAudit } from './services/audit.service';
+
+/**
+ * Idempotent admin bootstrap: promote ADMIN_EMAIL to role ADMIN at startup.
+ * The migration already promotes the earliest user; this covers promoting a
+ * different account without touching the DB by hand. Best-effort — a missing
+ * user only logs a warning and never blocks boot.
+ */
+async function ensureAdminBootstrap(): Promise<void> {
+  const adminEmail = process.env.ADMIN_EMAIL?.trim().toLowerCase();
+  if (!adminEmail) return;
+  const user = await prisma.user.findFirst({
+    where: { email: adminEmail },
+    select: { id: true, email: true, role: true },
+  });
+  if (!user) {
+    logger.warn(`⚠️  ADMIN_EMAIL=${adminEmail} matches no user — admin not promoted`);
+    return;
+  }
+  if (user.role === 'ADMIN') return;
+  await prisma.user.update({ where: { id: user.id }, data: { role: 'ADMIN' } });
+  await logAudit(user.id, 'ADMIN_PROMOTED', 'user', { email: user.email, via: 'ADMIN_EMAIL env' });
+  logger.info(`👑 Promoted ${user.email} to ADMIN (ADMIN_EMAIL)`);
+}
 
 /**
  * The app keeps state in process memory (passkey challenges, login lockouts,
@@ -73,6 +97,7 @@ async function bootstrap() {
     await connectRedis();
     await startWorkers();
     markWorkersStarted();
+    await ensureAdminBootstrap();
 
     const server = app.listen(PORT, () => {
       logger.info(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV}]`);

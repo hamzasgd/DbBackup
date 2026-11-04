@@ -31,7 +31,7 @@ export const authApi = {
   passkeyLoginOptions: () =>
     api.post<{ success: boolean; data: { options: PublicKeyCredentialRequestOptionsJSON } }>('/auth/passkey/login/options'),
   passkeyLoginVerify: (response: unknown) =>
-    api.post<{ success: boolean; data: { user: { id: string; name: string; email: string }; accessToken: string } }>('/auth/passkey/login/verify', { response }),
+    api.post<{ success: boolean; data: { user: { id: string; name: string; email: string; role?: 'USER' | 'ADMIN' }; accessToken: string } }>('/auth/passkey/login/verify', { response }),
 }
 
 export interface Me {
@@ -42,6 +42,8 @@ export interface Me {
   updatedAt: string
   /** Passkey-only mode: password sign-in is disabled */
   passwordLoginDisabled: boolean
+  /** Super admin tier; undefined means USER on older servers */
+  role?: 'USER' | 'ADMIN'
 }
 
 export interface ActiveSession {

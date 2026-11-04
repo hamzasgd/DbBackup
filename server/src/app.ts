@@ -23,6 +23,7 @@ import syncConfigRoutes from './routes/sync-config.routes';
 import syncConflictRoutes from './routes/sync-conflict.routes';
 import syncStateRoutes from './routes/sync-state.routes';
 import syncOperationsRoutes from './routes/sync-operations.routes';
+import adminRoutes from './routes/admin.routes';
 import { mcpRouter, keysRouter } from './routes/mcp.routes';
 import { checkHealth } from './services/health.service';
 
@@ -133,6 +134,10 @@ app.use('/api/sync/configurations', syncConfigRoutes);
 app.use('/api/sync/configurations', syncStateRoutes);
 app.use('/api/sync/configurations', syncOperationsRoutes);
 app.use('/api/sync/conflicts', syncConflictRoutes);
+
+// Super admin: user management, platform stats, support view. authenticate +
+// requireAdmin are applied inside the router itself.
+app.use('/api/admin', adminRoutes);
 
 // MCP (AI agent) endpoint + API-key management.
 // /mcp is its own bearer-authenticated JSON-RPC surface — NOT under /api/.

@@ -384,6 +384,20 @@ If a connection reads its SSH key from a file (`sshPrivateKeyPath`), set **`SSH_
 
 `docker-compose.yml` ships a default app-database password (`dbbackup`). Set `DB_PASSWORD` in your `.env` before `docker compose up` — don't run production on the default.
 
+### Super admin
+
+A `role` column (`USER` / `ADMIN`) controls who manages the SaaS itself. The **earliest-created user is promoted automatically by a migration** (that's the owner — registration locks after them); optionally set **`ADMIN_EMAIL`** to promote (or hand the role to) a different account at startup — idempotent, audit-logged.
+
+Admins get a **Super Admin** page in the app (`/admin`): platform-wide stats (users, connections, backups, storage), a searchable/suspendable user list, and a read-only **support view** of any user's connections, backups, MCP keys and recent activity. Server-side, `requireAdmin` guards `/api/admin/*` behind `authenticate`, a stricter rate limit, and per-request role re-checks (a suspended or demoted admin loses access on their next request).
+
+What the admin can and cannot see — deliberate guardrails:
+
+- ✅ User profiles, connection **metadata** (name/type/host/db), backup file names, sizes and statuses, MCP key names/prefixes/usage
+- ❌ Database passwords, SSH/TLS private keys, backup `filePath`/`storageKey`, MCP key hashes — masked or omitted at the API
+- ❌ No user deletion, no password resets, no role-granting UI (role changes only via migration/`ADMIN_EMAIL`)
+
+Every admin action is audit-logged (`ADMIN_VIEW_USER`, `ADMIN_SUSPEND`, `ADMIN_REACTIVATE`, `ADMIN_ACCESS_DENIED`, `ADMIN_PROMOTED`).
+
 ### Securing your environment file (.env)
 
 An env file always holds *some* plaintext bootstrap secrets — that's unavoidable — but you can shrink the blast radius:

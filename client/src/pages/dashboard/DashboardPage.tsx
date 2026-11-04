@@ -18,6 +18,7 @@ import { Button } from '../../components/ui/Button'
 import { formatBytes, formatDate, statusBadgeColor, dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
 import { cn } from '../../lib/utils'
 import { CardSkeleton, StatCardSkeleton } from '../../components/ui/Skeleton'
+import { StatCard } from '../../components/ui/StatCard'
 
 /* ───────────────────────────── helpers ───────────────────────────── */
 
@@ -36,41 +37,6 @@ function timeAgo(date: string): string {
   const h = Math.floor(m / 60)
   if (h < 24) return `${h}h ago`
   return `${Math.floor(h / 24)}d ago`
-}
-
-/* ───────────────────────────── stat card ───────────────────────────── */
-
-function StatCard({
-  icon: Icon, label, value, sub, tone,
-}: {
-  icon: React.ElementType
-  label: string
-  value: string | number
-  sub?: React.ReactNode
-  tone: 'blue' | 'violet' | 'green' | 'amber'
-}) {
-  const tones = {
-    blue: 'bg-blue-50 text-blue-600',
-    violet: 'bg-violet-50 text-violet-600',
-    green: 'bg-emerald-50 text-emerald-600',
-    amber: 'bg-amber-50 text-amber-600',
-  } as const
-  return (
-    <Card>
-      <CardContent className="p-5">
-        <div className="flex items-start justify-between">
-          <div className="min-w-0">
-            <p className="text-xs font-medium uppercase tracking-wider text-gray-400">{label}</p>
-            <p className="mt-1.5 text-2xl font-bold text-gray-900 tabular-nums leading-none">{value}</p>
-            {sub && <p className="mt-2 text-xs text-gray-500 truncate">{sub}</p>}
-          </div>
-          <div className={cn('rounded-lg p-2.5 shrink-0', tones[tone])}>
-            <Icon className="h-5 w-5" />
-          </div>
-        </div>
-      </CardContent>
-    </Card>
-  )
 }
 
 /* ───────────────────────── 30-day activity chart (pure SVG) ───────────────────────── */

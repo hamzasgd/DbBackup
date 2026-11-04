@@ -5,6 +5,9 @@ interface User {
   id: string
   name: string
   email: string
+  // Present after the super-admin release; undefined for stale localStorage
+  // sessions until the next login — the UI treats undefined as non-admin.
+  role?: 'USER' | 'ADMIN'
 }
 
 interface AuthState {

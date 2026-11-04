@@ -1,7 +1,7 @@
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   Database, HardDrive, Clock, LayoutDashboard,
-  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, RefreshCw, History,
+  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, RefreshCw, History, ShieldCheck,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/auth.store'
@@ -41,11 +41,20 @@ const navGroups: { title: string; items: { to: string; icon: React.ElementType; 
   },
 ]
 
+// Only shown when the signed-in user has the ADMIN role.
+const adminGroup = {
+  title: 'Administration',
+  items: [
+    { to: '/admin', icon: ShieldCheck, label: 'Super Admin' },
+  ],
+}
+
 export function Sidebar() {
   const { user, logout } = useAuthStore()
   const navigate = useNavigate()
   const location = useLocation()
   const [mobileOpen, setMobileOpen] = useState(false)
+  const isAdmin = user?.role === 'ADMIN'
 
   // Close mobile sidebar on route change (state adjusted during render, not in an effect)
   const [prevPathname, setPrevPathname] = useState(location.pathname)
@@ -93,7 +102,7 @@ export function Sidebar() {
 
       {/* Nav */}
       <nav className="flex-1 px-3 py-4 space-y-0.5 overflow-y-auto">
-        {navGroups.map((group) => (
+        {(isAdmin ? [...navGroups, adminGroup] : navGroups).map((group) => (
           <div key={group.title} className="mb-3 last:mb-0">
             <p className="px-3 mb-1 text-[10px] font-semibold uppercase tracking-widest text-gray-600">{group.title}</p>
             <div className="space-y-0.5">
