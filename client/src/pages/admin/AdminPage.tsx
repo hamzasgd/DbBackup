@@ -151,7 +151,9 @@ export default function AdminPage() {
                         <p className="text-gray-400 text-xs">{u.email}</p>
                       </td>
                       <td className="px-6 py-3">{statusBadge(u)}</td>
-                      <td className="px-6 py-3 text-gray-600 tabular-nums">{u.connections}</td>
+                      <td className="px-6 py-3 text-gray-600 tabular-nums">
+                        {u.connectionLimit == null ? `${u.connections} · unlimited` : `${u.connections} / ${u.connectionLimit}`}
+                      </td>
                       <td className="px-6 py-3 text-gray-600 tabular-nums">{u.backups}</td>
                       <td className="px-6 py-3 text-gray-600 whitespace-nowrap">
                         {u.storageQuotaBytes == null

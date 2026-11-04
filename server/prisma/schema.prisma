@@ -120,6 +120,8 @@ model User {
   // Per-user storage quota in bytes (sum of COMPLETED backups, all providers).
   // Default 1 GB free; null = unlimited (admin-settable via /api/admin).
   storageQuotaBytes    BigInt?               @default(1073741824)
+  // Max connections a user may create. Default 5 free; null = unlimited.
+  connectionLimit      Int?                  @default(5)
   connections          Connection[]
   auditLogs            AuditLog[]
   refreshTokens        RefreshToken[]

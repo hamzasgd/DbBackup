@@ -8,6 +8,8 @@ interface User {
   // Present after the super-admin release; undefined for stale localStorage
   // sessions until the next login — the UI treats undefined as non-admin.
   role?: 'USER' | 'ADMIN'
+  // Max connections (default 5); null = unlimited. undefined on stale sessions.
+  connectionLimit?: number | null
 }
 
 interface AuthState {

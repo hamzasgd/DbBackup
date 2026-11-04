@@ -2,6 +2,7 @@ import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
 import { logAudit } from './audit.service';
+import { AppError } from '../middleware/errorHandler';
 import { notify } from './notification.service';
 import crypto from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
@@ -113,6 +114,22 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
     notificationSettings?: Record<string, unknown>;
     storageSettings?: Record<string, unknown>;
   };
+
+  // Connection limit: reject the WHOLE import up front if it would exceed the
+  // user's quota — never half-apply a bundle.
+  const [existingCount, limitRow] = await Promise.all([
+    prisma.connection.count({ where: { userId } }),
+    prisma.user.findUnique({ where: { id: userId }, select: { connectionLimit: true } }),
+  ]);
+  const limit = limitRow?.connectionLimit ?? null;
+  if (limit !== null && existingCount + (bundle.connections?.length ?? 0) > limit) {
+    throw new AppError(
+      `Connection limit reached: importing ${bundle.connections?.length ?? 0} connection(s) ` +
+      `would exceed your limit of ${limit} (you have ${existingCount}). ` +
+      `Delete connections or ask the administrator for more space.`,
+      403,
+    );
+  }
 
   // Import connections (create new, map old IDs to new)
   const idMap = new Map<string, string>();

@@ -6,6 +6,7 @@ import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { connectionsApi, type CreateConnectionPayload } from '../../services/connections.service'
+import { useAuthStore } from '../../store/auth.store'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Input } from '../../components/ui/Input'
@@ -52,6 +53,7 @@ export default function ConnectionsPage() {
   const [showSSH, setShowSSH] = useState(true)
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
 
+  const me = useAuthStore((st) => st.user)
   const { data, isLoading } = useQuery({
     queryKey: ['connections'],
     queryFn: () => connectionsApi.getAll(),
@@ -133,7 +135,10 @@ export default function ConnectionsPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Connections</h1>
-          <p className="text-gray-500 mt-1">Manage your database connections</p>
+          <p className="text-gray-500 mt-1">
+            Manage your database connections
+            {me?.connectionLimit != null && <span className="ml-2 text-xs text-gray-400">({connections.length} / {me.connectionLimit} used)</span>}
+          </p>
         </div>
         <Button onClick={openCreate}><Plus className="h-4 w-4" />New Connection</Button>
       </div>

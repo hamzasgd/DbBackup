@@ -108,3 +108,8 @@ export const adminUserStatusSchema = z.object({
 export const adminUserQuotaSchema = z.object({
   storageQuotaGb: z.number().positive().nullable(),
 });
+
+// Super admin: change a user's max connection count (null = unlimited)
+export const adminConnectionLimitSchema = z.object({
+  connectionLimit: z.number().int().positive().nullable(),
+});

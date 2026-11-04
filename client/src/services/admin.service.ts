@@ -22,6 +22,7 @@ export interface AdminUser {
   lastBackupAt: string | null
   storageUsed: number
   storageQuotaBytes: number | null
+  connectionLimit: number | null
 }
 
 export interface AdminConnection {
@@ -75,6 +76,7 @@ export interface AdminUserDetail {
     id: string; email: string; name: string; role: UserRole; isActive: boolean
     createdAt: string; termsAcceptedAt: string | null; passwordLoginDisabled: boolean
     storageQuotaBytes: number | null
+    connectionLimit: number | null
   }
   connections: AdminConnection[]
   backups: AdminBackup[]
@@ -95,4 +97,6 @@ export const adminApi = {
     api.patch<{ success: boolean; data: { id: string; isActive: boolean; unchanged?: boolean } }>(`/admin/users/${id}/status`, { isActive }),
   setUserQuota: (id: string, storageQuotaGb: number | null) =>
     api.patch<{ success: boolean; data: { id: string; storageQuotaBytes: number | null } }>(`/admin/users/${id}/quota`, { storageQuotaGb }),
+  setUserConnectionLimit: (id: string, connectionLimit: number | null) =>
+    api.patch<{ success: boolean; data: { id: string; connectionLimit: number | null } }>(`/admin/users/${id}/connection-limit`, { connectionLimit }),
 }

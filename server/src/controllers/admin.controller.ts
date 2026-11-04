@@ -99,7 +99,7 @@ export async function listUsers(req: AuthRequest, res: Response, next: NextFunct
     const [users, total, connCounts, backupStats] = await Promise.all([
       prisma.user.findMany({
         where,
-        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true, storageQuotaBytes: true },
+        select: { id: true, email: true, name: true, role: true, isActive: true, createdAt: true, storageQuotaBytes: true, connectionLimit: true },
         orderBy: { createdAt: 'asc' },
         skip,
         take: limit,
@@ -134,7 +134,7 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
       select: {
         id: true, email: true, name: true, role: true, isActive: true,
         createdAt: true, termsAcceptedAt: true, passwordLoginDisabled: true,
-        storageQuotaBytes: true,
+        storageQuotaBytes: true, connectionLimit: true,
       },
     });
     if (!user) throw new AppError('User not found', 404);
@@ -272,5 +272,38 @@ export async function setUserQuota(req: AuthRequest, res: Response, next: NextFu
     });
 
     res.json({ success: true, data: { id: updated.id, storageQuotaBytes: updated.storageQuotaBytes === null ? null : Number(updated.storageQuotaBytes) } });
+  } catch (err) { next(err); }
+}
+
+export async function setUserConnectionLimit(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const targetId = req.params.id;
+    if (!targetId) throw new AppError('User id is required', 400);
+    // connectionLimit: positive integer or null = unlimited
+    const { connectionLimit } = req.body as { connectionLimit?: number | null };
+    if (connectionLimit !== null && connectionLimit !== undefined && (typeof connectionLimit !== 'number' || !Number.isInteger(connectionLimit) || connectionLimit <= 0)) {
+      throw new AppError('connectionLimit must be a positive integer, or null for unlimited', 400);
+    }
+
+    const target = await prisma.user.findUnique({
+      where: { id: targetId },
+      select: { id: true, email: true, connectionLimit: true },
+    });
+    if (!target) throw new AppError('User not found', 404);
+
+    const updated = await prisma.user.update({
+      where: { id: targetId },
+      data: { connectionLimit },
+      select: { id: true, email: true, connectionLimit: true },
+    });
+
+    await logAuditReq(req, req.user!.userId, 'ADMIN_SET_CONNECTION_LIMIT', 'user', {
+      targetUserId: targetId,
+      targetEmail: updated.email,
+      oldLimit: target.connectionLimit,
+      newLimit: updated.connectionLimit,
+    });
+
+    res.json({ success: true, data: { id: updated.id, connectionLimit: updated.connectionLimit } });
   } catch (err) { next(err); }
 }

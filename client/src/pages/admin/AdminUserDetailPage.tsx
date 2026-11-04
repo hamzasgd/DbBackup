@@ -115,6 +115,13 @@ export default function AdminUserDetailPage() {
             percent={data.quota.percent}
           />
 
+          {/* Connection limit editor */}
+          <ConnectionLimitEditor
+            userId={data.user.id}
+            used={data.connections.length}
+            limit={data.user.connectionLimit}
+          />
+
           {/* Connections (masked) */}
           <Card>
             <CardHeader>
@@ -317,6 +324,62 @@ function QuotaEditor({ userId, usedBytes, quotaBytes, percent }: {
           )}
         </div>
         <p className="text-[11px] text-gray-400 mt-2">New backups are blocked once used storage reaches the quota. Unlimit removes the cap entirely.</p>
+      </CardContent>
+    </Card>
+  )
+}
+
+/* ───────────────────── connection limit editor ───────────────────── */
+
+function ConnectionLimitEditor({ userId, used, limit }: {
+  userId: string
+  used: number
+  limit: number | null
+}) {
+  const qc = useQueryClient()
+  const [input, setInput] = useState('')
+  const mutation = useMutation({
+    mutationFn: (v: number | null) => adminApi.setUserConnectionLimit(userId, v),
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['admin-users'] })
+      void qc.invalidateQueries({ queryKey: ['admin-user'] })
+      void qc.invalidateQueries({ queryKey: ['admin-stats'] })
+      toast.success('Connection limit updated')
+      setInput('')
+    },
+    onError: (e) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to update connection limit'),
+  })
+
+  const save = () => {
+    const trimmed = input.trim()
+    if (trimmed === '') return
+    const n = Number(trimmed)
+    if (!Number.isInteger(n) || n <= 0) {
+      toast.error('Enter a positive whole number, or use Unlimit for no cap')
+      return
+    }
+    mutation.mutate(n)
+  }
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="text-sm">Connection limit</CardTitle>
+        <span className="text-xs text-gray-500 tabular-nums">
+          {limit == null ? `${used} · unlimited` : `${used} / ${limit} used`}
+        </span>
+      </CardHeader>
+      <CardContent>
+        <div className="flex gap-2 items-end flex-wrap">
+          <div className="w-40">
+            <Input label="Max connections" placeholder="e.g. 10" value={input} onChange={(e) => setInput(e.target.value)} />
+          </div>
+          <Button variant="primary" size="sm" loading={mutation.isPending} onClick={save}>Save</Button>
+          {limit != null && (
+            <Button variant="outline" size="sm" loading={mutation.isPending} onClick={() => mutation.mutate(null)}>Unlimit</Button>
+          )}
+        </div>
+        <p className="text-[11px] text-gray-400 mt-2">New connections (including config-bundle imports) are blocked once the count reaches the limit.</p>
       </CardContent>
     </Card>
   )

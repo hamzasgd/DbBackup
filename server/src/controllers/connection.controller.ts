@@ -79,6 +79,21 @@ export async function getConnection(req: AuthRequest, res: Response, next: NextF
 export async function createConnection(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const { name, type, host, port, username, password, database, sslEnabled, sshEnabled, ...rest } = req.body;
+
+    // Per-user connection limit (default 5; null = unlimited). A read-then-create
+    // race is acceptable here: worst case is limit+1 briefly, unlike money.
+    const [count, limitRow] = await Promise.all([
+      prisma.connection.count({ where: { userId: req.user!.userId } }),
+      prisma.user.findUnique({ where: { id: req.user!.userId }, select: { connectionLimit: true } }),
+    ]);
+    const limit = limitRow?.connectionLimit ?? null;
+    if (limit !== null && count >= limit) {
+      throw new AppError(
+        `Connection limit reached (${count} of ${limit}). Delete a connection or ask the administrator for more space.`,
+        403,
+      );
+    }
+
     const encrypted = encryptConnection({ host, username, password, database, ...rest });
 
     const conn = await prisma.connection.create({

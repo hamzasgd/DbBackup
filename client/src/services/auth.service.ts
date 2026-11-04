@@ -44,6 +44,8 @@ export interface Me {
   passwordLoginDisabled: boolean
   /** Super admin tier; undefined means USER on older servers */
   role?: 'USER' | 'ADMIN'
+  /** Max connections (default 5); null = unlimited */
+  connectionLimit?: number | null
 }
 
 export interface ActiveSession {
