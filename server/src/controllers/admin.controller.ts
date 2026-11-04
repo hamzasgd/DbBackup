@@ -172,7 +172,7 @@ export async function getUserDetail(req: AuthRequest, res: Response, next: NextF
         where: { userId: targetId },
         select: { action: true, resource: true, details: true, createdAt: true, ipAddress: true },
         orderBy: { createdAt: 'desc' },
-        take: 15,
+        take: 25,
       }),
     ]);
 

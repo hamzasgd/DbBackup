@@ -19,6 +19,7 @@ import SyncConfigurationsPage from './pages/sync/SyncConfigurationsPage'
 import SyncDetailPage from './pages/sync/SyncDetailPage'
 import AuditLogsPage from './pages/audit/AuditLogsPage'
 import AdminPage from './pages/admin/AdminPage'
+import AdminUserDetailPage from './pages/admin/AdminUserDetailPage'
 import { AdminRoute } from './components/layout/AdminRoute'
 
 function App() {
@@ -44,6 +45,7 @@ function App() {
               <Route path="/audit" element={<AuditLogsPage />} />
               <Route element={<AdminRoute />}>
                 <Route path="/admin" element={<AdminPage />} />
+                <Route path="/admin/users/:id" element={<AdminUserDetailPage />} />
               </Route>
             </Route>
           </Route>
