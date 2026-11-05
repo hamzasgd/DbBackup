@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/MCP-Agent--ready-6E56CF?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciLz4=" />
   <img src="https://img.shields.io/badge/Passkeys-WebAuthn-3178C6" />
   <img src="https://img.shields.io/badge/Encryption-AES--256--GCM-2DD4BF" />
+  <a href="https://hub.xerj.org/contributors/hamzasgd"><img src="https://hub.xerj.org/contributors/hamzasgd/badge.svg" alt="XERJ Corpus Hub contributor" /></a>
 </p>
 
 <p align="center">
