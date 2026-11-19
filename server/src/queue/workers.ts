@@ -1,4 +1,5 @@
-import { createBackupWorker } from './backup.queue';
+import { createBackupWorker, getBackupQueue } from './backup.queue';
+import { reconcileInterruptedBackups } from '../services/backup-recovery.service';
 import { createScheduleWorker } from './schedule.queue';
 import { createMigrationWorker } from './migration.queue';
 import { createSyncWorker } from './sync';
@@ -16,6 +17,16 @@ let syncWorker: ReturnType<typeof createSyncWorker>;
 let retentionWorker: ReturnType<typeof createRetentionWorker>;
 let restoreWorker: ReturnType<typeof createRestoreWorker>;
 let heartbeatWorker: ReturnType<typeof createHeartbeatWorker>;
+let backupReconcileTimer: NodeJS.Timeout | undefined;
+
+/** How often backups orphaned by a stop/restart are looked for. */
+const BACKUP_RECONCILE_MS = 2 * 60_000;
+
+function runBackupReconcile(): void {
+  reconcileInterruptedBackups(getBackupQueue())
+    .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted backup(s) as FAILED`); })
+    .catch((err) => logger.warn('Backup reconcile failed:', err));
+}
 
 export async function startWorkers(): Promise<void> {
   backupWorker = createBackupWorker();
@@ -34,6 +45,12 @@ export async function startWorkers(): Promise<void> {
   logger.info(`Retention worker id=${retentionWorker.id}`);
   logger.info(`Restore worker id=${restoreWorker.id}`);
   logger.info(`Heartbeat worker id=${heartbeatWorker.id}`);
+
+  // Fail backups left RUNNING/PENDING by a stop or restart (at startup, then
+  // periodically: BullMQ may only give up on a stalled job a little later)
+  runBackupReconcile();
+  backupReconcileTimer = setInterval(runBackupReconcile, BACKUP_RECONCILE_MS);
+  backupReconcileTimer.unref?.();
 
   // Register the daily global retention sweep
   try {
@@ -59,6 +76,7 @@ export async function startWorkers(): Promise<void> {
 }
 
 export async function stopWorkers(): Promise<void> {
+  if (backupReconcileTimer) clearInterval(backupReconcileTimer);
   await backupWorker.close();
   await scheduleWorker.close();
   await migrationWorker.close();

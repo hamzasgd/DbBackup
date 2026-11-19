@@ -52,7 +52,9 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
       lastDrill: drills?.[0] ?? null,
     }));
 
-    res.json({ success: true, data: { backups: withDrill, total, page: parsedPage, limit: parsedLimit } });
+    // serverTime lets the client judge worker heartbeats (progressAt) on the
+    // server's clock, not on how long ago this browser last fetched
+    res.json({ success: true, data: { backups: withDrill, total, page: parsedPage, limit: parsedLimit, serverTime: new Date().toISOString() } });
   } catch (err) { next(err); }
 }
 
