@@ -6,6 +6,7 @@ import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, Connecti
 import { SSHTunnel } from '../ssh.service';
 import { TlsFiles, mongoCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
+import { watchOutputSize } from './output-watcher';
 import { cliEnv } from './cli-safety';
 
 /**
@@ -114,11 +115,12 @@ export class MongoEngine extends CliEngine {
       const { fileName, filePath } = buildBackupPath(outputDir, 'mongodb', this.config.database, timestamp, '.archive.gz');
       options.onProgress?.(5);
 
+      const stopWatch = watchOutputSize(filePath, options.onBytes);
       await this.runMongo('mongodump', port, [
         '--db', this.config.database,
         `--archive=${filePath}`,
         '--gzip',
-      ]);
+      ]).finally(stopWatch);
       options.onProgress?.(95);
       const stats = statSync(filePath);
       options.onProgress?.(100);
@@ -211,7 +213,9 @@ export class RedisEngine extends CliEngine {
       options.onProgress?.(10);
 
       // redis-cli --rdb streams a BGSAVE snapshot to the given file
-      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath], this.redisEnv());
+      const stopWatch = watchOutputSize(filePath, options.onBytes);
+      const { stderr } = await this.runCli('redis-cli', [...this.cliArgs(port), '--rdb', filePath], this.redisEnv())
+        .finally(stopWatch);
       void stderr;
       options.onProgress?.(95);
       const stats = statSync(filePath);

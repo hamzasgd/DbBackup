@@ -8,6 +8,7 @@ import { dumpToFile } from './dump-to-file';
 import { Pool, Client } from 'pg';
 import { TlsFiles, nodeTlsOptions, pgCliTls } from './tls';
 import { buildBackupPath } from './backup-path';
+import { watchOutputSize } from './output-watcher';
 import { cliEnv, psqlRestrictLine } from './cli-safety';
 
 export class PostgreSQLEngine extends BaseEngine {
@@ -115,6 +116,7 @@ export class PostgreSQLEngine extends BaseEngine {
         mkdirSync(outputPath, { recursive: true });
       }
 
+      const stopWatch = watchOutputSize(outputPath, options.onBytes);
       await new Promise<void>((resolve, reject) => {
         const args = [
           ...this.getBaseArgs(files),
@@ -145,7 +147,7 @@ export class PostgreSQLEngine extends BaseEngine {
           dump.on('close', (code: number) => code === 0 ? resolve() : reject(new Error(`pg_dump failed: ${error}`)));
           dump.on('error', reject);
         }
-      });
+      }).finally(stopWatch);
 
       onProgress?.(95);
       // For directory format, size is sum of all files inside
