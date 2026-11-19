@@ -89,6 +89,44 @@ export async function enforceRetentionForConnection(
 }
 
 /**
+ * Bytes that retention will free once ONE more backup of this connection
+ * completes: completed backups past the age cutoff, plus those pushed out of
+ * the keep-last-N window by the new one. Mirrors enforceRetentionForConnection
+ * (read-only), so the quota check can count a rotation's net size instead of
+ * rejecting it for the old backup that is about to be deleted.
+ */
+export async function previewRetentionFreedBytes(
+  connectionId: string,
+  retentionDays: number,
+  retentionCount: number | null,
+): Promise<bigint> {
+  const toDelete = new Map<string, bigint>();
+
+  if (retentionDays > 0) {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
+    const old = await prisma.backup.findMany({
+      where: { connectionId, status: 'COMPLETED', createdAt: { lt: cutoff } },
+      select: { id: true, fileSize: true },
+    });
+    old.forEach((b) => toDelete.set(b.id, BigInt(b.fileSize)));
+  }
+
+  if (retentionCount && retentionCount > 0) {
+    const all = await prisma.backup.findMany({
+      where: { connectionId, status: 'COMPLETED' },
+      orderBy: { createdAt: 'desc' },
+      select: { id: true, fileSize: true },
+    });
+    // The incoming backup takes one of the N slots
+    all.slice(retentionCount - 1).forEach((b) => toDelete.set(b.id, BigInt(b.fileSize)));
+  }
+
+  let total = BigInt(0);
+  for (const size of toDelete.values()) total += size;
+  return total;
+}
+
+/**
  * Fallback policy for connections without any schedule.
  * Configurable via DEFAULT_RETENTION_DAYS / DEFAULT_RETENTION_COUNT (0 or unset = rule disabled).
  */
