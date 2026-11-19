@@ -46,9 +46,12 @@ describe.skipIf(!PG)('PostgreSQL backup and restore', () => {
     async (format) => {
       const engine = engineFactory(cfg);
       const progress: number[] = [];
-      const result = await engine.backup(out, { format, onProgress: (p) => progress.push(p) });
+      const sizes: number[] = [];
+      const result = await engine.backup(out, { format, onProgress: (p) => progress.push(p), onBytes: (n) => sizes.push(n) });
       expect(result.fileSize).toBeGreaterThan(0);
       expect(progress.at(-1)).toBe(100);
+      // live size reporting ends on the real output size
+      expect(sizes.at(-1)).toBe(result.fileSize);
 
       const target = uniq('e2e_pg_rst');
       await pgCreateDb(target);
@@ -133,8 +136,10 @@ describe.skipIf(!MARIADB)('MariaDB / MySQL backup and restore', () => {
     it.each<BackupFormat>(['COMPRESSED_SQL', 'PLAIN_SQL'])(`${type} %s backup restores to an identical database`, async (format) => {
       const engine = engineFactory(engineConfig(type, MARIADB!, source));
       expect((await engine.testConnection()).success).toBe(true);
-      const backup = await engine.backup(out, { format });
+      const sizes: number[] = [];
+      const backup = await engine.backup(out, { format, onBytes: (n) => sizes.push(n) });
       expect(backup.fileName).toMatch(format === 'PLAIN_SQL' ? /\.sql$/ : /\.sql\.gz$/);
+      expect(sizes.at(-1)).toBe(backup.fileSize);
 
       const target = uniq('e2e_my_rst');
       await engine.createDatabase(target);

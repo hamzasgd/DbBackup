@@ -10,6 +10,13 @@ export interface ProgressEvent {
   tableCount?: number
   rowsMigrated?: number
   verified?: boolean
+  // Backup live progress
+  stage?: 'DUMPING' | 'VERIFYING' | 'ENCRYPTING' | 'UPLOADING'
+  bytesWritten?: number
+  expectedBytes?: number | null
+  bytesChangedAt?: string
+  /** Server time the event was sent */
+  at?: string
 }
 
 /**
