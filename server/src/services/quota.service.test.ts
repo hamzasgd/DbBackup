@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { Response, NextFunction } from 'express';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { getQuotaUsage, assertQuotaAllowsFile } from './quota.service';
+import { previewRetentionFreedBytes } from './retention.service';
 import { triggerBackup } from '../controllers/backup.controller';
 import { setUserQuota } from '../controllers/admin.controller';
 import { prisma } from '../config/database';
@@ -68,6 +69,54 @@ describe('storage quota', () => {
     const over = await assertQuotaAllowsFile(user.id, BigInt(600));
     expect(over.ok).toBe(false);
     if (!over.ok) expect(over.message).toContain('Storage quota exceeded');
+  });
+
+  describe('retention-aware check', () => {
+    async function mkConn() {
+      return prisma.connection.create({
+        data: {
+          userId: user.id, name: 'Rot', type: DatabaseType.MYSQL,
+          host: 'localhost', port: 3306, database: 'db', username: 'u', password: 'p',
+        },
+      });
+    }
+    async function addTo(connectionId: string, fileSize: bigint, createdAt: Date) {
+      return prisma.backup.create({
+        data: { userId: user.id, connectionId, fileName: 'f.gz', filePath: '/tmp/f.gz', fileSize, dbType: DatabaseType.MYSQL, dbName: 'db', status: 'COMPLETED', format: 'COMPRESSED_SQL', createdAt },
+      });
+    }
+
+    it('admits a keep-last-N rotation whose net size fits the quota', async () => {
+      // keep last 2, 400 B each, quota 1000: steady state is 800 B, but the
+      // naive check sees 800 + 400 = 1200 and rejects
+      await prisma.user.update({ where: { id: user.id }, data: { storageQuotaBytes: BigInt(1000) } });
+      const conn = await mkConn();
+      await addTo(conn.id, BigInt(400), new Date(Date.now() - 2 * 86400_000));
+      await addTo(conn.id, BigInt(400), new Date(Date.now() - 86400_000));
+
+      expect((await assertQuotaAllowsFile(user.id, BigInt(400))).ok).toBe(false);
+
+      const freed = await previewRetentionFreedBytes(conn.id, 0, 2);
+      expect(freed).toBe(BigInt(400)); // only the oldest falls out of the window
+      expect((await assertQuotaAllowsFile(user.id, BigInt(400), freed)).ok).toBe(true);
+    });
+
+    it('counts age-expired backups and keep-last-1 as reclaimable, without double counting', async () => {
+      const conn = await mkConn();
+      await addTo(conn.id, BigInt(100), new Date(Date.now() - 40 * 86400_000)); // expired AND outside window
+      await addTo(conn.id, BigInt(200), new Date(Date.now() - 86400_000));
+      expect(await previewRetentionFreedBytes(conn.id, 30, null)).toBe(BigInt(100));
+      expect(await previewRetentionFreedBytes(conn.id, 30, 1)).toBe(BigInt(300));
+      expect(await previewRetentionFreedBytes(conn.id, 0, null)).toBe(BigInt(0));
+    });
+
+    it('still blocks when the rotation itself does not fit, and says what retention frees', async () => {
+      await prisma.user.update({ where: { id: user.id }, data: { storageQuotaBytes: BigInt(1000) } });
+      await addBackup(BigInt(800));
+      const verdict = await assertQuotaAllowsFile(user.id, BigInt(900), BigInt(300));
+      expect(verdict.ok).toBe(false);
+      if (!verdict.ok) expect(verdict.message).toContain('retention would free 300 B');
+    });
   });
 
   it('null quota means unlimited', async () => {
