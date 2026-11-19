@@ -10,7 +10,7 @@ import { publishProgress, BACKUP_PROGRESS_CHANNEL } from '../services/sse.servic
 import { notify } from '../services/notification.service';
 import { uploadBackupFile } from '../services/storage.service';
 import { encryptBackupFile, decryptBackupFile, sha256File } from '../services/backup-crypto.service';
-import { enforceRetentionForConnection, getRetentionPolicy } from '../services/retention.service';
+import { enforceRetentionForConnection, getRetentionPolicy, previewRetentionFreedBytes } from '../services/retention.service';
 import { decrypt } from '../services/crypto.service';
 import { sanitizeConfig } from '../utils/sanitize';
 import { logAudit } from '../services/audit.service';
@@ -31,6 +31,11 @@ async function decryptConn(connectionId: string): Promise<ConnectionConfig> {
   const conn = await prisma.connection.findUnique({ where: { id: connectionId } });
   if (!conn) throw new Error(`Connection not found: ${connectionId}`);
   return toEngineConfig(conn);
+}
+
+async function getMaxRetentionDays(userId: string): Promise<number | null> {
+  const row = await prisma.user.findUnique({ where: { id: userId }, select: { maxRetentionDays: true } });
+  return row?.maxRetentionDays ?? null;
 }
 
 let backupQueue: Queue<BackupJobData>;
@@ -97,9 +102,17 @@ export function createBackupWorker(): Worker<BackupJobData> {
         });
 
         // ── Step 0: Storage quota (authoritative check — covers HTTP,
-        // scheduled and MCP backups; the dump size is only known now) ──
+        // scheduled and MCP backups; the dump size is only known now).
+        // Space the retention policy frees once this backup lands counts as
+        // available, so a keep-last-N rotation is judged on its net size. ──
         if (userId) {
-          const verdict = await assertQuotaAllowsFile(userId, result.fileSize);
+          const policy = await getRetentionPolicy(connectionId, await getMaxRetentionDays(userId));
+          const reclaimable = await previewRetentionFreedBytes(
+            connectionId,
+            policy.retentionDays,
+            policy.retentionCount,
+          ).catch(() => BigInt(0));
+          const verdict = await assertQuotaAllowsFile(userId, result.fileSize, reclaimable);
           if (!verdict.ok) {
             // Discard the dump and fail WITHOUT retry: a quota block is not a
             // transient error, so throwing UnrecoverableError stops BullMQ's
@@ -231,13 +244,11 @@ export function createBackupWorker(): Worker<BackupJobData> {
 
           // ── Step 6: Enforce retention ──
           // Schedule policy if one exists, otherwise env-default fallback,
-          // clamped to the user's maxRetentionDays cap
-          const capRow = userId
-            ? await prisma.user.findUnique({ where: { id: userId }, select: { maxRetentionDays: true } })
-            : null;
-          const policy = await getRetentionPolicy(connectionId, capRow?.maxRetentionDays ?? null);
+          // clamped to the user's maxRetentionDays cap. Awaited: the quota
+          // check above already counted these deletions as free space.
+          const policy = await getRetentionPolicy(connectionId, await getMaxRetentionDays(userId));
           if (policy.retentionDays > 0 || policy.retentionCount) {
-            void enforceRetentionForConnection(
+            await enforceRetentionForConnection(
               connectionId,
               policy.retentionDays,
               policy.retentionCount,

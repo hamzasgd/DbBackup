@@ -42,19 +42,27 @@ function fmtBytes(n: bigint | number): string {
 }
 
 /** Verdict for admitting one new backup file. Callers: triggerBackup (pre-check
- * with fileSize 0 = "already over?") and the backup worker (real dump size). */
+ * with fileSize 0 = "already over?") and the backup worker (real dump size).
+ *
+ * `reclaimableBytes` is space the retention policy will free as soon as this
+ * backup lands (e.g. the oldest backup of a keep-last-N rotation). Without it
+ * a rotation that stays under quota in steady state would be rejected, because
+ * the old backup is still counted until retention runs after completion. */
 export async function assertQuotaAllowsFile(
   userId: string,
-  fileSize: bigint | number
+  fileSize: bigint | number,
+  reclaimableBytes: bigint = BigInt(0),
 ): Promise<{ ok: true } | { ok: false; message: string }> {
   const incoming = typeof fileSize === 'bigint' ? fileSize : BigInt(Math.max(0, Math.round(fileSize)));
   const { usedBytes, quotaBytes } = await getQuotaUsage(userId);
   if (quotaBytes === null) return { ok: true };
-  const newUsed = usedBytes + incoming;
+  const freed = reclaimableBytes > usedBytes ? usedBytes : reclaimableBytes;
+  const newUsed = usedBytes - freed + incoming;
   if (newUsed <= quotaBytes) return { ok: true };
   const message =
     `Storage quota exceeded: this backup needs ${fmtBytes(incoming)}, ` +
-    `you are using ${fmtBytes(usedBytes)} of your ${fmtBytes(quotaBytes)} quota. ` +
-    `Delete old backups or ask the administrator for more space.`;
+    `you are using ${fmtBytes(usedBytes)} of your ${fmtBytes(quotaBytes)} quota` +
+    (freed > BigInt(0) ? ` (retention would free ${fmtBytes(freed)})` : '') +
+    `. Delete old backups or ask the administrator for more space.`;
   return { ok: false, message };
 }
