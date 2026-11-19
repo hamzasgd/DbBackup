@@ -8,7 +8,7 @@ import { logger } from '../config/logger';
 import { verifyBackup } from '../services/verification.service';
 import { publishProgress, BACKUP_PROGRESS_CHANNEL } from '../services/sse.service';
 import { notify } from '../services/notification.service';
-import { uploadBackupFile } from '../services/storage.service';
+import { uploadBackupFile, deleteBackupArtifact } from '../services/storage.service';
 import { encryptBackupFile, decryptBackupFile, sha256File } from '../services/backup-crypto.service';
 import { enforceRetentionForConnection, getRetentionPolicy, previewRetentionFreedBytes } from '../services/retention.service';
 import { decrypt } from '../services/crypto.service';
@@ -71,15 +71,28 @@ export function createBackupWorker(): Worker<BackupJobData> {
       // Fetch backup row for userId (denormalized) for notifications/retention
       const backupRecord = await prisma.backup.findUnique({
         where: { id: backupId },
-        select: { userId: true, connectionId: true },
+        select: { userId: true, connectionId: true, filePath: true, status: true },
       });
+      // Re-delivered after it already finished (the app died between marking it
+      // COMPLETED and BullMQ recording that): never redo it or touch its file
+      if (backupRecord?.status === 'COMPLETED') {
+        logger.warn(`Backup ${backupId} is already COMPLETED; skipping re-delivered job ${job.id}`);
+        return;
+      }
       const userId = backupRecord?.userId ?? '';
       const connectionId = backupRecord?.connectionId ?? connId;
 
       await prisma.backup.update({
         where: { id: backupId },
-        data: { status: 'RUNNING', startedAt: new Date(), progress: 0 },
+        // A re-run (retry, or re-queued after a restart) starts from a clean slate
+        data: { status: 'RUNNING', startedAt: new Date(), progress: 0, error: null, completedAt: null, bytesWritten: 0, stage: null, filePath: 'pending' },
       });
+      // A previous attempt that was killed mid-dump (restart, crash) left its
+      // partial file behind; the path was recorded when that dump started
+      if (backupRecord?.filePath && backupRecord.filePath !== 'pending') {
+        await deleteBackupArtifact(userId, { filePath: backupRecord.filePath, storageType: 'LOCAL' })
+          .catch((err) => logger.warn(`Could not remove partial file of backup ${backupId}:`, err));
+      }
 
       const resolvedFormat = format ?? (config.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL');
 
@@ -95,6 +108,10 @@ export function createBackupWorker(): Worker<BackupJobData> {
         const result = await engine.backup(outputDir, {
           format: resolvedFormat,
           onBytes: (bytes) => tracker?.setBytes(bytes),
+          onOutputPath: (p) => {
+            void prisma.backup.update({ where: { id: backupId }, data: { filePath: p } })
+              .catch((err) => logger.warn(`Could not record output path of backup ${backupId}:`, err));
+          },
         });
 
         // ── Step 0: Storage quota (authoritative check — covers HTTP,

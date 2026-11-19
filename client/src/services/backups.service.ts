@@ -47,7 +47,7 @@ export interface Backup {
 
 export const backupsApi = {
   getAll: (params?: { connectionId?: string; page?: number; limit?: number }) =>
-    api.get<{ success: boolean; data: { backups: Backup[]; total: number } }>('/backups', { params }),
+    api.get<{ success: boolean; data: { backups: Backup[]; total: number; serverTime?: string } }>('/backups', { params }),
   getOne: (id: string) =>
     api.get<{ success: boolean; data: Backup }>(`/backups/${id}`),
   trigger: (data: { connectionId: string; snapshotName?: string; notes?: string; format?: BackupFormat }) =>

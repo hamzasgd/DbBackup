@@ -92,6 +92,7 @@ export class MySQLEngine extends BaseEngine {
       const ext = useGzip ? '.sql.gz' : '.sql';
       const enginePrefix = this.config.type === 'MARIADB' ? 'mariadb' : 'mysql';
       const { fileName, filePath } = buildBackupPath(outputDir, enginePrefix, this.config.database, timestamp, ext);
+      options.onOutputPath?.(filePath);
 
       onProgress?.(5);
 

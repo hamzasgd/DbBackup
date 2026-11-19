@@ -13,8 +13,16 @@ const STAGE_LABEL: Record<BackupStage, string> = {
 
 /** No output growth for this long while dumping → "no new data" warning. */
 const NO_DATA_WARN_MS = 2 * 60_000
-/** Worker heartbeats every ~3s; this long without one → it has likely died. */
+/** Worker heartbeats every ~3s; this long without one (on the server's clock) → it has likely died. */
 const HEARTBEAT_LOST_MS = 60_000
+
+/** How current this page's data is: lets a stale tab tell "I can't see" from "the worker is silent". */
+export interface Freshness {
+  /** Server time of the last successful list response */
+  serverTime: string | null
+  /** Set when refreshing fails: when the page last had good data (ms epoch) */
+  offlineSince: number | null
+}
 /** Speed is measured over this recent window, not since the start: the first
  * minute (connecting, schema, small tables) says little about the rest. */
 const RATE_WINDOW_MS = 60_000
@@ -41,13 +49,8 @@ function useNow(intervalMs: number): number {
   return now
 }
 
-export function BackupLiveProgress({ backup, live }: { backup: Backup; live: LiveProgress }) {
+export function BackupLiveProgress({ backup, live, freshness }: { backup: Backup; live: LiveProgress; freshness: Freshness }) {
   const now = useNow(1000)
-
-  // Heartbeat loss is measured on this browser's clock from when the last
-  // heartbeat ARRIVED, so a skewed client clock can't raise a false alarm.
-  const [beat, setBeat] = useState({ value: live.progressAt, receivedAt: now })
-  if (beat.value !== live.progressAt) setBeat({ value: live.progressAt, receivedAt: now })
 
   // (server time, bytes) at every heartbeat; bytes are unchanged since the last
   // measurement, so each heartbeat is a valid sample and a stall reads as 0 B/s
@@ -104,7 +107,18 @@ export function BackupLiveProgress({ backup, live }: { backup: Backup; live: Liv
   const noDataMs = dumping && live.progressAt && live.bytesChangedAt
     ? Date.parse(live.progressAt) - Date.parse(live.bytesChangedAt)
     : 0
-  const heartbeatLostMs = live.progressAt ? now - beat.receivedAt : 0
+  // Worker silence is judged ONLY on server timestamps (the list response's
+  // serverTime vs the last heartbeat), so a background tab or a sleeping laptop
+  // that simply hasn't fetched in a while can't raise a false alarm
+  const silentMs = freshness.serverTime && live.progressAt
+    ? Math.max(0, Date.parse(freshness.serverTime) - Date.parse(live.progressAt))
+    : 0
+  const offline = freshness.offlineSince !== null
+  const lost = !offline && silentMs > HEARTBEAT_LOST_MS
+  // Speed and time left are leftovers when either side is out of touch
+  const stale = lost || offline
+  const fmtClock = (t: number) => new Date(t).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })
+  const lastUpdate = live.progressAt ? fmtClock(Date.parse(live.progressAt)) : null
 
   return (
     <div className="w-56 space-y-1">
@@ -135,16 +149,22 @@ export function BackupLiveProgress({ backup, live }: { backup: Backup; live: Liv
       </div>
       <p className="text-[11px] text-gray-400">
         {elapsedMs !== null && <>Running {fmtDuration(elapsedMs)}</>}
-        {rate !== null && <> · {formatBytes(rate)}/s</>}
-        {etaMs !== null && <> · ~{fmtDuration(etaMs)} left</>}
-        {estimatingEta && <> · estimating time…</>}
+        {!stale && rate !== null && <> · {formatBytes(rate)}/s</>}
+        {!stale && etaMs !== null && <> · ~{fmtDuration(etaMs)} left</>}
+        {!stale && estimatingEta && <> · estimating time…</>}
         {dumping && !hasEstimate && <> · first backup, no size estimate yet</>}
         {overEstimate && <> · already bigger than the last backup ({formatBytes(live.expectedBytes!)})</>}
       </p>
-      {heartbeatLostMs > HEARTBEAT_LOST_MS ? (
+      {offline ? (
+        <p className="flex items-start gap-1 text-[11px] text-gray-500">
+          <AlertTriangle className="h-3 w-3 mt-px shrink-0" />
+          Can&apos;t reach the server since {fmtClock(freshness.offlineSince!)}. These numbers may be out of date.
+        </p>
+      ) : lost ? (
         <p className="flex items-start gap-1 text-[11px] text-red-600">
           <AlertTriangle className="h-3 w-3 mt-px shrink-0" />
-          Worker hasn&apos;t reported for {fmtDuration(heartbeatLostMs)}. It may have stopped or restarted.
+          No update since {lastUpdate} ({fmtDuration(silentMs)} ago). The app probably stopped or restarted;
+          this backup will be marked failed.
         </p>
       ) : noDataMs > NO_DATA_WARN_MS ? (
         <p className="flex items-start gap-1 text-[11px] text-amber-600">

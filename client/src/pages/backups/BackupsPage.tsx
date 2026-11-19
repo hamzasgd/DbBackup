@@ -12,7 +12,7 @@ import { Select } from '../../components/ui/Select'
 import { Input } from '../../components/ui/Input'
 import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabel } from '../../lib/utils'
 import { useProgressSSE } from '../../hooks/useProgressSSE'
-import { BackupLiveProgress } from './BackupLiveProgress'
+import { BackupLiveProgress, type Freshness } from './BackupLiveProgress'
 import { liveProgress } from './live-progress'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton } from '../../components/ui/Skeleton'
@@ -95,6 +95,7 @@ function BackupRow({
   onDrill,
   drilling,
   onCancelDrill,
+  freshness,
 }: {
   b: Backup
   onRestore: () => void
@@ -103,6 +104,7 @@ function BackupRow({
   onDrill: () => void
   drilling: boolean
   onCancelDrill: () => void
+  freshness: Freshness
 }) {
   const isActive = b.status === 'RUNNING' || b.status === 'PENDING'
   const sse = useProgressSSE(`/backups/${b.id}/progress`, isActive)
@@ -175,7 +177,7 @@ function BackupRow({
               </span>
             )}
           </div>
-          {isActive && <BackupLiveProgress backup={b} live={live} />}
+          {isActive && <BackupLiveProgress backup={b} live={live} freshness={freshness} />}
           {b.error && <p className="text-xs text-red-500 max-w-[200px] truncate" title={b.error}>{b.error}</p>}
         </div>
       </td>
@@ -256,7 +258,7 @@ export default function BackupsPage() {
   const selectedConnObj = connections.find(c => c.id === triggerConnId)
   const formatOptions = selectedConnObj?.type === 'POSTGRESQL' ? PG_FORMATS : (selectedConnObj?.type === 'MONGODB' || selectedConnObj?.type === 'REDIS') ? NOSQL_FORMATS : MYSQL_FORMATS
 
-  const { data, isLoading, refetch } = useQuery({
+  const { data, isLoading, refetch, isRefetchError, dataUpdatedAt } = useQuery({
     queryKey: ['backups', selectedConnection],
     queryFn: () => backupsApi.getAll({ connectionId: selectedConnection || undefined }),
     refetchInterval: (query) => {
@@ -266,6 +268,10 @@ export default function BackupsPage() {
     },
   })
   const allBackups = data?.data.data.backups ?? []
+  const freshness: Freshness = {
+    serverTime: data?.data.data.serverTime ?? null,
+    offlineSince: isRefetchError ? dataUpdatedAt : null,
+  }
   const total = data?.data.data.total ?? 0
   const backups = statusFilter === 'ALL' ? allBackups : allBackups.filter(b => b.status === statusFilter)
   const statusCounts = {
@@ -450,6 +456,7 @@ export default function BackupsPage() {
                     onDrill={() => drillMutation.mutate(b.id)}
                     drilling={b.lastDrill?.status === 'RUNNING' || drillMutation.isPending}
                     onCancelDrill={() => b.lastDrill && cancelDrillMutation.mutate({ backupId: b.id, drillId: b.lastDrill.id })}
+                    freshness={freshness}
                   />
                 ))}
               </tbody>

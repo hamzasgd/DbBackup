@@ -40,6 +40,8 @@ export interface BackupOptions {
   onProgress?: (progress: number) => void;
   /** Bytes written to the output so far, reported while the dump runs. */
   onBytes?: (bytes: number) => void;
+  /** Where the dump is about to be written (so an interrupted run's partial file can be found later). */
+  onOutputPath?: (filePath: string) => void;
 }
 
 export interface TestConnectionResult {
