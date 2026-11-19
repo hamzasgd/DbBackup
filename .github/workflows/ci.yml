@@ -80,15 +80,27 @@ jobs:
         env:
           DEBIAN_FRONTEND: noninteractive
         run: |
+          # Ubuntu mirrors return 503 now and then: retry each download, and
+          # retry the whole install (with a fresh index) before failing the job
+          echo 'Acquire::Retries "5";' | sudo tee /etc/apt/apt.conf.d/80-retries >/dev/null
+          apt_install() {
+            for attempt in 1 2 3; do
+              sudo apt-get install -y -q "$@" && return 0
+              echo "::warning::apt-get install failed (attempt $attempt), retrying in 30s"
+              sleep 30
+              sudo apt-get update -q || true
+            done
+            return 1
+          }
           # PostgreSQL 17 client (pg_dump refuses servers newer than itself; the runner has 16)
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y -q postgresql-client-17
+          apt_install postgresql-client-17
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
           # MariaDB client: mariadb, mariadb-dump and the mysql / mysqldump names.
           # It conflicts with the runner's preinstalled MySQL, which apt removes.
-          sudo apt-get install -y -q mariadb-client redis-tools
-          curl -fsSLo "$RUNNER_TEMP/mdt.deb" https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-x86_64-100.13.0.deb
-          sudo apt-get install -y -q "$RUNNER_TEMP/mdt.deb"
+          apt_install mariadb-client redis-tools
+          curl -fsSL --retry 5 --retry-all-errors -o "$RUNNER_TEMP/mdt.deb" https://fastdl.mongodb.org/tools/db/mongodb-database-tools-ubuntu2404-x86_64-100.13.0.deb
+          apt_install "$RUNNER_TEMP/mdt.deb"
 
       - name: Create TLS certificates for the test servers
         run: |
@@ -159,4 +171,5 @@ jobs:
         if: failure() || cancelled()
         run: |
           docker ps -a
-          for c in pg mariadb mongo redis-backup redis-queues; do echo "::group::$c"; docker logs --tail 80 "$c" 2>&1; echo "::endgroup::"; done
+          # A container that never started (setup failed earlier) is not a second error
+          for c in pg mariadb mongo redis-backup redis-queues; do echo "::group::$c"; docker logs --tail 80 "$c" 2>&1 || echo "($c not running)"; echo "::endgroup::"; done
