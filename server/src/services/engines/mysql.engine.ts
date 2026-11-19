@@ -6,6 +6,7 @@ import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
+import { watchOutputSize } from './output-watcher';
 import { cliEnv, mysqlRestoreGuardArgs } from './cli-safety';
 
 export class MySQLEngine extends BaseEngine {
@@ -95,6 +96,7 @@ export class MySQLEngine extends BaseEngine {
       onProgress?.(5);
 
       const dumpCmd = this.config.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
+      const stopWatch = watchOutputSize(filePath, options.onBytes);
       await dumpToFile(dumpCmd, [
         ...this.getArgs(dumpCmd, files),
         '--single-transaction',
@@ -105,7 +107,8 @@ export class MySQLEngine extends BaseEngine {
         '--add-drop-table',
         '--', // end of options: the database name can never be read as a flag
         this.config.database,
-      ], this.getEnv(), filePath, useGzip, (msg) => !msg.includes('Warning'));
+      ], this.getEnv(), filePath, useGzip, (msg) => !msg.includes('Warning'))
+        .finally(stopWatch);
 
       onProgress?.(95);
       const stats = statSync(filePath);

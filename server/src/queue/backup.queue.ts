@@ -16,6 +16,7 @@ import { sanitizeConfig } from '../utils/sanitize';
 import { logAudit } from '../services/audit.service';
 import { assertQuotaAllowsFile } from '../services/quota.service';
 import { toEngineConfig } from '../services/engines/connection-config';
+import { startProgressTracker, expectedBackupBytes, ProgressTracker } from '../services/backup-progress.service';
 
 export const BACKUP_QUEUE_NAME = 'backups';
 
@@ -82,23 +83,18 @@ export function createBackupWorker(): Worker<BackupJobData> {
 
       const resolvedFormat = format ?? (config.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL');
 
+      let tracker: ProgressTracker | null = null;
       try {
         const engine = engineFactory(config);
 
-        // Progress callback: update DB + publish SSE every 10% step
-        let lastReported = 0;
-        const onProgress = async (pct: number) => {
-          if (pct - lastReported >= 10) {
-            lastReported = pct;
-            logger.info(`Backup ${backupId} progress ${pct}%`);
-            await prisma.backup.update({ where: { id: backupId }, data: { progress: pct } });
-            await publishProgress(BACKUP_PROGRESS_CHANNEL(backupId), { progress: pct, status: 'RUNNING' });
-          }
-        };
+        // Live progress: bytes on disk vs. the last backup's size, plus a
+        // heartbeat, so a long dump is visibly alive (or visibly stuck)
+        const expected = await expectedBackupBytes(connectionId, resolvedFormat, backupId).catch(() => null);
+        tracker = startProgressTracker(backupId, expected);
 
         const result = await engine.backup(outputDir, {
           format: resolvedFormat,
-          onProgress: (pct) => { void onProgress(pct); },
+          onBytes: (bytes) => tracker?.setBytes(bytes),
         });
 
         // ── Step 0: Storage quota (authoritative check — covers HTTP,
@@ -124,6 +120,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         }
 
         // ── Step 1: Verify integrity (plaintext) ──
+        tracker.setStage('VERIFYING');
         const verification = await verifyBackup(result.filePath, config.type, resolvedFormat);
 
         // ── Step 1.5: Encrypt at rest (AES-256-GCM) when enabled ──
@@ -134,6 +131,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         if (userId) {
           const settings = await prisma.storageSettings.findUnique({ where: { userId } });
           if (settings?.backupEncryptionEnabled && settings.backupPassphrase) {
+            tracker.setStage('ENCRYPTING');
             const { decrypt } = await import('../services/crypto.service');
             const passphrase = decrypt(settings.backupPassphrase);
             const encPath = `${result.filePath}.enc`;
@@ -175,6 +173,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         let storageType: 'LOCAL' | 'S3' | 'GOOGLE_DRIVE' = 'LOCAL';
         let storageKey: string | undefined;
         if (userId) {
+          tracker.setStage('UPLOADING');
           const uploaded = await uploadBackupFile(userId, result.filePath, result.fileName).catch((err) => {
             logger.warn('Remote upload failed (keeping local):', err);
             return null;
@@ -186,6 +185,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
         }
 
         // ── Step 3: Mark completed ──
+        await tracker.stop();
         await prisma.backup.update({
           where: { id: backupId },
           data: {
@@ -193,6 +193,8 @@ export function createBackupWorker(): Worker<BackupJobData> {
             fileName: result.fileName,
             filePath: result.filePath,
             fileSize: result.fileSize,
+            bytesWritten: result.fileSize,
+            stage: null,
             progress: 100,
             completedAt: new Date(),
             checksum: verification.checksum || null,
@@ -257,10 +259,11 @@ export function createBackupWorker(): Worker<BackupJobData> {
           }
         }
       } catch (error) {
+        await tracker?.stop();
         const errMsg = error instanceof Error ? error.message : 'Unknown error';
         await prisma.backup.update({
           where: { id: backupId },
-          data: { status: 'FAILED', error: errMsg, completedAt: new Date() },
+          data: { status: 'FAILED', error: errMsg, completedAt: new Date(), stage: null },
         });
         await publishProgress(BACKUP_PROGRESS_CHANNEL(backupId), { progress: 0, status: 'FAILED', error: errMsg });
         logger.error(`❌ Backup failed for ${backupId}:`, error);

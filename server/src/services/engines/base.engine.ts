@@ -38,6 +38,8 @@ export type BackupFormat = 'COMPRESSED_SQL' | 'PLAIN_SQL' | 'CUSTOM' | 'DIRECTOR
 export interface BackupOptions {
   format?: BackupFormat;
   onProgress?: (progress: number) => void;
+  /** Bytes written to the output so far, reported while the dump runs. */
+  onBytes?: (bytes: number) => void;
 }
 
 export interface TestConnectionResult {

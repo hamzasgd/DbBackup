@@ -242,6 +242,15 @@ model Backup {
   notes        String?
   error        String?
   progress     Int             @default(0)
+  /// Live progress while RUNNING: bytes on disk so far, the size expected
+  /// from the connection's last completed backup (null = no history), the
+  /// current step (DUMPING | VERIFYING | ENCRYPTING | UPLOADING), when the
+  /// worker last reported (heartbeat) and when the output last grew.
+  bytesWritten   BigInt    @default(0)
+  expectedBytes  BigInt?
+  stage          String?
+  progressAt     DateTime?
+  bytesChangedAt DateTime?
   checksum     String?
   verified     Boolean         @default(false)
   verifiedAt   DateTime?

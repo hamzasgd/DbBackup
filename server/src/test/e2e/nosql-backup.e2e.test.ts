@@ -61,9 +61,11 @@ describe.skipIf(!MONGO)('MongoDB backup and restore (auth enabled)', () => {
 
   it('backup restores into another database with every document and index', async () => {
     const engine = engineFactory(cfg());
-    const backup = await engine.backup(out);
+    const sizes: number[] = [];
+    const backup = await engine.backup(out, { onBytes: (n) => sizes.push(n) });
     expect(backup.fileName).toMatch(/\.archive\.gz$/);
     expect(backup.fileSize).toBeGreaterThan(0);
+    expect(sizes.at(-1)).toBe(backup.fileSize);
 
     const target = uniq('e2e_mongo_rst');
     try {

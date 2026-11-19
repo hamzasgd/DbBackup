@@ -3,6 +3,8 @@ import api from '../lib/api'
 export type BackupFormat = 'COMPRESSED_SQL' | 'PLAIN_SQL' | 'CUSTOM' | 'DIRECTORY' | 'TAR'
 export type ExportFormat = 'json' | 'csv' | 'sql'
 
+export type BackupStage = 'DUMPING' | 'VERIFYING' | 'ENCRYPTING' | 'UPLOADING'
+
 export interface Backup {
   id: string
   connectionId: string | null
@@ -19,6 +21,12 @@ export interface Backup {
   notes?: string
   error?: string
   progress: number
+  /** Live progress while RUNNING (see BackupLiveProgress) */
+  stage?: BackupStage | null
+  bytesWritten?: number
+  expectedBytes?: number | null
+  progressAt?: string | null
+  bytesChangedAt?: string | null
   startedAt?: string
   completedAt?: string
   createdAt: string

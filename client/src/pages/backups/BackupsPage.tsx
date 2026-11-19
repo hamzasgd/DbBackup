@@ -12,6 +12,8 @@ import { Select } from '../../components/ui/Select'
 import { Input } from '../../components/ui/Input'
 import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabel } from '../../lib/utils'
 import { useProgressSSE } from '../../hooks/useProgressSSE'
+import { BackupLiveProgress } from './BackupLiveProgress'
+import { liveProgress } from './live-progress'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
 import { TableSkeleton } from '../../components/ui/Skeleton'
 import { useAuthStore } from '../../store/auth.store'
@@ -104,7 +106,7 @@ function BackupRow({
 }) {
   const isActive = b.status === 'RUNNING' || b.status === 'PENDING'
   const sse = useProgressSSE(`/backups/${b.id}/progress`, isActive)
-  const progress = sse?.progress ?? b.progress
+  const live = liveProgress(b, sse)
   const [verifying, setVerifying] = useState(false)
   const [downloading, setDownloading] = useState(false)
 
@@ -143,7 +145,13 @@ function BackupRow({
           <span className="text-gray-600">{b.connection?.name ?? <em className="text-gray-400">no connection</em>}</span>
         </div>
       </td>
-      <td className="px-6 py-3 text-gray-600">{b.fileSize ? formatBytes(b.fileSize) : '\u2014'}</td>
+      <td className="px-6 py-3 text-gray-600">
+        {b.fileSize
+          ? formatBytes(b.fileSize)
+          : isActive && live.bytesWritten > 0
+            ? <span className="whitespace-nowrap" title="Written so far">{formatBytes(live.bytesWritten)}…</span>
+            : '\u2014'}
+      </td>
       <td className="px-6 py-3">
         <div className="space-y-1">
           <div className="flex items-center gap-2">
@@ -167,20 +175,7 @@ function BackupRow({
               </span>
             )}
           </div>
-          {isActive && (
-            <div className="w-32">
-              <div className="flex justify-between text-xs text-gray-400 mb-0.5">
-                <span>Progress</span>
-                <span>{progress}%</span>
-              </div>
-              <div className="h-1.5 bg-gray-200 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-500 rounded-full transition-all duration-500"
-                  style={{ width: `${progress}%` }}
-                />
-              </div>
-            </div>
-          )}
+          {isActive && <BackupLiveProgress backup={b} live={live} />}
           {b.error && <p className="text-xs text-red-500 max-w-[200px] truncate" title={b.error}>{b.error}</p>}
         </div>
       </td>
