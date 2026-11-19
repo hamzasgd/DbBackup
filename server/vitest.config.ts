@@ -7,6 +7,7 @@ const integrationTests = [
   'src/controllers/sync-conflict.controller.test.ts',
   'src/controllers/admin.controller.test.ts',
   'src/services/quota.service.test.ts',
+  'src/services/backup-progress.service.test.ts',
   'src/controllers/connection-limit.test.ts',
   'src/controllers/retention-limit.test.ts',
   'src/services/sync/sync-engine.service.test.ts',
