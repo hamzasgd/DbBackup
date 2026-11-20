@@ -1,4 +1,12 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
+
+/** A sync writes to its target, and for two-way syncs to its source as well. */
+function assertSyncWritable(config: unknown): void {
+  const c = config as { direction?: string; sourceConnection?: { name: string; writeProtected: boolean }; targetConnection?: { name: string; writeProtected: boolean } };
+  assertWritable(c.targetConnection, 'sync data into it');
+  if (c.direction === 'BIDIRECTIONAL') assertWritable(c.sourceConnection, 'sync data into it');
+}
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
@@ -34,6 +42,7 @@ export async function triggerSync(
     if (config.userId !== req.user!.userId) {
       throw new AppError('Access denied', 403);
     }
+    assertSyncWritable(config);
 
     // Per-run table filtering is not supported yet — reject explicitly instead
     // of silently ignoring the parameter. Configure tables via the sync
@@ -83,6 +92,7 @@ export async function triggerFullSync(
     if (config.userId !== req.user!.userId) {
       throw new AppError('Access denied', 403);
     }
+    assertSyncWritable(config);
 
     // Per-run table filtering is not supported yet — reject explicitly instead
     // of silently ignoring the parameter. Configure tables via the sync

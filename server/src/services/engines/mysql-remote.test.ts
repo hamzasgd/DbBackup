@@ -39,3 +39,13 @@ describe('resolveToolStrategy', () => {
     expect(supportsSshServerStrategy('MONGODB')).toBe(false);
   });
 });
+
+describe('matchTargetTable', () => {
+  it('prefers the exact name, else the one name that differs only in case', async () => {
+    const { matchTargetTable } = await import('../data-sync/mysql-data-sync');
+    expect(matchTargetTable('AppSettings', ['appsettings', 'members'])).toBe('appsettings');
+    expect(matchTargetTable('AppSettings', ['AppSettings', 'appsettings'])).toBe('AppSettings');
+    expect(matchTargetTable('Foo', ['foo', 'FOO'])).toBeNull(); // ambiguous
+    expect(matchTargetTable('missing', ['members'])).toBeNull();
+  });
+});

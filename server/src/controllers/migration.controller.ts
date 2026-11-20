@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
@@ -67,6 +68,7 @@ export async function createMigration(req: AuthRequest, res: Response, next: Nex
 
     if (!srcConn) throw new AppError('Source connection not found', 404);
     if (!dstConn) throw new AppError('Target connection not found', 404);
+    assertWritable(dstConn, 'migrate data into it');
 
     const migration = await prisma.migration.create({
       data: {

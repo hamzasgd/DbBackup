@@ -105,7 +105,7 @@ export interface RestoreCheck {
     sourceConnectionId: string | null
     sourceName: string | null
   }
-  target: { connectionId: string; name: string; type: string; database: string }
+  target: { connectionId: string; name: string; type: string; database: string; writeProtected?: boolean }
   overwritesSource: boolean
   overwritesSourceReason: 'same-connection' | 'same-address' | null
   incompatible: string | null

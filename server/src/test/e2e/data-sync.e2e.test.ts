@@ -33,6 +33,8 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
         CREATE TABLE \`${src}\`.nopk (x INT, y TEXT);
         CREATE TABLE \`${src}\`.shape (id INT PRIMARY KEY, v TEXT);
         CREATE TABLE \`${src}\`.only_src (id INT PRIMARY KEY, v TEXT);
+        CREATE TABLE \`${src}\`.AppSettings (id INT PRIMARY KEY, shopId INT NOT NULL, general JSON);
+        INSERT INTO \`${src}\`.AppSettings VALUES (1, 10, '{"a": 1}'), (2, 20, '{"b": 2}'), (3, 30, NULL);
         INSERT INTO \`${src}\`.only_src VALUES (1, 'a'), (2, 'b');
         INSERT INTO \`${src}\`.nopk VALUES (1, 'x');
         INSERT INTO \`${src}\`.shape VALUES (1, 'x');
@@ -57,6 +59,8 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
       await c.query(`
         CREATE TABLE \`${dst}\`.shape (id INT PRIMARY KEY, v TEXT, extra INT);
         CREATE TABLE \`${dst}\`.only_dst (id INT PRIMARY KEY);
+        CREATE TABLE \`${dst}\`.appsettings (id INT PRIMARY KEY, shopId INT NOT NULL, general JSON);
+        INSERT INTO \`${dst}\`.appsettings VALUES (1, 10, '{"a": 1}'), (2, 99, '{"b": 2}');
         INSERT INTO \`${dst}\`.only_dst VALUES (1);
         DELETE FROM \`${dst}\`.members WHERE id IN (10, 5000, 11999);
         UPDATE \`${dst}\`.members SET note = '' WHERE id = 7;
@@ -92,6 +96,9 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(r.shape.reason).toMatch(/columns differ.*extra/);
     expect(r.only_src).toMatchObject({ status: 'ONLY_IN_SOURCE' });
     expect(r.only_dst).toMatchObject({ status: 'ONLY_IN_TARGET' });
+    // Same table, name stored in lowercase on the target: matched, not "missing"
+    expect(r.AppSettings).toMatchObject({ status: 'DIFFERENT', targetTable: 'appsettings', inserted: 1, updated: 1, deleted: 0 });
+    expect(r.appsettings).toBeUndefined();
     expect(await checksums(dst, ['members', 'pairs'])).toEqual(before);
   });
 
@@ -104,6 +111,12 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(r.members).toMatchObject({ status: 'SYNCED', inserted: 3, updated: 6, deleted: 1 });
     expect(r.pairs).toMatchObject({ status: 'SYNCED' });
     expect(r.only_src).toMatchObject({ status: 'CREATED', inserted: 2 });
+    expect(r.AppSettings).toMatchObject({ status: 'SYNCED', targetTable: 'appsettings' });
+    const [srcApp, dstApp] = await Promise.all([
+      myAdmin(async (c) => (await c.query<mysql2.RowDataPacket[]>(`CHECKSUM TABLE \`${src}\`.AppSettings EXTENDED`))[0][0].Checksum),
+      myAdmin(async (c) => (await c.query<mysql2.RowDataPacket[]>(`CHECKSUM TABLE \`${dst}\`.appsettings EXTENDED`))[0][0].Checksum),
+    ]);
+    expect(String(dstApp)).toBe(String(srcApp));
     expect(r.shape.status).toBe('SKIPPED');
     expect(progress.at(-1)).toBeGreaterThanOrEqual(12_000);
 

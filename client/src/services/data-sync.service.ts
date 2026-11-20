@@ -6,6 +6,8 @@ export type TableStatus = 'SAME' | 'DIFFERENT' | 'SYNCED' | 'CREATED' | 'ONLY_IN
 
 export interface TableReport {
   table: string
+  /** The table's name on the target when it differs in case (e.g. "appsettings") */
+  targetTable?: string
   status: TableStatus
   rows: number
   /** Rows inserted / replaced / deleted on the target (or that would be, for a compare) */

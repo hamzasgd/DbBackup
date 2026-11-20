@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { randomUUID as uuidv4 } from 'crypto';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
@@ -104,6 +105,7 @@ export async function createConnection(req: AuthRequest, res: Response, next: Ne
         sshEnabled: !!sshEnabled,
         heartbeatEnabled: !!rest.heartbeatEnabled,
         compressTraffic: !!rest.compressTraffic,
+        writeProtected: !!rest.writeProtected,
         expectedBackupHours: rest.expectedBackupHours ?? null,
         sshPrivateKeyPath: rest.sshPrivateKeyPath || null,
         sshPort: rest.sshPort ? parseInt(rest.sshPort, 10) : 22,
@@ -161,6 +163,7 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
         sshEnabled: !!sshEnabled,
         heartbeatEnabled: rest.heartbeatEnabled !== undefined ? !!rest.heartbeatEnabled : existing.heartbeatEnabled,
         compressTraffic: rest.compressTraffic !== undefined ? !!rest.compressTraffic : existing.compressTraffic,
+        writeProtected: rest.writeProtected !== undefined ? !!rest.writeProtected : existing.writeProtected,
         expectedBackupHours: rest.expectedBackupHours !== undefined ? (rest.expectedBackupHours || null) : existing.expectedBackupHours,
         sshPrivateKeyPath: rest.sshPrivateKeyPath !== undefined ? (rest.sshPrivateKeyPath || null) : existing.sshPrivateKeyPath,
         sshPort: newSshPort,
@@ -168,7 +171,10 @@ export async function updateConnection(req: AuthRequest, res: Response, next: Ne
       },
     });
 
-    await logAudit(req.user!.userId, 'UPDATE', 'connection', { connectionId: updated.id, name }, req.ip);
+    await logAudit(req.user!.userId, 'UPDATE', 'connection', {
+      connectionId: updated.id, name,
+      ...(updated.writeProtected !== existing.writeProtected ? { writeProtected: updated.writeProtected } : {}),
+    }, req.ip);
 
     res.json({ success: true, data: decryptConnection(updated as Record<string, unknown>) });
   } catch (err) { next(err); }
@@ -180,6 +186,7 @@ export async function deleteConnection(req: AuthRequest, res: Response, next: Ne
       where: { id: req.params.id, userId: req.user!.userId },
     });
     if (!existing) throw new AppError('Connection not found', 404);
+    assertWritable(existing, 'delete this connection (its schedules would stop)');
 
     // ?deleteBackups=true → also delete backup files (local + S3) and rows.
     // Otherwise backup rows survive (connectionId set to NULL by the schema)

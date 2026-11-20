@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Trash2, Edit2, Zap, Database, Shield, Network, Info } from 'lucide-react'
+import { Plus, Trash2, Edit2, Zap, Database, Shield, Network, Info, Lock } from 'lucide-react'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -15,13 +15,17 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Ca
 import { Badge } from '../../components/ui/Badge'
 import { Modal } from '../../components/ui/Modal'
 import { CardSkeleton } from '../../components/ui/Skeleton'
-import { dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
+import { dbTypeLabel, dbTypeBadgeColor, getApiErrorMessage } from '../../lib/utils'
+
+/** A number box: empty (or not a number) → undefined. z.coerce would turn "" into 0. */
+const numberOrEmpty = (v: unknown) =>
+  v === '' || v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v)) ? undefined : Number(v)
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required'),
   type: z.enum(['MYSQL', 'MARIADB', 'POSTGRESQL', 'MONGODB', 'REDIS']),
   host: z.string().min(1, 'Host is required'),
-  port: z.coerce.number().int().min(1).max(65535),
+  port: z.preprocess(numberOrEmpty, z.number({ error: 'Port is required' }).int('Whole number').min(1, 'Port must be 1–65535').max(65535, 'Port must be 1–65535')),
   username: z.string().min(1, 'Username is required'),
   password: z.string().optional(),
   database: z.string().min(1, 'Database name is required'),
@@ -32,14 +36,20 @@ const schema = z.object({
   sshEnabled: z.boolean().default(false),
   heartbeatEnabled: z.boolean().default(false),
   compressTraffic: z.boolean().default(false),
-  expectedBackupHours: z.coerce.number().int().positive().optional().nullable(),
+  writeProtected: z.boolean().default(false),
+  // Empty box = watchdog off (null). Not z.coerce: it turns "" into 0, which failed "> 0"
+  // and silently blocked every save once the field was on screen
+  expectedBackupHours: z.preprocess(
+    (v) => (v === '' || v === null || v === undefined || (typeof v === 'number' && Number.isNaN(v)) ? null : Number(v)),
+    z.number({ error: 'Enter a number of hours' }).int('Whole hours only').min(1, 'At least 1 hour').max(8760, 'At most 8760 hours (a year)').nullable(),
+  ).optional(),
   sshHost: z.string().optional().nullable(),
-  sshPort: z.coerce.number().optional().nullable(),
+  sshPort: z.preprocess((v) => numberOrEmpty(v) ?? 22, z.number().int('Whole number').min(1, 'SSH port must be 1–65535').max(65535, 'SSH port must be 1–65535')),
   sshUsername: z.string().optional().nullable(),
   sshPrivateKey: z.string().optional().nullable(),
   sshPrivateKeyPath: z.string().optional().nullable(),
   sshPassphrase: z.string().optional().nullable(),
-  connectionTimeout: z.coerce.number().optional().default(30000),
+  connectionTimeout: z.preprocess((v) => numberOrEmpty(v) ?? 30000, z.number().int('Whole milliseconds').min(1000, 'Timeout: at least 1000 ms').max(600000, 'Timeout: at most 600000 ms')),
 })
 type FormData = z.output<typeof schema>
 type FormInput = z.input<typeof schema>
@@ -63,7 +73,7 @@ export default function ConnectionsPage() {
 
   const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false, compressTraffic: false },
+    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false, compressTraffic: false, writeProtected: false },
   })
 
   const sshEnabled = useWatch({ control, name: 'sshEnabled' })
@@ -84,13 +94,13 @@ export default function ConnectionsPage() {
   const createMutation = useMutation({
     mutationFn: (d: CreateConnectionPayload) => connectionsApi.create(d),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); toast.success('Connection created'); closeModal() },
-    onError: (e: unknown) => toast.error((e as { response?: { data?: { message?: string } } })?.response?.data?.message ?? 'Failed to create'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to create connection')),
   })
 
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<CreateConnectionPayload> }) => connectionsApi.update(id, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); toast.success('Connection updated'); closeModal() },
-    onError: () => toast.error('Failed to update connection'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to update connection')),
   })
 
   const deleteMutation = useMutation({
@@ -100,7 +110,7 @@ export default function ConnectionsPage() {
       qc.invalidateQueries({ queryKey: ['backups'] })
       toast.success('Connection deleted')
     },
-    onError: () => toast.error('Failed to delete connection'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to delete connection')),
   })
 
   const testMutation = useMutation({
@@ -127,9 +137,22 @@ export default function ConnectionsPage() {
   }
 
   const onSubmit = (data: FormData) => {
-    const payload: CreateConnectionPayload = { ...data }
+    // Fields the server returned as null (no key path, no CA, ...) mean "not set":
+    // send them as absent, which the API reads as "keep as is" (it rejects null).
+    // The watchdog is the exception: null is how an emptied box turns it off.
+    const payload = Object.fromEntries(
+      Object.entries(data).filter(([k, v]) => v !== null || k === 'expectedBackupHours'),
+    ) as unknown as CreateConnectionPayload
     if (editId) updateMutation.mutate({ id: editId, data: payload })
     else createMutation.mutate(payload)
+  }
+
+  // A field that fails validation may be in the collapsed SSH section: never fail silently
+  const SSH_FIELDS = ['sshHost', 'sshPort', 'sshUsername', 'sshPrivateKey', 'sshPrivateKeyPath', 'sshPassphrase']
+  const onInvalid = (errs: Record<string, { message?: string } | undefined>) => {
+    if (Object.keys(errs).some((k) => SSH_FIELDS.includes(k))) setShowSSH(true)
+    const first = Object.entries(errs).find(([, e]) => e?.message)
+    toast.error(first ? `Check the form: ${first[1]!.message}` : 'Check the highlighted fields')
   }
 
   return (
@@ -190,6 +213,11 @@ export default function ConnectionsPage() {
               <div className="flex gap-1 flex-wrap">
                 {c.sslEnabled && <Badge className="bg-green-100 text-green-700"><Shield className="h-3 w-3 mr-1" />SSL</Badge>}
                 {c.sshEnabled && <Badge className="bg-purple-100 text-purple-700">SSH Tunnel</Badge>}
+                {c.writeProtected && (
+                  <Badge className="bg-amber-100 text-amber-800">
+                    <Lock className="h-3 w-3 mr-1" />Write-protected
+                  </Badge>
+                )}
               </div>
               <div className="flex gap-2 pt-2 border-t border-gray-50">
                 <Button
@@ -215,6 +243,8 @@ export default function ConnectionsPage() {
                   variant="ghost"
                   className="text-red-500 hover:text-red-700 hover:bg-red-50 ml-auto"
                   onClick={() => setDeleteTarget(c.id)}
+                  disabled={!!c.writeProtected}
+                  title={c.writeProtected ? 'Write-protected: turn protection off in the connection settings to delete it' : 'Delete connection'}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
@@ -225,7 +255,7 @@ export default function ConnectionsPage() {
       </div>
 
       <Modal open={modalOpen} onClose={closeModal} title={editId ? 'Edit Connection' : 'New Connection'} className="max-w-xl">
-        <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+        <form onSubmit={handleSubmit(onSubmit, onInvalid)} className="space-y-4">
           <Input label="Connection name" placeholder="My MySQL DB" error={errors.name?.message} {...register('name')} required />
 
           <Select
@@ -257,7 +287,7 @@ export default function ConnectionsPage() {
 
           <Input label="Database name" placeholder="my_database" error={errors.database?.message} {...register('database')} required />
 
-          <Input label="Connection Timeout (ms)" type="number" placeholder="30000" error={errors.connectionTimeout?.message} {...register('connectionTimeout')} />
+          <Input label="Connection Timeout (ms)" type="number" placeholder="30000 (default)" error={errors.connectionTimeout?.message} {...register('connectionTimeout')} />
 
           <div className="flex items-center gap-2">
             <input type="checkbox" id="sslEnabled" {...register('sslEnabled')} className="rounded" />
@@ -308,6 +338,18 @@ export default function ConnectionsPage() {
             </div>
           )}
 
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2">
+            <input type="checkbox" id="writeProtectedChk" {...register('writeProtected')} className="rounded mt-0.5" />
+            <label htmlFor="writeProtectedChk" className="text-sm text-gray-700">
+              <span className="inline-flex items-center gap-1 font-medium"><Lock className="h-3.5 w-3.5" />Write-protected</span>{' '}
+              <span className="text-gray-500">
+                (for production databases: DbBackup will never restore, sync or migrate data into this database, and the
+                connection can't be deleted. Backups, Compare and using it as a source still work. Restore tests use a
+                separate temporary database.)
+              </span>
+            </label>
+          </div>
+
           {(connType === 'MYSQL' || connType === 'MARIADB') && (
             <div className="flex items-start gap-2">
               <input type="checkbox" id="compressTrafficChk" {...register('compressTraffic')} className="rounded mt-0.5" />
@@ -320,6 +362,28 @@ export default function ConnectionsPage() {
               </label>
             </div>
           )}
+
+          <div className="border-t pt-3 space-y-3">
+            <p className="text-sm font-medium text-gray-700">Monitoring</p>
+            <div className="flex items-center gap-2">
+              <input type="checkbox" id="heartbeatEnabledChk" {...register('heartbeatEnabled')} className="rounded" />
+              <label htmlFor="heartbeatEnabledChk" className="text-sm text-gray-700">
+                Heartbeat monitoring <span className="text-gray-400">(health check every 5 min, alerts on down/recovery)</span>
+              </label>
+            </div>
+            <div>
+              <Input
+                label="Missed-backup watchdog (hours, optional)"
+                type="number"
+                placeholder="Empty = off. e.g. 26: alert if no successful backup within 26 hours"
+                error={errors.expectedBackupHours?.message}
+                {...register('expectedBackupHours')}
+              />
+              <p className="text-xs text-gray-400 mt-1">
+                Alerts when a scheduled backup is missed (⏰ dead-man switch — works even if the app was down). Leave empty to turn it off.
+              </p>
+            </div>
+          </div>
 
           <div className="border-t pt-3">
             <button
@@ -337,30 +401,13 @@ export default function ConnectionsPage() {
                   <input type="checkbox" id="sshEnabledTunnel" {...register('sshEnabled')} className="rounded" />
                   <label htmlFor="sshEnabledTunnel" className="text-sm text-gray-700">Enable SSH tunnel</label>
                 </div>
-                <div className="flex items-center gap-2 pt-1">
-                  <input type="checkbox" id="heartbeatEnabledChk" {...register('heartbeatEnabled')} className="rounded" />
-                  <label htmlFor="heartbeatEnabledChk" className="text-sm text-gray-700">
-                    Heartbeat monitoring <span className="text-gray-400">(health check every 5 min, alerts on down/recovery)</span>
-                  </label>
-                </div>
-                <div className="pt-1">
-                  <Input
-                    label="Missed-backup watchdog (hours, optional)"
-                    type="number"
-                    placeholder="e.g. 26 — alert if no successful backup within this window"
-                    {...register('expectedBackupHours', { setValueAs: (v: string) => v === '' ? undefined : Number(v) })}
-                  />
-                  <p className="text-xs text-gray-400 mt-1">
-                    Alerts when a scheduled backup is missed (⏰ dead-man switch — works even if the app was down).
-                  </p>
-                </div>
                 {sshEnabled && (
                   <>
                     <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
                       <div className="sm:col-span-2">
                         <Input label="SSH Host" placeholder="bastion.example.com" {...register('sshHost')} />
                       </div>
-                      <Input label="SSH Port" type="number" defaultValue={22} {...register('sshPort')} />
+                      <Input label="SSH Port" type="number" placeholder="22" error={errors.sshPort?.message} {...register("sshPort")} />
                     </div>
                     <Input label="SSH Username" placeholder="ubuntu" {...register('sshUsername')} />
                     <div>

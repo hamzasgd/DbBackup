@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SchemaValidatorService } from '../services/sync/schema-validator.service';
@@ -83,6 +84,8 @@ export async function createMissingTables(
     if (config.userId !== req.user!.userId) {
       throw new AppError('Access denied', 403);
     }
+
+    assertWritable(config.targetConnection, 'create tables in it');
 
     // Validate tables parameter if provided
     if (tables !== undefined && !Array.isArray(tables)) {

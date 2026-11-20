@@ -15,8 +15,6 @@ import BackupsPage from './pages/backups/BackupsPage'
 import SchedulesPage from './pages/schedules/SchedulesPage'
 import SettingsPage from './pages/settings/SettingsPage'
 import MigrationsPage from './pages/migrations/MigrationsPage'
-import SyncConfigurationsPage from './pages/sync/SyncConfigurationsPage'
-import SyncDetailPage from './pages/sync/SyncDetailPage'
 import DataSyncPage from './pages/data-sync/DataSyncPage'
 import AuditLogsPage from './pages/audit/AuditLogsPage'
 import AdminPage from './pages/admin/AdminPage'
@@ -41,8 +39,9 @@ function App() {
               <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/migrations" element={<MigrationsPage />} />
               <Route path="/data-sync" element={<DataSyncPage />} />
-              <Route path="/sync" element={<SyncConfigurationsPage />} />
-              <Route path="/sync/:id" element={<SyncDetailPage />} />
+              {/* Old trigger-based Sync, hidden for now */}
+              <Route path="/sync" element={<Navigate to="/data-sync" replace />} />
+              <Route path="/sync/:id" element={<Navigate to="/data-sync" replace />} />
               <Route path="/settings" element={<SettingsPage />} />
               <Route path="/audit" element={<AuditLogsPage />} />
               <Route element={<AdminRoute />}>
