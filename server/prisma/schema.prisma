@@ -136,6 +136,8 @@ model User {
   mcpApiKeys           McpApiKey[]
   mcpApprovals         McpApproval[]
   restoreDrills        RestoreDrill[]
+  restores             Restore[]
+  dataSyncRuns         DataSyncRun[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -221,6 +223,9 @@ model Connection {
   syncConfigsAsSource SyncConfiguration[] @relation("SyncSource")
   syncConfigsAsTarget SyncConfiguration[] @relation("SyncTarget")
   credentialAccessLogs CredentialAccessLog[]
+  restoresAsTarget    Restore[]           @relation("RestoreTarget")
+  dataSyncsAsSource   DataSyncRun[]       @relation("DataSyncSource")
+  dataSyncsAsTarget   DataSyncRun[]       @relation("DataSyncTarget")
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -258,7 +263,10 @@ model Backup {
   verifiedAt   DateTime?
   storageType  StorageProvider @default(LOCAL)
   storageKey   String?
+  /// Where the dump ran: TUNNEL | SSH_SERVER
+  strategy     String          @default("TUNNEL")
   drills       RestoreDrill[]  @relation("DrillBackup")
+  restores     Restore[]       @relation("RestoreBackup")
   startedAt    DateTime?
   completedAt  DateTime?
   createdAt    DateTime        @default(now())
@@ -320,6 +328,81 @@ model RestoreDrill {
   @@map("restore_drills")
 }
 
+/// One restore of a backup into a database, with live progress while it runs.
+/// Names are copied in at start so the history still reads right after the
+/// backup or the connection is deleted.
+model Restore {
+  id                 String      @id @default(uuid())
+  userId             String
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backupId           String?
+  backup             Backup?     @relation("RestoreBackup", fields: [backupId], references: [id], onDelete: SetNull)
+  targetConnectionId String?
+  targetConnection   Connection? @relation("RestoreTarget", fields: [targetConnectionId], references: [id], onDelete: SetNull)
+  backupLabel        String
+  targetName         String
+  targetDatabase     String
+  /// The target is the database the backup was taken from (confirmed by the user)
+  overwritesSource   Boolean     @default(false)
+  /// Where the restore tool runs: TUNNEL | SSH_SERVER
+  strategy           String      @default("TUNNEL")
+  status             String      @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED
+  /// PREPARING | DOWNLOADING | DECRYPTING | RESTORING
+  stage              String?
+  /// Bytes of the backup file processed in the current stage, of totalBytes
+  bytesRead          BigInt      @default(0)
+  totalBytes         BigInt?
+  stageStartedAt     DateTime?
+  /// Worker heartbeat (every few seconds while running)
+  progressAt         DateTime?
+  error              String?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@index([targetConnectionId, status])
+  @@map("restores")
+}
+
+/// One "compare and copy differences" run between two databases with the same
+/// schema (source → target). COMPARE only reports; APPLY also writes the
+/// differing rows to the target. Names are copied in at start for history.
+model DataSyncRun {
+  id                 String      @id @default(uuid())
+  userId             String
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceConnectionId String?
+  sourceConnection   Connection? @relation("DataSyncSource", fields: [sourceConnectionId], references: [id], onDelete: SetNull)
+  targetConnectionId String?
+  targetConnection   Connection? @relation("DataSyncTarget", fields: [targetConnectionId], references: [id], onDelete: SetNull)
+  sourceName         String
+  targetName         String
+  sourceDatabase     String
+  targetDatabase     String
+  mode               String      // COMPARE | APPLY
+  /// Only these tables (empty = all)
+  tables             String[]    @default([])
+  status             String      @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED | CANCELLED
+  cancelRequested    Boolean     @default(false)
+  currentTable       String?
+  tablesDone         Int         @default(0)
+  tablesTotal        Int?
+  rowsChecked        BigInt      @default(0)
+  rowsEstimate       BigInt?
+  /// Per-table results (TableReport[])
+  results            Json?
+  error              String?
+  progressAt         DateTime?
+  startedAt          DateTime?
+  completedAt        DateTime?
+  createdAt          DateTime    @default(now())
+
+  @@index([userId, createdAt])
+  @@index([targetConnectionId, status])
+  @@map("data_sync_runs")
+}
+
 model McpApproval {
   id          String    @id @default(uuid())
   userId      String
@@ -347,6 +430,8 @@ model Schedule {
   isActive       Boolean           @default(true)
   retentionDays  Int               @default(30)
   retentionCount Int?
+  /// Where the dump runs: TUNNEL (here, through the SSH tunnel) | SSH_SERVER (on the SSH server)
+  strategy       String            @default("TUNNEL")
   lastRunAt      DateTime?
   nextRunAt      DateTime?
   createdAt      DateTime          @default(now())

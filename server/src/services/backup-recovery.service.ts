@@ -62,3 +62,68 @@ export async function reconcileInterruptedBackups(queue: Queue): Promise<number>
   }
   return failed;
 }
+
+export const RESTORE_INTERRUPTED_MESSAGE =
+  'Interrupted: the app stopped or restarted while this restore was running. The target database may be only partly restored. Start the restore again.';
+
+/**
+ * Same as reconcileInterruptedBackups, for restores. A restore is never re-run
+ * on its own after a restart (half-restored data, destructive), so its row
+ * would otherwise stay RUNNING forever.
+ */
+export async function reconcileInterruptedRestores(queue: Queue): Promise<number> {
+  const candidates = await prisma.restore.findMany({
+    where: {
+      status: { in: ['PENDING', 'RUNNING'] },
+      createdAt: { lt: new Date(Date.now() - GRACE_MS) },
+    },
+    select: { id: true, userId: true, targetName: true, targetDatabase: true, backupId: true },
+  });
+  if (candidates.length === 0) return 0;
+
+  const jobs = await queue.getJobs(LIVE_STATES);
+  const live = new Set(jobs.map((j) => (j?.data as { jobId?: string } | undefined)?.jobId).filter(Boolean));
+
+  let failed = 0;
+  for (const r of candidates) {
+    if (live.has(r.id)) continue;
+    const { count } = await prisma.restore.updateMany({
+      where: { id: r.id, status: { in: ['PENDING', 'RUNNING'] } },
+      data: { status: 'FAILED', error: RESTORE_INTERRUPTED_MESSAGE, completedAt: new Date(), stage: null },
+    });
+    if (count === 0) continue;
+    failed++;
+    logger.warn(`Restore ${r.id} into ${r.targetName}/${r.targetDatabase} had no queue job: marked FAILED (interrupted)`);
+    void notify(r.userId, {
+      event: 'RESTORE_FAILED',
+      title: '❌ Restore Interrupted',
+      message: `Restore into "${r.targetName}" (${r.targetDatabase}) stopped because the app stopped or restarted. The database may be only partly restored. Start the restore again.`,
+      details: { 'Restore ID': r.id, 'Backup ID': r.backupId ?? '-' },
+    }).catch(() => undefined);
+  }
+  return failed;
+}
+
+export const DATA_SYNC_INTERRUPTED_MESSAGE =
+  'Interrupted: the app stopped or restarted during this run. Tables reported above were finished; run it again to do the rest.';
+
+/** Data sync runs left PENDING/RUNNING with no queue job (never re-run on their own). */
+export async function reconcileInterruptedDataSyncs(queue: Queue): Promise<number> {
+  const candidates = await prisma.dataSyncRun.findMany({
+    where: { status: { in: ['PENDING', 'RUNNING'] }, createdAt: { lt: new Date(Date.now() - GRACE_MS) } },
+    select: { id: true },
+  });
+  if (candidates.length === 0) return 0;
+  const jobs = await queue.getJobs(LIVE_STATES);
+  const live = new Set(jobs.map((j) => (j?.data as { runId?: string } | undefined)?.runId).filter(Boolean));
+  let failed = 0;
+  for (const r of candidates) {
+    if (live.has(r.id)) continue;
+    const { count } = await prisma.dataSyncRun.updateMany({
+      where: { id: r.id, status: { in: ['PENDING', 'RUNNING'] } },
+      data: { status: 'FAILED', error: DATA_SYNC_INTERRUPTED_MESSAGE, completedAt: new Date(), currentTable: null },
+    });
+    failed += count;
+  }
+  return failed;
+}

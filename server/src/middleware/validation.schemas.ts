@@ -56,9 +56,13 @@ export const connectionSchema = z.object({
 });
 
 // Backup schemas
+const toolStrategySchema = z.enum(['TUNNEL', 'SSH_SERVER']);
+
 export const backupTriggerSchema = z.object({
   connectionId: z.string().uuid('Invalid connection ID'),
   format: z.enum(['COMPRESSED_SQL', 'PLAIN_SQL', 'CUSTOM', 'DIRECTORY', 'TAR']).optional(),
+  /** Where mysqldump runs: TUNNEL (default) or SSH_SERVER */
+  strategy: toolStrategySchema.optional(),
 });
 
 // Restore schemas
@@ -66,6 +70,19 @@ export const restoreSchema = z.object({
   backupId: z.string().uuid('Invalid backup ID'),
   targetConnectionId: z.string().uuid('Invalid connection ID').optional(),
   targetDatabase: z.string().regex(databaseNameRegex, 'Invalid database name').optional(),
+  /** Required (the target database's name) when the target is the backup's own source database */
+  confirmOverwrite: z.string().max(255).optional(),
+  /** Where the restore tool runs: TUNNEL (default) or SSH_SERVER */
+  strategy: toolStrategySchema.optional(),
+});
+
+// Compare & sync (copy only the differing rows, source → target)
+export const dataSyncSchema = z.object({
+  sourceConnectionId: z.string().uuid('Invalid source connection ID'),
+  targetConnectionId: z.string().uuid('Invalid target connection ID'),
+  mode: z.enum(['COMPARE', 'APPLY']),
+  tables: z.array(z.string().min(1).max(64)).max(1000).optional(),
+  confirmTarget: z.string().max(255).optional(),
 });
 
 // Schedule schemas
@@ -77,6 +94,7 @@ export const scheduleSchema = z.object({
   isActive: z.boolean().optional().default(true),
   retentionDays: z.number().int().positive().optional(),
   retentionCount: z.number().int().positive().optional(),
+  strategy: toolStrategySchema.optional(),
 });
 
 // Migration schemas

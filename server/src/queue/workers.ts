@@ -1,10 +1,11 @@
 import { createBackupWorker, getBackupQueue } from './backup.queue';
-import { reconcileInterruptedBackups } from '../services/backup-recovery.service';
+import { reconcileInterruptedBackups, reconcileInterruptedRestores, reconcileInterruptedDataSyncs } from '../services/backup-recovery.service';
+import { createDataSyncWorker, getDataSyncQueue } from './data-sync.queue';
 import { createScheduleWorker } from './schedule.queue';
 import { createMigrationWorker } from './migration.queue';
 import { createSyncWorker } from './sync';
 import { createRetentionWorker, scheduleRetentionSweep } from './retention.queue';
-import { createRestoreWorker } from './restore.queue';
+import { createRestoreWorker, getRestoreQueue } from './restore.queue';
 import { createHeartbeatWorker, scheduleHeartbeatChecks } from './heartbeat.queue';
 import { logger } from '../config/logger';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
@@ -17,6 +18,7 @@ let syncWorker: ReturnType<typeof createSyncWorker>;
 let retentionWorker: ReturnType<typeof createRetentionWorker>;
 let restoreWorker: ReturnType<typeof createRestoreWorker>;
 let heartbeatWorker: ReturnType<typeof createHeartbeatWorker>;
+let dataSyncWorker: ReturnType<typeof createDataSyncWorker>;
 let backupReconcileTimer: NodeJS.Timeout | undefined;
 
 /** How often backups orphaned by a stop/restart are looked for. */
@@ -26,6 +28,12 @@ function runBackupReconcile(): void {
   reconcileInterruptedBackups(getBackupQueue())
     .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted backup(s) as FAILED`); })
     .catch((err) => logger.warn('Backup reconcile failed:', err));
+  reconcileInterruptedRestores(getRestoreQueue())
+    .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted restore(s) as FAILED`); })
+    .catch((err) => logger.warn('Restore reconcile failed:', err));
+  reconcileInterruptedDataSyncs(getDataSyncQueue())
+    .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted data sync run(s) as FAILED`); })
+    .catch((err) => logger.warn('Data sync reconcile failed:', err));
 }
 
 export async function startWorkers(): Promise<void> {
@@ -36,6 +44,7 @@ export async function startWorkers(): Promise<void> {
   retentionWorker = createRetentionWorker();
   restoreWorker = createRestoreWorker();
   heartbeatWorker = createHeartbeatWorker();
+  dataSyncWorker = createDataSyncWorker();
 
   logger.info('✅ Queue workers started');
   logger.info(`Backup worker id=${backupWorker.id}`);
@@ -84,5 +93,6 @@ export async function stopWorkers(): Promise<void> {
   await retentionWorker.close();
   await restoreWorker.close();
   await heartbeatWorker.close();
+  await dataSyncWorker.close();
   logger.info('Workers stopped gracefully');
 }

@@ -21,6 +21,7 @@ afterwards; still, point these at **disposable test servers only**.
 | `E2E_MONGODB_URL` | `mongodb://user:pw@127.0.0.1:27017` | MongoDB (server with `--auth`; the user is created through the localhost exception if missing) |
 | `E2E_REDIS_URL` | `redis://:pw@127.0.0.1:6380` | Redis RDB backup (the database is **flushed**) |
 | `E2E_TLS_CA_FILE`, `E2E_TLS_WRONG_CA_FILE` | `certs/ca.crt`, `certs/other-ca.crt` | TLS suite. The Postgres and MariaDB servers must use a certificate from `E2E_TLS_CA_FILE` with **only `DNS:localhost`** in its SAN (no IP), so connecting by `127.0.0.1`/`127.0.0.2` must fail name verification. |
+| `E2E_SSH_EXEC_URL`, `E2E_SSH_EXEC_KEY_FILE` | `ssh://dbtest@127.0.0.1:2222`, `/path/to/key` | "Run on the SSH server" strategy: an OpenSSH server with `mysql`, `mysqldump` and `gzip`, which can reach `E2E_MARIADB_URL` at the same host and port |
 | `E2E_APP_DATABASE_URL` | `postgresql://postgres:pw@127.0.0.1:5432/dbbackup_e2e_app` | SSH, app suites (migrations are applied automatically) |
 | `REDIS_HOST`, `REDIS_PORT` | `127.0.0.1`, `6379` | app suite (queues) |
 | `ENCRYPTION_KEY` | 64 hex characters | app and SSH suites |

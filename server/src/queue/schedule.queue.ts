@@ -79,6 +79,7 @@ export function createScheduleWorker(): Worker {
           dbName: decrypt(conn.database),
           status: 'PENDING',
           format: defaultFormat,
+          strategy: schedule.strategy,
           snapshotName: `scheduled-${schedule.id}-${schedule.name}`,
           startedAt: new Date(),
         },

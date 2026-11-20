@@ -71,7 +71,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
       // Fetch backup row for userId (denormalized) for notifications/retention
       const backupRecord = await prisma.backup.findUnique({
         where: { id: backupId },
-        select: { userId: true, connectionId: true, filePath: true, status: true },
+        select: { userId: true, connectionId: true, filePath: true, status: true, strategy: true },
       });
       // Re-delivered after it already finished (the app died between marking it
       // COMPLETED and BullMQ recording that): never redo it or touch its file
@@ -107,6 +107,7 @@ export function createBackupWorker(): Worker<BackupJobData> {
 
         const result = await engine.backup(outputDir, {
           format: resolvedFormat,
+          strategy: backupRecord?.strategy === 'SSH_SERVER' ? 'SSH_SERVER' : 'TUNNEL',
           onBytes: (bytes) => tracker?.setBytes(bytes),
           onOutputPath: (p) => {
             void prisma.backup.update({ where: { id: backupId }, data: { filePath: p } })

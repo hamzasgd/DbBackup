@@ -2,11 +2,11 @@ import { spawn } from 'child_process';
 import { createWriteStream, statSync, mkdtempSync, writeFileSync, rmSync } from 'fs';
 import os from 'os';
 import path from 'path';
-import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo } from './base.engine';
+import { BaseEngine, BackupResult, BackupOptions, RestoreOptions, TestConnectionResult, ConnectionConfig, DbInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { TlsFiles, mongoCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
-import { watchOutputSize } from './output-watcher';
+import { watchOutputSize, watchProcessReads } from './output-watcher';
 import { cliEnv } from './cli-safety';
 
 /**
@@ -24,16 +24,28 @@ import { cliEnv } from './cli-safety';
  */
 
 abstract class CliEngine extends BaseEngine {
-  /** Run a CLI command; resolves stdout, rejects with stderr on non-zero exit. */
-  protected runCli(cmd: string, args: string[], env: NodeJS.ProcessEnv = cliEnv(), timeoutMs = 300_000): Promise<{ stdout: string; stderr: string }> {
+  /**
+   * Run a CLI command; resolves stdout, rejects with stderr on non-zero exit.
+   * `timeoutMs` 0 means no limit (a dump or restore of a big database can take hours).
+   */
+  protected runCli(
+    cmd: string,
+    args: string[],
+    env: NodeJS.ProcessEnv = cliEnv(),
+    timeoutMs = 300_000,
+    onSpawn?: (pid: number | undefined) => void,
+  ): Promise<{ stdout: string; stderr: string }> {
     return new Promise((resolve, reject) => {
       const proc = spawn(cmd, args, { env });
+      onSpawn?.(proc.pid);
       let stdout = '';
       let stderr = '';
-      const timer = setTimeout(() => {
-        proc.kill('SIGKILL');
-        reject(new Error(`${cmd} timed out after ${timeoutMs / 1000}s`));
-      }, timeoutMs);
+      const timer = timeoutMs > 0
+        ? setTimeout(() => {
+            proc.kill('SIGKILL');
+            reject(new Error(`${cmd} timed out after ${timeoutMs / 1000}s`));
+          }, timeoutMs)
+        : undefined;
       proc.stdout.on('data', (d) => { stdout += d.toString(); });
       proc.stderr.on('data', (d) => { stderr += d.toString(); });
       proc.on('error', (err) => { clearTimeout(timer); reject(err); });
@@ -71,18 +83,24 @@ export class MongoEngine extends CliEngine {
    * Run a mongo tool with the password supplied via a private --config file
    * (mode 0600 inside a fresh temp dir, removed afterwards) instead of argv.
    */
-  private async runMongo(cmd: 'mongodump' | 'mongorestore', port: number, extraArgs: string[], timeoutMs?: number) {
+  private async runMongo(
+    cmd: 'mongodump' | 'mongorestore',
+    port: number,
+    extraArgs: string[],
+    timeoutMs?: number,
+    onSpawn?: (pid: number | undefined) => void,
+  ) {
     const files = new TlsFiles();
     try {
       const args = [...this.commonArgs(port), ...mongoCliTlsArgs(this.config, files), ...extraArgs];
-      if (!this.config.password) return await this.runCli(cmd, args, undefined, timeoutMs);
+      if (!this.config.password) return await this.runCli(cmd, args, undefined, timeoutMs, onSpawn);
 
       const dir = mkdtempSync(path.join(os.tmpdir(), 'dbbk-mongo-'));
       const configFile = path.join(dir, 'auth.yaml');
       try {
         // A JSON string literal is a valid YAML double-quoted scalar, so this escapes safely
         writeFileSync(configFile, `password: ${JSON.stringify(this.config.password)}\n`, { mode: 0o600 });
-        return await this.runCli(cmd, [`--config=${configFile}`, ...args], undefined, timeoutMs);
+        return await this.runCli(cmd, [`--config=${configFile}`, ...args], undefined, timeoutMs, onSpawn);
       } finally {
         rmSync(dir, { recursive: true, force: true });
       }
@@ -121,7 +139,7 @@ export class MongoEngine extends CliEngine {
         '--db', this.config.database,
         `--archive=${filePath}`,
         '--gzip',
-      ]).finally(stopWatch);
+      ], 0).finally(stopWatch); // no time limit: a big database dumps for hours
       options.onProgress?.(95);
       const stats = statSync(filePath);
       options.onProgress?.(100);
@@ -131,8 +149,9 @@ export class MongoEngine extends CliEngine {
     }
   }
 
-  async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
+  async restore(backupFilePath: string, targetDatabase?: string, options: RestoreOptions = {}): Promise<void> {
     const { tunnel, port } = await this.openTunnel();
+    let stopReads: () => void = () => undefined;
     try {
       const args = [
         `--archive=${backupFilePath}`,
@@ -142,8 +161,12 @@ export class MongoEngine extends CliEngine {
       if (targetDatabase && targetDatabase !== this.config.database) {
         args.push('--nsFrom', `${this.config.database}.*`, '--nsTo', `${targetDatabase}.*`);
       }
-      await this.runMongo('mongorestore', port, args);
+      // No time limit (a big archive restores for hours); follow mongorestore's read offset
+      await this.runMongo('mongorestore', port, args, 0, (pid) => {
+        stopReads = watchProcessReads(pid, backupFilePath, options.onBytes);
+      });
     } finally {
+      stopReads();
       tunnel?.close();
     }
   }
