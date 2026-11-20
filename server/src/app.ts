@@ -149,8 +149,21 @@ app.use('/api/mcp/keys', keysRouter);
 // Serve React frontend in production
 if (process.env.NODE_ENV === 'production') {
   const clientPath = path.join(__dirname, '../../client/dist');
-  app.use(express.static(clientPath, { dotfiles: 'deny' }));
+  app.use(express.static(clientPath, {
+    dotfiles: 'deny',
+    index: false, // index.html goes through the fallback below, with its no-cache header
+    setHeaders(res, filePath) {
+      // Build files carry a content hash in their name: safe to cache for good
+      if (filePath.includes(`${path.sep}assets${path.sep}`)) res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    },
+  }));
+  // A build file that doesn't exist (an older version's, after a deploy) is a 404.
+  // Answering with index.html made the browser load HTML as a stylesheet or
+  // script, and let a CDN cache that wrong answer under the asset's name.
+  app.use('/assets', (_req, res) => { res.status(404).type('text/plain').send('Not found'); });
   app.get(/^(?!\/api\/).*/, (_req, res) => {
+    // Always revalidate the page itself, so it never points at files that are gone
+    res.setHeader('Cache-Control', 'no-cache');
     res.sendFile(path.join(clientPath, 'index.html'));
   });
 }
