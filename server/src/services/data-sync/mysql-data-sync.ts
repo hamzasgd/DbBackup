@@ -441,17 +441,35 @@ interface TableJob {
   meta: TableMeta;
   hash: string;
   apply: boolean;
+  /** Whether each recent chunk differed (newest last) */
+  recent: boolean[];
+}
+
+const RECENT_CHUNKS = 20;
+/**
+ * When most recent chunks of a table differ (rows changed all over it), a
+ * chunk checksum almost never says "same" and only adds a second pass over the
+ * rows on both servers: compare row hashes straight away instead.
+ */
+function skipChecksum(job: TableJob): boolean {
+  if (job.recent.length < RECENT_CHUNKS / 2) return false;
+  return job.recent.filter(Boolean).length >= job.recent.length * 0.75;
 }
 
 /** Compare one chunk on both sides and, when applying, copy its differences. Safe to run again. */
 async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Promise<ChunkResult> {
   const { table, dstTable, meta, hash } = job;
   const where = rangeWhere(meta.pk, lo, hi);
-  const [a, b] = await Promise.all([chunkChecksum(pair.src.c, table, hash, where), chunkChecksum(pair.dst.c, dstTable, hash, where)]);
-  const out: ChunkResult = { rows: a.n, inserted: 0, updated: 0, deleted: 0, different: a.sum !== b.sum };
-  if (!out.different) return out;
+  const out: ChunkResult = { rows: 0, inserted: 0, updated: 0, deleted: 0, different: true };
+  if (!skipChecksum(job)) {
+    const [a, b] = await Promise.all([chunkChecksum(pair.src.c, table, hash, where), chunkChecksum(pair.dst.c, dstTable, hash, where)]);
+    out.rows = a.n;
+    out.different = a.sum !== b.sum;
+    if (!out.different) return out;
+  }
 
   const [sm, dm] = await Promise.all([rowHashes(pair.src.c, table, meta.pk, hash, where), rowHashes(pair.dst.c, dstTable, meta.pk, hash, where)]);
+  out.rows = sm.size;
   const toCopy: unknown[][] = [];
   const toDelete: unknown[][] = [];
   for (const [k, s] of sm) {
@@ -460,6 +478,7 @@ async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Prom
     else if (d.h !== s.h) { out.updated++; toCopy.push(s.key); toDelete.push(s.key); }
   }
   for (const [k, d] of dm) if (!sm.has(k)) { out.deleted++; toDelete.push(d.key); }
+  out.different = toCopy.length > 0 || toDelete.length > 0;
   if (!job.apply || (toCopy.length === 0 && toDelete.length === 0)) return out;
   try {
     await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy);
@@ -559,7 +578,7 @@ export async function mysqlDataSync(
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';
 
-        const job: TableJob = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply };
+        const job: TableJob = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [] };
         const bounds = chunkBounds(ctlSrc.query, table, srcMeta.pk, size);
         const next = prefetch(bounds, parallel * 2);
         const deferred: { toDelete: unknown[][]; toCopy: unknown[][] }[] = [];
@@ -577,6 +596,8 @@ export async function mysqlDataSync(
               report.updated += r.updated;
               report.deleted += r.deleted;
               if (r.different) report.chunksDifferent++;
+              job.recent.push(r.different);
+              if (job.recent.length > RECENT_CHUNKS) job.recent.shift();
               if (r.deferred) deferred.push(r.deferred);
               rowsChecked += r.rows;
               current.rows += r.rows;

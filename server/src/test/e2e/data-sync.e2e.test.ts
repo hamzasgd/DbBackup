@@ -49,6 +49,13 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
         await c.query(`INSERT INTO \`${src}\`.members (email, note, raw, amount, big, created, seen, doc, flag, ratio) VALUES ?`, [members.slice(i, i + 2000)]);
       }
       await c.query(`INSERT INTO \`${src}\`.pairs VALUES ?`, [Array.from({ length: 900 }, (_, i) => [i % 30, `k${Math.floor(i / 30)}`, `v${i}`])]);
+      // Changes spread over the whole table: every chunk of 100 rows differs
+      await c.query(`CREATE TABLE \`${src}\`.busy (id INT PRIMARY KEY, v VARCHAR(20) NOT NULL)`);
+      await c.query(`INSERT INTO \`${src}\`.busy VALUES ?`, [Array.from({ length: 3000 }, (_, i) => [i + 1, `v${i + 1}`])]);
+      await c.query(`CREATE TABLE \`${dst}\`.busy LIKE \`${src}\`.busy`);
+      await c.query(`INSERT INTO \`${dst}\`.busy SELECT * FROM \`${src}\`.busy`);
+      await c.query(`UPDATE \`${dst}\`.busy SET v = 'old' WHERE id % 40 = 0`);
+      await c.query(`DELETE FROM \`${dst}\`.busy WHERE id % 97 = 0`);
 
       // Target: a copy, then drift
       for (const t of ['members', 'pairs', 'nopk']) {
@@ -114,6 +121,15 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(many.members.chunks).toBe(one.members.chunks);
   });
 
+  it('finds every difference when changes are spread over every chunk', async () => {
+    // 75 rows changed (every 40th) and 30 missing (every 97th), in all 30 chunks
+    for (const parallel of [1, 8]) {
+      const r = byTable(await mysqlDataSync(cfg(src), cfg(dst), { apply: false, chunkSize: 100, parallel, tables: ['busy'] }));
+      expect(r.busy).toMatchObject({ status: 'DIFFERENT', rows: 3000, inserted: 30, updated: 75, deleted: 0 });
+      expect(r.busy.chunksDifferent).toBe(30);
+    }
+  });
+
   it('apply copies only the differences and leaves the tables identical', async () => {
     const progress: number[] = [];
     const r = byTable(await mysqlDataSync(cfg(src), cfg(dst), {
@@ -132,7 +148,8 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(r.shape.status).toBe('SKIPPED');
     expect(progress.at(-1)).toBeGreaterThanOrEqual(12_000);
 
-    const tables = ['members', 'pairs', 'only_src'];
+    expect(r.busy).toMatchObject({ status: 'SYNCED', inserted: 30, updated: 75, deleted: 0 });
+    const tables = ['members', 'pairs', 'only_src', 'busy'];
     expect(await checksums(dst, tables)).toEqual(await checksums(src, tables));
 
     // A second run finds nothing left to do
