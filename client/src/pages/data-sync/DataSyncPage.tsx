@@ -337,7 +337,7 @@ export default function DataSyncPage() {
                 if (!s || !t) { toast.error('The source or target connection no longer exists'); return }
                 // Only the tables that differed
                 const differing = (run.results ?? []).filter((x) => x.status === 'DIFFERENT' || x.status === 'ONLY_IN_SOURCE').map((x) => x.table)
-                setConfirm({ source: s, target: t, tables: differing, parallel: run.parallel || 4 })
+                setConfirm({ source: s, target: t, tables: differing, parallel })
                 setConfirmText('')
               }}
             />
@@ -362,6 +362,12 @@ export default function DataSyncPage() {
                 <li>tables whose columns differ are skipped and reported</li>
               </ul>
             </div>
+            <Select
+              label="Speed"
+              options={PARALLEL_OPTIONS}
+              value={String(confirm.parallel)}
+              onChange={(e) => setConfirm({ ...confirm, parallel: Number(e.target.value) })}
+            />
             <Input
               label={`Type ${confirm.target.database} to confirm`}
               value={confirmText}
