@@ -173,6 +173,7 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
         sshPort: optInt(conn.sshPort) ?? 22,
         connectionTimeout: optInt(conn.connectionTimeout) ?? 30000,
         heartbeatEnabled: Boolean(conn.heartbeatEnabled),
+        compressTraffic: Boolean(conn.compressTraffic),
         expectedBackupHours: optInt(conn.expectedBackupHours),
         ...optional,
       },

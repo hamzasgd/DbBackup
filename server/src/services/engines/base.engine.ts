@@ -23,6 +23,8 @@ export interface ConnectionConfig {
   sshHostKey?: string | null;
   /** Real DB host for TLS certificate checks, set by SSHTunnel when it rewrites `host` to 127.0.0.1. */
   tlsHost?: string;
+  /** MySQL/MariaDB: compress the client↔server protocol for the CLI tools (dump/restore). */
+  compressTraffic?: boolean;
   /** Real DB host/port behind the SSH tunnel, recorded before SSHTunnel rewrites host/port. */
   sshTarget?: { host: string; port: number };
 }

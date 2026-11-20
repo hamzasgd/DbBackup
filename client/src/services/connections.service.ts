@@ -19,6 +19,7 @@ export interface Connection {
   /** Pinned SSH host key fingerprint ("SHA256:…"), set on the first connect */
   sshHostKey?: string | null
   heartbeatEnabled?: boolean
+  compressTraffic?: boolean
   expectedBackupHours?: number | null
   latestHeartbeat?: { status: string; latencyMs: number | null; checkedAt: string } | null
   sshHost?: string
