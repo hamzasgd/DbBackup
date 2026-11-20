@@ -1,5 +1,6 @@
-import { statSync, readdirSync } from 'fs';
+import { statSync, readdirSync, readlinkSync, readFileSync, realpathSync } from 'fs';
 import path from 'path';
+import { Transform, type Readable } from 'stream';
 
 /** Size on disk of a file, or of every file under a directory (pg_dump -Fd). */
 export function outputSize(target: string): number {
@@ -42,4 +43,72 @@ export function watchOutputSize(
     clearInterval(timer);
     tick();
   };
+}
+
+/** Report the running total of bytes a stream has produced (a restore reading its backup file). */
+export function countStreamBytes(stream: Readable, onBytes: ((bytes: number) => void) | undefined): void {
+  if (!onBytes) return;
+  let total = 0;
+  stream.on('data', (chunk: Buffer | string) => {
+    total += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
+    onBytes(total);
+  });
+}
+
+/**
+ * A pass-through stream that reports the running byte total. Unlike
+ * countStreamBytes it adds no 'data' listener, so nothing flows (and nothing
+ * is lost) until the stream is consumed: safe when the consumer attaches later.
+ */
+export function byteCounter(onBytes: ((bytes: number) => void) | undefined): Transform {
+  let total = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      total += chunk.length;
+      onBytes?.(total);
+      cb(null, chunk);
+    },
+  });
+}
+
+/**
+ * How far process `pid` has read into `filePath`: the offset of its open file
+ * descriptor, from /proc/<pid>/fdinfo. For tools that open the backup file
+ * themselves (pg_restore, mongorestore). Linux only; null elsewhere or when
+ * the process doesn't have the file open (yet).
+ */
+export function processReadPosition(pid: number, filePath: string): number | null {
+  try {
+    const want = realpathSync(filePath);
+    for (const fd of readdirSync(`/proc/${pid}/fd`)) {
+      let link: string;
+      try { link = readlinkSync(`/proc/${pid}/fd/${fd}`); } catch { continue; }
+      if (link !== want) continue;
+      const m = /^pos:\s+(\d+)/m.exec(readFileSync(`/proc/${pid}/fdinfo/${fd}`, 'utf8'));
+      if (m) return Number(m[1]);
+    }
+  } catch {
+    // not Linux, or the process has exited
+  }
+  return null;
+}
+
+/** Poll processReadPosition and report it while it changes. Returns a stop function. */
+export function watchProcessReads(
+  pid: number | undefined,
+  filePath: string,
+  onBytes: ((bytes: number) => void) | undefined,
+  intervalMs = 1000,
+): () => void {
+  if (!onBytes || !pid) return () => undefined;
+  let last = -1;
+  const timer = setInterval(() => {
+    const pos = processReadPosition(pid, filePath);
+    if (pos !== null && pos !== last) {
+      last = pos;
+      onBytes(pos);
+    }
+  }, intervalMs);
+  timer.unref?.();
+  return () => clearInterval(timer);
 }

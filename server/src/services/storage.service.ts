@@ -316,9 +316,16 @@ export async function deleteBackupArtifact(userId: string, backup: BackupArtifac
  * (e.g. deleteLocal=true). Caller is responsible for deleting the returned
  * temp file when `downloaded` is true.
  */
+/** Optional hooks so a caller (the restore worker) can show what is happening. */
+export interface LocalFileHooks {
+  /** A step that writes `outputPath` is starting (its size grows as it runs). */
+  onStage?: (stage: 'DOWNLOADING' | 'DECRYPTING', outputPath: string) => void;
+}
+
 export async function ensureLocalBackupFile(
   userId: string,
   backup: BackupArtifact & { fileName?: string | null },
+  hooks: LocalFileHooks = {},
 ): Promise<{ localPath: string; downloaded: boolean }> {
   // The record (not the file content) says whether the backup was encrypted.
   // An object swapped into S3/Drive or onto disk without the DBB1 header must not
@@ -328,7 +335,7 @@ export async function ensureLocalBackupFile(
   if (backup.filePath && backup.filePath !== 'pending' && fs.existsSync(backup.filePath)) {
     if (isEncryptedFile(backup.filePath)) {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-decrypt-'));
-      return maybeDecrypt(userId, backup.filePath, tempDir, expectEncrypted);
+      return maybeDecrypt(userId, backup.filePath, tempDir, expectEncrypted, hooks);
     }
     if (expectEncrypted) {
       throw new Error('Backup is recorded as encrypted but the file on disk is not an encrypted DbBackup file — refusing to use it');
@@ -342,13 +349,14 @@ export async function ensureLocalBackupFile(
   const name = backup.fileName || path.basename(backup.storageKey);
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbackup-restore-'));
   const destPath = path.join(tempDir, name.endsWith('.tar') || name.includes('.') ? name : `${name}.dump`);
+  hooks.onStage?.('DOWNLOADING', destPath);
   if (backup.storageType === 'GOOGLE_DRIVE') {
     await downloadFromGdrive(userId, backup.storageKey, destPath);
   } else {
     await downloadFromS3(userId, backup.storageKey, destPath);
   }
   try {
-    return await maybeDecrypt(userId, destPath, tempDir, expectEncrypted);
+    return await maybeDecrypt(userId, destPath, tempDir, expectEncrypted, hooks);
   } catch (err) {
     fs.rmSync(tempDir, { recursive: true, force: true });
     throw err;
@@ -360,7 +368,13 @@ export async function ensureLocalBackupFile(
  * temp dir so every consumer (restore / verify / download) gets plaintext and
  * the existing cleanup removes it.
  */
-async function maybeDecrypt(userId: string, filePath: string, tempDir: string, expectEncrypted: boolean): Promise<{ localPath: string; downloaded: boolean }> {
+async function maybeDecrypt(
+  userId: string,
+  filePath: string,
+  tempDir: string,
+  expectEncrypted: boolean,
+  hooks: LocalFileHooks = {},
+): Promise<{ localPath: string; downloaded: boolean }> {
   if (!isEncryptedFile(filePath)) {
     if (expectEncrypted) {
       throw new Error('Backup is recorded as encrypted but the stored object is not an encrypted DbBackup file — refusing to use it');
@@ -378,6 +392,7 @@ async function maybeDecrypt(userId: string, filePath: string, tempDir: string, e
   }
 
   const plainPath = path.join(tempDir, path.basename(filePath).replace(/\.enc$/, ''));
+  hooks.onStage?.('DECRYPTING', plainPath);
   let lastErr: unknown = null;
   let decrypted = false;
   for (const candidate of candidates) {

@@ -1,12 +1,14 @@
 import { spawn } from 'child_process';
-import { statSync } from 'fs';
-import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
+import { statSync, createReadStream } from 'fs';
+import { createGunzip } from 'zlib';
+import { BaseEngine, BackupResult, BackupOptions, RestoreOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
-import { watchOutputSize } from './output-watcher';
+import { watchOutputSize, countStreamBytes } from './output-watcher';
+import { remoteMysqlBackup, remoteMysqlRestore } from './mysql-remote';
 import { cliEnv, mysqlRestoreGuardArgs, mysqlCompressArgsFor, mysqlClientHasCompressionAlgorithms, toolVersionText } from './cli-safety';
 import { logger } from '../../config/logger';
 
@@ -107,6 +109,7 @@ export class MySQLEngine extends BaseEngine {
     const { format = 'COMPRESSED_SQL', onProgress } = options;
     // MySQL/MariaDB only support SQL formats (plain or compressed)
     const useGzip = format !== 'PLAIN_SQL';
+    if (options.strategy === 'SSH_SERVER') return this.backupOnSshServer(outputDir, useGzip, options);
 
     let tunnel: SSHTunnel | null = null;
     const files = new TlsFiles();
@@ -152,7 +155,28 @@ export class MySQLEngine extends BaseEngine {
     }
   }
 
-  async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
+  /** mysqldump | gzip on the SSH server; only the compressed dump comes back over SSH. */
+  private async backupOnSshServer(outputDir: string, useGzip: boolean, options: BackupOptions): Promise<BackupResult> {
+    if (!this.config.sshEnabled) throw new Error('"Run on the SSH server" needs a connection that uses SSH');
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const ext = useGzip ? '.sql.gz' : '.sql';
+    const enginePrefix = this.config.type === 'MARIADB' ? 'mariadb' : 'mysql';
+    const { fileName, filePath } = buildBackupPath(outputDir, enginePrefix, this.config.database, timestamp, ext);
+    options.onOutputPath?.(filePath);
+    options.onProgress?.(5);
+    const stopWatch = watchOutputSize(filePath, options.onBytes);
+    await remoteMysqlBackup(this.config, filePath, useGzip).finally(stopWatch);
+    options.onProgress?.(95);
+    const stats = statSync(filePath);
+    options.onProgress?.(100);
+    return { fileName, filePath, fileSize: stats.size };
+  }
+
+  async restore(backupFilePath: string, targetDatabase?: string, options: RestoreOptions = {}): Promise<void> {
+    if (options.strategy === 'SSH_SERVER') {
+      if (!this.config.sshEnabled) throw new Error('"Run on the SSH server" needs a connection that uses SSH');
+      return remoteMysqlRestore(this.config, backupFilePath, targetDatabase || this.config.database, options.onBytes);
+    }
     let tunnel: SSHTunnel | null = null;
     const files = new TlsFiles();
     try {
@@ -199,16 +223,12 @@ export class MySQLEngine extends BaseEngine {
           }
         });
 
-        const source = isGzip
-          ? (() => {
-              const { createReadStream } = require('fs');
-              const { createGunzip } = require('zlib');
-              return createReadStream(backupFilePath).pipe(createGunzip());
-            })()
-          : (() => {
-              const { createReadStream } = require('fs');
-              return createReadStream(backupFilePath);
-            })();
+        // Bytes are counted as read from the file (compressed when .gz); mysql
+        // applies backpressure, so this tracks how far the restore really is
+        const file = createReadStream(backupFilePath);
+        countStreamBytes(file, options.onBytes);
+        file.on('error', settle);
+        const source = isGzip ? file.pipe(createGunzip()) : file;
 
         source.on('error', settle);
         source.pipe(mysql.stdin);

@@ -86,7 +86,12 @@ const MARIADB_SANDBOX_WITHOUT_BINARY_MODE_FIX = new Set([
  * shell or the file system.
  */
 export function mysqlRestoreGuardArgs(bin: string): string[] {
-  const m = /(\d+\.\d+\.\d+)-MariaDB/i.exec(toolVersionText(bin));
+  return mysqlRestoreGuardArgsFor(toolVersionText(bin));
+}
+
+/** The same, from a client's `--version` text (a client on another machine). */
+export function mysqlRestoreGuardArgsFor(versionText: string): string[] {
+  const m = /(\d+\.\d+\.\d+)-MariaDB/i.exec(versionText);
   if (m && MARIADB_SANDBOX_WITHOUT_BINARY_MODE_FIX.has(m[1])) return ['--sandbox'];
   return ['--binary-mode'];
 }

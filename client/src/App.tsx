@@ -17,6 +17,7 @@ import SettingsPage from './pages/settings/SettingsPage'
 import MigrationsPage from './pages/migrations/MigrationsPage'
 import SyncConfigurationsPage from './pages/sync/SyncConfigurationsPage'
 import SyncDetailPage from './pages/sync/SyncDetailPage'
+import DataSyncPage from './pages/data-sync/DataSyncPage'
 import AuditLogsPage from './pages/audit/AuditLogsPage'
 import AdminPage from './pages/admin/AdminPage'
 import AdminUserDetailPage from './pages/admin/AdminUserDetailPage'
@@ -39,6 +40,7 @@ function App() {
               <Route path="/backups" element={<BackupsPage />} />
               <Route path="/schedules" element={<SchedulesPage />} />
               <Route path="/migrations" element={<MigrationsPage />} />
+              <Route path="/data-sync" element={<DataSyncPage />} />
               <Route path="/sync" element={<SyncConfigurationsPage />} />
               <Route path="/sync/:id" element={<SyncDetailPage />} />
               <Route path="/settings" element={<SettingsPage />} />
