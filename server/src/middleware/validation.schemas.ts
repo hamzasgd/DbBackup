@@ -56,9 +56,13 @@ export const connectionSchema = z.object({
 });
 
 // Backup schemas
+const toolStrategySchema = z.enum(['TUNNEL', 'SSH_SERVER']);
+
 export const backupTriggerSchema = z.object({
   connectionId: z.string().uuid('Invalid connection ID'),
   format: z.enum(['COMPRESSED_SQL', 'PLAIN_SQL', 'CUSTOM', 'DIRECTORY', 'TAR']).optional(),
+  /** Where mysqldump runs: TUNNEL (default) or SSH_SERVER */
+  strategy: toolStrategySchema.optional(),
 });
 
 // Restore schemas
@@ -68,6 +72,8 @@ export const restoreSchema = z.object({
   targetDatabase: z.string().regex(databaseNameRegex, 'Invalid database name').optional(),
   /** Required (the target database's name) when the target is the backup's own source database */
   confirmOverwrite: z.string().max(255).optional(),
+  /** Where the restore tool runs: TUNNEL (default) or SSH_SERVER */
+  strategy: toolStrategySchema.optional(),
 });
 
 // Schedule schemas
@@ -79,6 +85,7 @@ export const scheduleSchema = z.object({
   isActive: z.boolean().optional().default(true),
   retentionDays: z.number().int().positive().optional(),
   retentionCount: z.number().int().positive().optional(),
+  strategy: toolStrategySchema.optional(),
 });
 
 // Migration schemas

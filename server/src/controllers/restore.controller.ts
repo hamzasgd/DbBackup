@@ -6,6 +6,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { addRestoreJob } from '../queue/restore.queue';
 import { checkRestoreTarget, type RestoreTargetCheck } from '../services/restore-safety.service';
 import { logger } from '../config/logger';
+import { resolveToolStrategy } from '../services/tool-strategy';
 
 const checkQuerySchema = z.object({
   backupId: z.string().uuid('Invalid backup ID'),
@@ -42,15 +43,19 @@ export async function checkRestore(req: AuthRequest, res: Response, next: NextFu
 export async function restoreBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const { backupId, targetConnectionId, targetDatabase, confirmOverwrite } = req.body as {
+    const { backupId, targetConnectionId, targetDatabase, confirmOverwrite, strategy } = req.body as {
       backupId: string;
       targetConnectionId?: string;
       targetDatabase?: string;
       confirmOverwrite?: string;
+      strategy?: string;
     };
 
     const check = await checkRestoreTarget(userId, backupId, targetConnectionId, targetDatabase);
     if (check.incompatible) throw new AppError(check.incompatible, 400, 'INCOMPATIBLE_TARGET');
+    const resolvedStrategy = resolveToolStrategy(strategy, {
+      name: check.target.name, type: check.target.type, sshEnabled: check.target.sshEnabled,
+    });
     if (check.busy) {
       throw new AppError(
         `A restore into "${check.target.name}" (${check.target.database}) is already ${check.busy.status === 'RUNNING' ? 'running' : 'queued'}. Wait for it to finish.`,
@@ -77,6 +82,7 @@ export async function restoreBackup(req: AuthRequest, res: Response, next: NextF
         targetName: check.target.name,
         targetDatabase: check.target.database,
         overwritesSource: check.overwritesSource,
+        strategy: resolvedStrategy,
       },
     });
 
@@ -130,6 +136,7 @@ export async function listRestores(req: AuthRequest, res: Response, next: NextFu
       targetName: r.targetName,
       targetDatabase: r.targetDatabase,
       overwritesSource: r.overwritesSource,
+      strategy: r.strategy,
       status: r.status,
       stage: r.stage,
       bytesRead: Number(r.bytesRead),

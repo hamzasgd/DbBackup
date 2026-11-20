@@ -17,6 +17,8 @@ import { CardSkeleton } from '../../components/ui/Skeleton'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
+import { ToolStrategyPicker } from '../../components/ToolStrategyPicker'
+import { sshServerStrategyAvailable } from '../../lib/tool-strategy'
 
 const schema = z.object({
   connectionId: z.string().min(1, 'Connection is required'),
@@ -28,6 +30,7 @@ const schema = z.object({
     (v) => (v === '' || v === null || v === undefined ? undefined : Number(v)),
     z.number().int().min(1, 'Must be at least 1').max(1000).optional(),
   ),
+  strategy: z.enum(['TUNNEL', 'SSH_SERVER']).default('TUNNEL'),
 })
 type FormData = z.output<typeof schema>
 type FormInput = z.input<typeof schema>
@@ -54,10 +57,13 @@ export default function SchedulesPage() {
   const me = useAuthStore((st) => st.user)
   const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined },
+    defaultValues: { frequency: 'DAILY', cronExpression: CRON_PRESETS.DAILY, retentionDays: 30, retentionCount: undefined, strategy: 'TUNNEL' },
   })
 
   const frequency = useWatch({ control, name: 'frequency' })
+  const formConnId = useWatch({ control, name: 'connectionId' })
+  const strategy = useWatch({ control, name: 'strategy' }) ?? 'TUNNEL'
+  const formConn = connections.find((c) => c.id === formConnId)
 
   const createMutation = useMutation({
     mutationFn: schedulesApi.create,
@@ -85,8 +91,10 @@ export default function SchedulesPage() {
   const closeModal = () => { setModalOpen(false); setEditId(null); reset() }
 
   const onSubmit = (data: FormData) => {
-    if (editId) updateMutation.mutate({ id: editId, data })
-    else createMutation.mutate(data)
+    // "Run on the SSH server" only where the connection supports it
+    const payload = { ...data, strategy: sshServerStrategyAvailable(formConn) ? data.strategy : 'TUNNEL' as const }
+    if (editId) updateMutation.mutate({ id: editId, data: payload })
+    else createMutation.mutate(payload)
   }
 
   return (
@@ -138,6 +146,7 @@ export default function SchedulesPage() {
                 <p><span className="font-medium text-gray-700">Frequency:</span> {s.frequency}</p>
                 <p><span className="font-medium text-gray-700">Cron:</span> <code className="bg-gray-100 px-1.5 py-0.5 rounded text-xs">{s.cronExpression}</code></p>
                 <p><span className="font-medium text-gray-700">Retention:</span> {s.retentionDays} days{s.retentionCount ? ` · keep last ${s.retentionCount}` : ''}</p>
+                {s.strategy === 'SSH_SERVER' && <p><span className="font-medium text-gray-700">Runs on:</span> the SSH server</p>}
                 {s.lastRunAt && <p><span className="font-medium text-gray-700">Last run:</span> {formatDate(s.lastRunAt)}</p>}
                 {s.nextRunAt && s.isActive && <p><span className="font-medium text-gray-700">Next run:</span> {formatDate(s.nextRunAt)}</p>}
               </div>
@@ -186,7 +195,7 @@ export default function SchedulesPage() {
             label="Connection"
             options={connections.map((c) => ({ label: `${c.name} (${dbTypeLabel(c.type)})`, value: c.id }))}
             error={errors.connectionId?.message}
-            {...register('connectionId')}
+            {...register('connectionId', { onChange: () => setValue('strategy', 'TUNNEL') })}
           />
           <Select
             label="Frequency"
@@ -228,6 +237,12 @@ export default function SchedulesPage() {
               {...register('retentionCount')}
             />
           </div>
+          <ToolStrategyPicker
+            value={strategy}
+            onChange={(v) => setValue('strategy', v)}
+            connection={formConn}
+            action="backup"
+          />
           <div className="flex gap-2 justify-end">
             <Button type="button" variant="outline" onClick={closeModal}>Cancel</Button>
             <Button type="submit" loading={isSubmitting || createMutation.isPending || updateMutation.isPending}>

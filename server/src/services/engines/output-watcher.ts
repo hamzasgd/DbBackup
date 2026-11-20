@@ -1,6 +1,6 @@
 import { statSync, readdirSync, readlinkSync, readFileSync, realpathSync } from 'fs';
 import path from 'path';
-import type { Readable } from 'stream';
+import { Transform, type Readable } from 'stream';
 
 /** Size on disk of a file, or of every file under a directory (pg_dump -Fd). */
 export function outputSize(target: string): number {
@@ -52,6 +52,22 @@ export function countStreamBytes(stream: Readable, onBytes: ((bytes: number) => 
   stream.on('data', (chunk: Buffer | string) => {
     total += typeof chunk === 'string' ? Buffer.byteLength(chunk) : chunk.length;
     onBytes(total);
+  });
+}
+
+/**
+ * A pass-through stream that reports the running byte total. Unlike
+ * countStreamBytes it adds no 'data' listener, so nothing flows (and nothing
+ * is lost) until the stream is consumed: safe when the consumer attaches later.
+ */
+export function byteCounter(onBytes: ((bytes: number) => void) | undefined): Transform {
+  let total = 0;
+  return new Transform({
+    transform(chunk: Buffer, _enc, cb) {
+      total += chunk.length;
+      onBytes?.(total);
+      cb(null, chunk);
+    },
   });
 }
 

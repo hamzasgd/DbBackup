@@ -14,6 +14,8 @@ import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabe
 import { useProgressSSE, type ProgressEvent } from '../../hooks/useProgressSSE'
 import { RestoresPanel, RestoreEvents, RestoreItem } from './RestoresPanel'
 import { isActiveRestore, liveRestore } from './restore-live'
+import { ToolStrategyPicker } from '../../components/ToolStrategyPicker'
+import { sshServerStrategyAvailable, type ToolStrategy } from '../../lib/tool-strategy'
 import { BackupLiveProgress, type Freshness } from './BackupLiveProgress'
 import { liveProgress } from './live-progress'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
@@ -141,7 +143,10 @@ function BackupRow({
       <td className="px-6 py-3">
         <p className="font-medium text-gray-900">{b.snapshotName || b.dbName}</p>
         {b.snapshotName && <p className="text-xs text-gray-400">{b.dbName}</p>}
-        <p className="text-xs text-gray-400 mt-0.5">{formatLabel(b.format)}</p>
+        <p className="text-xs text-gray-400 mt-0.5">
+          {formatLabel(b.format)}
+          {b.strategy === 'SSH_SERVER' && <span title="mysqldump ran on the connection's SSH server"> · on SSH server</span>}
+        </p>
       </td>
       <td className="px-6 py-3">
         <div className="flex items-center gap-2">
@@ -252,6 +257,8 @@ export default function BackupsPage() {
   const [restoreTargetConn, setRestoreTargetConn] = useState('')
   const [restoreJobId, setRestoreJobId] = useState<string | null>(null)
   const [confirmText, setConfirmText] = useState('')
+  const [backupStrategy, setBackupStrategy] = useState<ToolStrategy>('TUNNEL')
+  const [restoreStrategy, setRestoreStrategy] = useState<ToolStrategy>('TUNNEL')
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [purgeOpen, setPurgeOpen] = useState(false)
 
@@ -327,11 +334,13 @@ export default function BackupsPage() {
   const confirmMatches = !!check && confirmText === check.target.database
   const canRestore = !!check && !check.incompatible && !check.busy && (!check.overwritesSource || confirmMatches) && !restoreCheck.isFetching
   const queuedRestore = restoreJobId ? restores.find((r) => r.id === restoreJobId) : undefined
+  const restoreTargetObj = connections.find((c) => c.id === restoreTargetConn)
   const openRestore = (b: Backup) => {
     setSelectedBackup(b.id)
     setRestoreTargetConn('') // no default: the backup's own database is the dangerous choice
     setConfirmText('')
     setRestoreJobId(null)
+    setRestoreStrategy('TUNNEL')
     setRestoreModal(true)
   }
   const closeRestore = () => { setRestoreModal(false); setRestoreJobId(null); setConfirmText('') }
@@ -342,13 +351,14 @@ export default function BackupsPage() {
       snapshotName: snapshotName || undefined,
       notes: notes || undefined,
       format: backupFormat,
+      strategy: sshServerStrategyAvailable(selectedConnObj) ? backupStrategy : undefined,
     }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['backups'] })
       toast.success('Backup queued successfully')
       setTriggerModal(false)
     },
-    onError: () => toast.error('Failed to trigger backup'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to trigger backup')),
   })
 
   const deleteMutation = useMutation({
@@ -396,6 +406,7 @@ export default function BackupsPage() {
       backupId: selectedBackup!,
       targetConnectionId: restoreTargetConn,
       confirmOverwrite: check?.overwritesSource ? confirmText : undefined,
+      strategy: sshServerStrategyAvailable(restoreTargetObj) ? restoreStrategy : undefined,
     }),
     onSuccess: (res) => {
       setRestoreJobId(res.data.data.jobId)
@@ -423,6 +434,7 @@ export default function BackupsPage() {
             const first = connections[0]
             setTriggerConnId(first?.id ?? '')
             setBackupFormat(first?.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL')
+            setBackupStrategy('TUNNEL')
             setTriggerModal(true)
           }}>
             <Plus className="h-4 w-4" />New Backup
@@ -525,6 +537,7 @@ export default function BackupsPage() {
               setTriggerConnId(e.target.value)
               const conn = connections.find(c => c.id === e.target.value)
               setBackupFormat(conn?.type === 'POSTGRESQL' ? 'CUSTOM' : 'COMPRESSED_SQL')
+              setBackupStrategy('TUNNEL')
             }}
           />
           <div>
@@ -537,6 +550,7 @@ export default function BackupsPage() {
               {formatOptions.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
             </select>
           </div>
+          <ToolStrategyPicker value={backupStrategy} onChange={setBackupStrategy} connection={selectedConnObj} action="backup" />
           <Input label="Snapshot name (optional)" placeholder="e.g. before-migration" value={snapshotName} onChange={(e) => setSnapshotName(e.target.value)} />
           <div>
             <label className="text-sm font-medium text-gray-700">Notes (optional)</label>
@@ -597,8 +611,11 @@ export default function BackupsPage() {
                   })),
                 ]}
                 value={restoreTargetConn}
-                onChange={(e) => { setRestoreTargetConn(e.target.value); setConfirmText('') }}
+                onChange={(e) => { setRestoreTargetConn(e.target.value); setConfirmText(''); setRestoreStrategy('TUNNEL') }}
               />
+              {check && !check.incompatible && (
+                <ToolStrategyPicker value={restoreStrategy} onChange={setRestoreStrategy} connection={restoreTargetObj} action="restore" />
+              )}
 
               {restoreTargetConn && restoreCheck.isFetching && !check && (
                 <p className="flex items-center gap-2 text-xs text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Checking the target…</p>

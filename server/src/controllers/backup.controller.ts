@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { resolveToolStrategy } from '../services/tool-strategy';
 import { randomUUID as uuidv4 } from 'crypto';
 import path from 'path';
 import fs from 'fs';
@@ -60,12 +61,13 @@ export async function getBackups(req: AuthRequest, res: Response, next: NextFunc
 
 export async function triggerBackup(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { connectionId, snapshotName, notes, format } = req.body;
+    const { connectionId, snapshotName, notes, format, strategy } = req.body;
 
     const conn = await prisma.connection.findFirst({
       where: { id: connectionId, userId: req.user!.userId },
     });
     if (!conn) throw new AppError('Connection not found', 404);
+    const resolvedStrategy = resolveToolStrategy(strategy, conn);
 
     // Fast-fail when the user is already at/over their storage quota. The
     // authoritative per-file check runs in the worker once the dump size is
@@ -91,6 +93,7 @@ export async function triggerBackup(req: AuthRequest, res: Response, next: NextF
         dbName: decrypt(conn.database),
         status: 'PENDING',
         format: resolvedFormat,
+        strategy: resolvedStrategy,
         snapshotName,
         notes,
         startedAt: new Date(),

@@ -1,4 +1,5 @@
 import api from '../lib/api'
+import type { ToolStrategy } from '../lib/tool-strategy'
 
 export interface Schedule {
   id: string
@@ -10,6 +11,8 @@ export interface Schedule {
   isActive: boolean
   retentionDays: number
   retentionCount?: number | null
+  /** Where scheduled dumps run */
+  strategy?: ToolStrategy
   lastRunAt?: string
   nextRunAt?: string
   history?: Array<{
@@ -26,7 +29,7 @@ export interface Schedule {
 export const schedulesApi = {
   getAll: () =>
     api.get<{ success: boolean; data: Schedule[] }>('/schedules'),
-  create: (data: { connectionId: string; name: string; frequency: string; cronExpression: string; retentionDays?: number; retentionCount?: number }) =>
+  create: (data: { connectionId: string; name: string; frequency: string; cronExpression: string; retentionDays?: number; retentionCount?: number; strategy?: ToolStrategy }) =>
     api.post<{ success: boolean; data: Schedule }>('/schedules', data),
   update: (id: string, data: Partial<Schedule>) =>
     api.put<{ success: boolean; data: Schedule }>(`/schedules/${id}`, data),

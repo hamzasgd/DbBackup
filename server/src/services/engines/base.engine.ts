@@ -37,8 +37,22 @@ export interface BackupResult {
 
 export type BackupFormat = 'COMPRESSED_SQL' | 'PLAIN_SQL' | 'CUSTOM' | 'DIRECTORY' | 'TAR';
 
+/**
+ * Where the dump/restore tools run. TUNNEL (default): here, connecting through
+ * the SSH tunnel. SSH_SERVER: on the connection's SSH server, next to the
+ * database, with only the compressed data crossing the network.
+ */
+export type ToolStrategy = 'TUNNEL' | 'SSH_SERVER';
+
+/** Engines that can run their tools on the SSH server. */
+export function supportsSshServerStrategy(type: string): boolean {
+  return type === 'MYSQL' || type === 'MARIADB';
+}
+
 export interface BackupOptions {
   format?: BackupFormat;
+  /** Default TUNNEL */
+  strategy?: ToolStrategy;
   onProgress?: (progress: number) => void;
   /** Bytes written to the output so far, reported while the dump runs. */
   onBytes?: (bytes: number) => void;
@@ -49,6 +63,8 @@ export interface BackupOptions {
 export interface RestoreOptions {
   /** How much of the backup file has been read so far (bytes), reported while the restore runs. */
   onBytes?: (bytes: number) => void;
+  /** Default TUNNEL */
+  strategy?: ToolStrategy;
 }
 
 export interface TestConnectionResult {
