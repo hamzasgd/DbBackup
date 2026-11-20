@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
@@ -111,6 +112,10 @@ export async function activateSyncConfiguration(
     if (config.userId !== req.user!.userId) {
       throw new AppError('Access denied', 403);
     }
+    // Activating installs change-tracking triggers on the source and writes to the target
+    const withConns = config as unknown as { sourceConnection?: { name: string; writeProtected: boolean }; targetConnection?: { name: string; writeProtected: boolean } };
+    assertWritable(withConns.sourceConnection, 'install sync triggers on it');
+    assertWritable(withConns.targetConnection, 'sync data into it');
 
     await syncEngineService.activateSyncConfiguration(
       id,

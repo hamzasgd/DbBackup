@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { Plus, Trash2, Edit2, Zap, Database, Shield, Network, Info } from 'lucide-react'
+import { Plus, Trash2, Edit2, Zap, Database, Shield, Network, Info, Lock } from 'lucide-react'
 import { useForm, useWatch } from 'react-hook-form'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
@@ -15,7 +15,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Ca
 import { Badge } from '../../components/ui/Badge'
 import { Modal } from '../../components/ui/Modal'
 import { CardSkeleton } from '../../components/ui/Skeleton'
-import { dbTypeLabel, dbTypeBadgeColor } from '../../lib/utils'
+import { dbTypeLabel, dbTypeBadgeColor, getApiErrorMessage } from '../../lib/utils'
 
 const schema = z.object({
   name: z.string().min(1, 'Name is required'),
@@ -32,6 +32,7 @@ const schema = z.object({
   sshEnabled: z.boolean().default(false),
   heartbeatEnabled: z.boolean().default(false),
   compressTraffic: z.boolean().default(false),
+  writeProtected: z.boolean().default(false),
   expectedBackupHours: z.coerce.number().int().positive().optional().nullable(),
   sshHost: z.string().optional().nullable(),
   sshPort: z.coerce.number().optional().nullable(),
@@ -63,7 +64,7 @@ export default function ConnectionsPage() {
 
   const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false, compressTraffic: false },
+    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false, compressTraffic: false, writeProtected: false },
   })
 
   const sshEnabled = useWatch({ control, name: 'sshEnabled' })
@@ -90,7 +91,7 @@ export default function ConnectionsPage() {
   const updateMutation = useMutation({
     mutationFn: ({ id, data }: { id: string; data: Partial<CreateConnectionPayload> }) => connectionsApi.update(id, data),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['connections'] }); toast.success('Connection updated'); closeModal() },
-    onError: () => toast.error('Failed to update connection'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to update connection')),
   })
 
   const deleteMutation = useMutation({
@@ -100,7 +101,7 @@ export default function ConnectionsPage() {
       qc.invalidateQueries({ queryKey: ['backups'] })
       toast.success('Connection deleted')
     },
-    onError: () => toast.error('Failed to delete connection'),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Failed to delete connection')),
   })
 
   const testMutation = useMutation({
@@ -127,7 +128,11 @@ export default function ConnectionsPage() {
   }
 
   const onSubmit = (data: FormData) => {
-    const payload: CreateConnectionPayload = { ...data }
+    // Fields the server returned as null (no key path, no CA, ...) mean "not set":
+    // send them as absent, which the API reads as "keep as is" (it rejects null)
+    const payload = Object.fromEntries(
+      Object.entries(data).filter(([, v]) => v !== null),
+    ) as unknown as CreateConnectionPayload
     if (editId) updateMutation.mutate({ id: editId, data: payload })
     else createMutation.mutate(payload)
   }
@@ -190,6 +195,11 @@ export default function ConnectionsPage() {
               <div className="flex gap-1 flex-wrap">
                 {c.sslEnabled && <Badge className="bg-green-100 text-green-700"><Shield className="h-3 w-3 mr-1" />SSL</Badge>}
                 {c.sshEnabled && <Badge className="bg-purple-100 text-purple-700">SSH Tunnel</Badge>}
+                {c.writeProtected && (
+                  <Badge className="bg-amber-100 text-amber-800">
+                    <Lock className="h-3 w-3 mr-1" />Write-protected
+                  </Badge>
+                )}
               </div>
               <div className="flex gap-2 pt-2 border-t border-gray-50">
                 <Button
@@ -215,6 +225,8 @@ export default function ConnectionsPage() {
                   variant="ghost"
                   className="text-red-500 hover:text-red-700 hover:bg-red-50 ml-auto"
                   onClick={() => setDeleteTarget(c.id)}
+                  disabled={!!c.writeProtected}
+                  title={c.writeProtected ? 'Write-protected: turn protection off in the connection settings to delete it' : 'Delete connection'}
                 >
                   <Trash2 className="h-3.5 w-3.5" />
                 </Button>
@@ -307,6 +319,18 @@ export default function ConnectionsPage() {
               </details>
             </div>
           )}
+
+          <div className="flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2">
+            <input type="checkbox" id="writeProtectedChk" {...register('writeProtected')} className="rounded mt-0.5" />
+            <label htmlFor="writeProtectedChk" className="text-sm text-gray-700">
+              <span className="inline-flex items-center gap-1 font-medium"><Lock className="h-3.5 w-3.5" />Write-protected</span>{' '}
+              <span className="text-gray-500">
+                (for production databases: DbBackup will never restore, sync or migrate data into this database, and the
+                connection can't be deleted. Backups, Compare and using it as a source still work. Restore tests use a
+                separate temporary database.)
+              </span>
+            </label>
+          </div>
 
           {(connType === 'MYSQL' || connType === 'MARIADB') && (
             <div className="flex items-start gap-2">

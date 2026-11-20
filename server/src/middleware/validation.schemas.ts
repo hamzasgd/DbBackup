@@ -52,6 +52,7 @@ export const connectionSchema = z.object({
   connectionTimeout: z.number().int().positive().optional(),
   heartbeatEnabled: z.boolean().optional(),
   compressTraffic: z.boolean().optional(),
+  writeProtected: z.boolean().optional(),
   expectedBackupHours: z.number().int().positive().optional().nullable(),
 });
 

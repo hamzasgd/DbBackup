@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
 import { AuthRequest } from '../middleware/auth.middleware';
@@ -33,6 +34,7 @@ export async function startDataSync(req: AuthRequest, res: Response, next: NextF
     if (source.id === target.id || databaseAddress(s, s.database) === databaseAddress(t, t.database)) {
       throw new AppError('The source and the target are the same database', 400, 'SAME_DATABASE');
     }
+    if (mode === 'APPLY') assertWritable(target, 'sync changes into it (Compare still works)');
     if (mode === 'APPLY' && confirmTarget !== t.database) {
       throw new AppError(
         `Syncing changes data in "${target.name}". To go ahead, confirm with its database name "${t.database}".`,

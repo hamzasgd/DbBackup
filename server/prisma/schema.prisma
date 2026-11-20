@@ -209,6 +209,9 @@ model Connection {
   heartbeatEnabled Boolean @default(false)
   /// MySQL/MariaDB: compress client↔server traffic for dump/restore (slow or remote links)
   compressTraffic Boolean @default(false)
+  /// Like termination protection: DbBackup never writes to this database (no restore,
+  /// sync or migration into it) and the connection can't be deleted while it is on
+  writeProtected  Boolean @default(false)
   heartbeats       ConnectionHeartbeat[]
   // Watchdog: alert when no completed backup within this many hours (null = off)
   expectedBackupHours Int?

@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import { assertWritable } from '../services/write-protection';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { engineFactory } from '../services/engines/engine.factory';
@@ -82,6 +83,8 @@ export function createRestoreWorker(): Worker<RestoreJobData> {
           where: { id: connId, userId },
         });
         if (!conn) throw new Error(`Target connection not found: ${connId}`);
+        // Protection may have been turned on after this restore was queued
+        assertWritable(conn, 'restore into it');
 
         // Resolve a local file: S3/Drive backups are downloaded, encrypted ones decrypted
         const stored = Number(backup.fileSize) || null;

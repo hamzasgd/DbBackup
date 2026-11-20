@@ -1,7 +1,7 @@
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   Database, HardDrive, Clock, LayoutDashboard,
-  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, RefreshCw, History, ShieldCheck, GitCompareArrows,
+  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, History, ShieldCheck, GitCompareArrows,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/auth.store'
@@ -31,7 +31,7 @@ const navGroups: { title: string; items: { to: string; icon: React.ElementType; 
       { to: '/schedules', icon: Clock, label: 'Schedules' },
       { to: '/migrations', icon: ArrowLeftRight, label: 'Migrations' },
       { to: '/data-sync', icon: GitCompareArrows, label: 'Compare & Sync' },
-      { to: '/sync', icon: RefreshCw, label: 'Sync' },
+      // The old trigger-based Sync is hidden (its live change capture never worked); /sync redirects here
     ],
   },
   {

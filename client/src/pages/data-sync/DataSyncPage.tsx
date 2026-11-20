@@ -47,9 +47,11 @@ function totals(results: TableReport[]) {
 }
 
 /** One run: progress while it works, then a per-table report. */
-function RunCard({ run, serverTime, onSyncThese, onStop }: {
+function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
   run: DataSyncRun
   serverTime: string | null
+  /** The target connection is write-protected now: no "Sync these differences" */
+  targetProtected: boolean
   onSyncThese: (run: DataSyncRun) => void
   onStop: (run: DataSyncRun) => void
 }) {
@@ -180,7 +182,7 @@ function RunCard({ run, serverTime, onSyncThese, onStop }: {
           </div>
         )}
 
-        {compare && run.status === 'COMPLETED' && changes > 0 && run.sourceConnectionId && run.targetConnectionId && (
+        {compare && run.status === 'COMPLETED' && changes > 0 && run.sourceConnectionId && run.targetConnectionId && !targetProtected && (
           <div className="flex justify-end">
             <Button size="sm" variant="danger" onClick={() => onSyncThese(run)}>
               <GitCompareArrows className="h-3.5 w-3.5" />Sync these differences…
@@ -234,7 +236,10 @@ export default function DataSyncPage() {
   const ready = !!source && !!target && source.id !== target.id
   const options = (exclude?: string) => [
     { label: 'Choose a database…', value: '' },
-    ...connections.filter((c) => c.id !== exclude).map((c) => ({ label: `${c.name} (${dbTypeLabel(c.type)} · ${c.database})`, value: c.id })),
+    ...connections.filter((c) => c.id !== exclude).map((c) => ({
+      label: `${c.name} (${dbTypeLabel(c.type)} · ${c.database})${c.writeProtected ? ' — write-protected' : ''}`,
+      value: c.id,
+    })),
   ]
 
   return (
@@ -260,6 +265,11 @@ export default function DataSyncPage() {
             value={tablesText}
             onChange={(e) => setTablesText(e.target.value)}
           />
+          {target?.writeProtected && (
+            <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
+              {target.name} is write-protected: you can compare against it, but nothing will be synced into it.
+            </p>
+          )}
           <p className="text-xs text-gray-500">
             Each table is compared in chunks along its primary key; both databases checksum their own rows, so only
             checksums and the rows that differ travel over the network. Every run still reads all rows on both sides.
@@ -269,7 +279,8 @@ export default function DataSyncPage() {
               onClick={() => source && target && start.mutate({ mode: 'COMPARE', source, target, tables })}>
               <Search className="h-4 w-4" />Compare (read-only)
             </Button>
-            <Button variant="danger" disabled={!ready}
+            <Button variant="danger" disabled={!ready || !!target?.writeProtected}
+              title={target?.writeProtected ? 'The target is write-protected: Compare only' : undefined}
               onClick={() => source && target && (setConfirm({ source, target, tables }), setConfirmText(''))}>
               <GitCompareArrows className="h-4 w-4" />Sync differences…
             </Button>
@@ -285,6 +296,7 @@ export default function DataSyncPage() {
               key={r.id}
               run={r}
               serverTime={serverTime}
+              targetProtected={!!connections.find((c) => c.id === r.targetConnectionId)?.writeProtected}
               onStop={(run) => stop.mutate(run)}
               onSyncThese={(run) => {
                 const s = connections.find((c) => c.id === run.sourceConnectionId)
