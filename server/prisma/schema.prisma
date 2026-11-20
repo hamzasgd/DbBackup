@@ -386,6 +386,8 @@ model DataSyncRun {
   mode               String      // COMPARE | APPLY
   /// Only these tables (empty = all)
   tables             String[]    @default([])
+  /// Chunks checked at the same time, each over its own connections
+  parallel           Int         @default(4)
   status             String      @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED | CANCELLED
   cancelRequested    Boolean     @default(false)
   currentTable       String?

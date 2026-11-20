@@ -49,3 +49,22 @@ describe('matchTargetTable', () => {
     expect(matchTargetTable('missing', ['members'])).toBeNull();
   });
 });
+
+describe('rangeWhere', () => {
+  it('keeps a one-column key as a plain comparison', async () => {
+    const { rangeWhere } = await import('../data-sync/mysql-data-sync');
+    expect(rangeWhere(['id'], [10], [20])).toEqual({ sql: '`id` > ? AND `id` <= ?', params: [10, 20] });
+    expect(rangeWhere(['id'], null, null)).toEqual({ sql: '1=1', params: [] });
+  });
+
+  it('spells out a multi-column key so MySQL can use a range scan', async () => {
+    const { rangeWhere } = await import('../data-sync/mysql-data-sync');
+    const w = rangeWhere(['a', 'b', 'c'], [1, 'x', 3], null);
+    expect(w.sql).toBe('`a` >= ? AND (`a` > ? OR (`a` = ? AND (`b` > ? OR (`b` = ? AND `c` > ?))))');
+    expect(w.params).toEqual([1, 1, 1, 'x', 'x', 3]);
+    const h = rangeWhere(['a', 'b'], null, [5, 'y']);
+    expect(h.sql).toBe('`a` <= ? AND (`a` < ? OR (`a` = ? AND `b` <= ?))');
+    expect(h.params).toEqual([5, 5, 5, 'y']);
+    expect(h.sql).not.toMatch(/\(`a`, `b`\)/);
+  });
+});

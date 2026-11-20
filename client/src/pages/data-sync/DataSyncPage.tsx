@@ -37,6 +37,13 @@ const STATUS_COLOR: Record<TableStatus, string> = {
 }
 
 const isActive = (r: DataSyncRun) => r.status === 'PENDING' || r.status === 'RUNNING'
+
+const PARALLEL_OPTIONS = [
+  { label: '1 at a time — lightest on both servers', value: '1' },
+  { label: '2 at a time', value: '2' },
+  { label: '4 at a time (recommended)', value: '4' },
+  { label: '8 at a time — fastest, most load', value: '8' },
+]
 const n = (v: number) => v.toLocaleString()
 
 function totals(results: TableReport[]) {
@@ -64,6 +71,10 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
   const notSame = results.filter((r) => r.status !== 'SAME')
   const shown = showAll ? results : notSame
   const pct = run.rowsEstimate ? Math.min(99, (run.rowsChecked / run.rowsEstimate) * 100) : null
+  // Speed from server timestamps only, so the browser's clock doesn't skew it
+  const workedMs = run.startedAt && run.progressAt ? Date.parse(run.progressAt) - Date.parse(run.startedAt) : 0
+  const rate = workedMs > 10_000 && run.rowsChecked > 0 ? run.rowsChecked / (workedMs / 1000) : null
+  const leftMs = rate && run.rowsEstimate && run.rowsEstimate > run.rowsChecked ? ((run.rowsEstimate - run.rowsChecked) / rate) * 1000 : null
   const elapsed = run.startedAt ? (run.completedAt ? Date.parse(run.completedAt) : now) - Date.parse(run.startedAt) : null
   const silentMs = serverTime && run.progressAt && run.status === 'RUNNING' ? Date.parse(serverTime) - Date.parse(run.progressAt) : 0
   const compare = run.mode === 'COMPARE'
@@ -85,6 +96,7 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
           <p className="text-xs text-gray-400 mt-1">
             {formatDate(run.startedAt ?? run.createdAt)}
             {elapsed !== null && <> · {isActive(run) ? 'running' : 'took'} {formatDuration(elapsed)}</>}
+            {run.parallel > 1 && <> · {run.parallel} chunks at a time</>}
             {run.tables.length > 0 && <> · tables: {run.tables.join(', ')}</>}
           </p>
         </div>
@@ -108,6 +120,8 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
                 {run.currentTable ? <>Table <b className="font-medium text-gray-800">{run.currentTable}</b></> : 'Starting'}
                 {run.tablesTotal ? <> ({Math.min(run.tablesDone + 1, run.tablesTotal)} of {run.tablesTotal})</> : null}
                 {' · '}{n(run.rowsChecked)}{run.rowsEstimate ? <> of ~{n(run.rowsEstimate)}</> : null} rows checked
+                {rate !== null && <> · {n(Math.round(rate))} rows/s</>}
+                {leftMs !== null && <> · ~{formatDuration(leftMs)} left</>}
               </span>
               {pct !== null && <span className="tabular-nums">{pct < 10 ? pct.toFixed(1) : Math.floor(pct)}%</span>}
             </div>
@@ -148,9 +162,10 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
                     <th className="py-1.5 pr-3 font-medium">Table</th>
                     <th className="py-1.5 pr-3 font-medium">Result</th>
                     <th className="py-1.5 pr-3 font-medium text-right">Rows</th>
-                    <th className="py-1.5 pr-3 font-medium text-right">{compare ? 'Missing' : 'Added'}</th>
-                    <th className="py-1.5 pr-3 font-medium text-right">{compare ? 'Changed' : 'Replaced'}</th>
-                    <th className="py-1.5 pr-3 font-medium text-right">{compare ? 'Only on target' : 'Deleted'}</th>
+                    <th className="py-1.5 pr-3 font-medium text-right" title="Rows in the source that the target doesn't have">{compare ? 'Missing' : 'Added'}</th>
+                    <th className="py-1.5 pr-3 font-medium text-right" title="Rows in both, with different values">{compare ? 'Changed' : 'Replaced'}</th>
+                    <th className="py-1.5 pr-3 font-medium text-right" title="Rows in the target that the source doesn't have (anymore)">{compare ? 'Only on target' : 'Deleted'}</th>
+                    <th className="py-1.5 pr-3 font-medium text-right">Time</th>
                     <th className="py-1.5 font-medium">Note</th>
                   </tr>
                 </thead>
@@ -163,17 +178,25 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.inserted ? n(r.inserted) : '–'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.updated ? n(r.updated) : '–'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.deleted ? n(r.deleted) : '–'}</td>
+                      <td className="py-1.5 pr-3 text-right tabular-nums text-gray-500">{r.ms === undefined ? '' : r.ms < 1000 ? '<1s' : formatDuration(r.ms)}</td>
                       <td className="py-1.5 text-gray-500">
                         {[r.targetTable && `named ${r.targetTable} on the target`, r.reason, r.warning].filter(Boolean).join(' · ')}
                       </td>
                     </tr>
                   ))}
                   {shown.length === 0 && (
-                    <tr><td colSpan={7} className="py-2 text-gray-500">All {results.length} tables are the same.</td></tr>
+                    <tr><td colSpan={8} className="py-2 text-gray-500">All {results.length} tables are the same.</td></tr>
                   )}
                 </tbody>
               </table>
             </div>
+            {compare && changes > 0 && (
+              <p className="text-[11px] text-gray-500 mt-1.5">
+                <b className="font-medium">Missing</b>: in the source, not yet on the target (syncing adds them) ·{' '}
+                <b className="font-medium">Changed</b>: different values (syncing replaces them with the source's) ·{' '}
+                <b className="font-medium">Only on target</b>: the source no longer has them, usually deleted there since the copy (<b className="font-medium">syncing deletes them</b>)
+              </p>
+            )}
             {results.length !== notSame.length && (
               <button className="text-[11px] text-gray-500 hover:text-gray-800 mt-1" onClick={() => setShowAll((v) => !v)}>
                 {showAll ? 'Show only tables with differences' : `Show all ${results.length} tables`}
@@ -199,7 +222,8 @@ export default function DataSyncPage() {
   const [sourceId, setSourceId] = useState('')
   const [targetId, setTargetId] = useState('')
   const [tablesText, setTablesText] = useState('')
-  const [confirm, setConfirm] = useState<{ source: Connection; target: Connection; tables: string[] } | null>(null)
+  const [parallel, setParallel] = useState(4)
+  const [confirm, setConfirm] = useState<{ source: Connection; target: Connection; tables: string[]; parallel: number } | null>(null)
   const [confirmText, setConfirmText] = useState('')
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
@@ -217,8 +241,8 @@ export default function DataSyncPage() {
   const serverTime = runsData?.data.data.serverTime ?? null
 
   const start = useMutation({
-    mutationFn: (v: { mode: 'COMPARE' | 'APPLY'; source: Connection; target: Connection; tables: string[]; confirmTarget?: string }) =>
-      dataSyncApi.start({ sourceConnectionId: v.source.id, targetConnectionId: v.target.id, mode: v.mode, tables: v.tables, confirmTarget: v.confirmTarget }),
+    mutationFn: (v: { mode: 'COMPARE' | 'APPLY'; source: Connection; target: Connection; tables: string[]; parallel: number; confirmTarget?: string }) =>
+      dataSyncApi.start({ sourceConnectionId: v.source.id, targetConnectionId: v.target.id, mode: v.mode, tables: v.tables, parallel: v.parallel, confirmTarget: v.confirmTarget }),
     onSuccess: (_r, v) => {
       qc.invalidateQueries({ queryKey: ['data-sync'] })
       toast.success(v.mode === 'APPLY' ? 'Sync started' : 'Comparison started')
@@ -259,12 +283,20 @@ export default function DataSyncPage() {
             <Select label="Source (copied from)" options={options(targetId)} value={sourceId} onChange={(e) => setSourceId(e.target.value)} />
             <Select label="Target (brought up to date)" options={options(sourceId)} value={targetId} onChange={(e) => setTargetId(e.target.value)} />
           </div>
-          <Input
-            label="Only these tables (optional)"
-            placeholder="All tables — or e.g. members, orders"
-            value={tablesText}
-            onChange={(e) => setTablesText(e.target.value)}
-          />
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+            <Input
+              label="Only these tables (optional)"
+              placeholder="All tables — or e.g. members, orders"
+              value={tablesText}
+              onChange={(e) => setTablesText(e.target.value)}
+            />
+            <Select
+              label="Speed"
+              options={PARALLEL_OPTIONS}
+              value={String(parallel)}
+              onChange={(e) => setParallel(Number(e.target.value))}
+            />
+          </div>
           {target?.writeProtected && (
             <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1.5">
               {target.name} is write-protected: you can compare against it, but nothing will be synced into it.
@@ -272,16 +304,17 @@ export default function DataSyncPage() {
           )}
           <p className="text-xs text-gray-500">
             Each table is compared in chunks along its primary key; both databases checksum their own rows, so only
-            checksums and the rows that differ travel over the network. Every run still reads all rows on both sides.
+            checksums and the rows that differ travel over the network. Every run still reads all rows on both sides;
+            checking several chunks at a time is faster but adds load on both servers.
           </p>
           <div className="flex flex-wrap gap-2 justify-end">
             <Button variant="outline" disabled={!ready} loading={start.isPending}
-              onClick={() => source && target && start.mutate({ mode: 'COMPARE', source, target, tables })}>
+              onClick={() => source && target && start.mutate({ mode: 'COMPARE', source, target, tables, parallel })}>
               <Search className="h-4 w-4" />Compare (read-only)
             </Button>
             <Button variant="danger" disabled={!ready || !!target?.writeProtected}
               title={target?.writeProtected ? 'The target is write-protected: Compare only' : undefined}
-              onClick={() => source && target && (setConfirm({ source, target, tables }), setConfirmText(''))}>
+              onClick={() => source && target && (setConfirm({ source, target, tables, parallel }), setConfirmText(''))}>
               <GitCompareArrows className="h-4 w-4" />Sync differences…
             </Button>
           </div>
@@ -304,7 +337,7 @@ export default function DataSyncPage() {
                 if (!s || !t) { toast.error('The source or target connection no longer exists'); return }
                 // Only the tables that differed
                 const differing = (run.results ?? []).filter((x) => x.status === 'DIFFERENT' || x.status === 'ONLY_IN_SOURCE').map((x) => x.table)
-                setConfirm({ source: s, target: t, tables: differing })
+                setConfirm({ source: s, target: t, tables: differing, parallel: run.parallel || 4 })
                 setConfirmText('')
               }}
             />
@@ -342,7 +375,7 @@ export default function DataSyncPage() {
                 variant="danger"
                 disabled={confirmText !== confirm.target.database}
                 loading={start.isPending}
-                onClick={() => start.mutate({ mode: 'APPLY', source: confirm.source, target: confirm.target, tables: confirm.tables, confirmTarget: confirmText })}
+                onClick={() => start.mutate({ mode: 'APPLY', source: confirm.source, target: confirm.target, tables: confirm.tables, parallel: confirm.parallel, confirmTarget: confirmText })}
               >
                 {start.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitCompareArrows className="h-4 w-4" />}Sync now
               </Button>

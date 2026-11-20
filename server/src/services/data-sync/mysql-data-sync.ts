@@ -8,14 +8,17 @@ import type { ConnectionConfig } from '../engines/base.engine';
  * needs to read the source and write the target over a normal connection.
  *
  * Per table, rows are split into chunks along the primary key. Each server
- * computes a 128-bit checksum of every chunk itself, so only checksums cross
- * the network. For a chunk whose checksums differ, both sides list the
- * primary keys with a hash of each row; rows only in the source are
- * inserted, rows whose hash differs are replaced, rows only in the target are
- * deleted. Only those rows are read from the source.
+ * computes a checksum of every chunk itself, so only checksums cross the
+ * network. For a chunk whose checksums differ, both sides list the primary
+ * keys with a hash of each row; rows only in the source are inserted, rows
+ * whose hash differs are replaced, rows only in the target are deleted. Only
+ * those rows are read from the source.
  *
- * The source is read inside one consistent snapshot, so the target ends up
- * matching the source as it was when the run started.
+ * Several chunks are checked at once, each over its own pair of connections,
+ * while another connection finds the next chunk boundaries ahead of them.
+ * Every chunk is read as it is at that moment (no long-running snapshot, which
+ * would hold back the source's undo purge for the whole run); rows that change
+ * on the source during a run are picked up by the next one.
  */
 
 export type TableStatus =
@@ -43,6 +46,8 @@ export interface TableReport {
   chunksDifferent: number;
   reason?: string;
   warning?: string;
+  /** How long the table took */
+  ms?: number;
 }
 
 export interface DataSyncProgress {
@@ -51,7 +56,7 @@ export interface DataSyncProgress {
   tableCount: number;
   /** Source rows checked so far, over all tables */
   rowsChecked: number;
-  /** Rough total of source rows (from table statistics) */
+  /** Rough total of source rows: real counts for finished tables, table statistics for the rest */
   rowsEstimate: number;
 }
 
@@ -62,6 +67,8 @@ export interface DataSyncOptions {
   tables?: string[];
   /** Rows per chunk (default 5000) */
   chunkSize?: number;
+  /** Chunks checked at the same time, each with its own connections (default 4) */
+  parallel?: number;
   onProgress?: (p: DataSyncProgress) => void;
   onTable?: (r: TableReport) => void;
   /** Checked between chunks; true stops the run */
@@ -119,14 +126,29 @@ export function rowHashExpr(columns: Column[]): string {
 
 type Bound = unknown[] | null;
 
-/** WHERE clause for a chunk: (pk) > lo AND (pk) <= hi, either side open. */
+/**
+ * WHERE clause for a chunk: (pk) > lo AND (pk) <= hi, either side open.
+ * A multi-column key is spelled out as (a > ? OR (a = ? AND b > ?)): MySQL
+ * reads a row comparison like (a, b) > (?, ?) by scanning the whole index from
+ * the start, so every chunk would get slower the further into the table it is.
+ */
 export function rangeWhere(pk: string[], lo: Bound, hi: Bound): { sql: string; params: unknown[] } {
-  const tuple = pk.length === 1 ? qid(pk[0]) : `(${pk.map(qid).join(', ')})`;
-  const ph = pk.length === 1 ? '?' : `(${pk.map(() => '?').join(', ')})`;
   const conds: string[] = [];
   const params: unknown[] = [];
-  if (lo) { conds.push(`${tuple} > ${ph}`); params.push(...lo); }
-  if (hi) { conds.push(`${tuple} <= ${ph}`); params.push(...hi); }
+  const bound = (vals: unknown[], strict: '>' | '<', last: '>' | '<=') => {
+    if (pk.length === 1) { params.push(vals[0]); return `${qid(pk[0])} ${last} ?`; }
+    const nest = (i: number): string => {
+      const col = qid(pk[i]);
+      if (i === pk.length - 1) { params.push(vals[i]); return `${col} ${last} ?`; }
+      params.push(vals[i], vals[i]);
+      return `(${col} ${strict} ? OR (${col} = ? AND ${nest(i + 1)}))`;
+    };
+    // The leading column on its own lets the optimizer use a range scan
+    params.push(vals[0]);
+    return `${qid(pk[0])} ${strict}= ? AND ${nest(0)}`;
+  };
+  if (lo) conds.push(bound(lo, '>', '>'));
+  if (hi) conds.push(bound(hi, '<', '<='));
   return { sql: conds.length ? conds.join(' AND ') : '1=1', params };
 }
 
@@ -152,29 +174,42 @@ async function tableNames(c: mysql2.Connection): Promise<string[]> {
   return r.map((x) => x.t);
 }
 
-async function tableMeta(c: mysql2.Connection, table: string): Promise<TableMeta> {
-  const cols = await rows<{ n: string; dt: string; ct: string; nl: string; ex: string }>(c,
-    `SELECT COLUMN_NAME AS n, DATA_TYPE AS dt, COLUMN_TYPE AS ct, IS_NULLABLE AS nl, EXTRA AS ex
-       FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? ORDER BY ORDINAL_POSITION`, [table]);
-  const pk = await rows<{ n: string }>(c,
-    `SELECT COLUMN_NAME AS n FROM information_schema.STATISTICS
-      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND INDEX_NAME = 'PRIMARY' ORDER BY SEQ_IN_INDEX`, [table]);
-  const [est] = await rows<{ r: string | number | null }>(c,
-    'SELECT TABLE_ROWS AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?', [table]);
-  const [trg] = await rows<{ n: string | number }>(c,
-    'SELECT COUNT(*) AS n FROM information_schema.TRIGGERS WHERE EVENT_OBJECT_SCHEMA = DATABASE() AND EVENT_OBJECT_TABLE = ?', [table]);
-  return {
-    columns: cols.map((x) => ({
+/** Columns, primary key, row estimate and triggers of every table (or one), in four queries. */
+async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string, TableMeta>> {
+  const one = only === undefined ? '' : ' AND TABLE_NAME = ?';
+  const p = only === undefined ? [] : [only];
+  const cols = await rows<{ t: string; n: string; dt: string; ct: string; nl: string; ex: string }>(c,
+    `SELECT TABLE_NAME AS t, COLUMN_NAME AS n, DATA_TYPE AS dt, COLUMN_TYPE AS ct, IS_NULLABLE AS nl, EXTRA AS ex
+       FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()${one} ORDER BY TABLE_NAME, ORDINAL_POSITION`, p);
+  const pks = await rows<{ t: string; n: string }>(c,
+    `SELECT TABLE_NAME AS t, COLUMN_NAME AS n FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE()${one} AND INDEX_NAME = 'PRIMARY' ORDER BY TABLE_NAME, SEQ_IN_INDEX`, p);
+  const est = await rows<{ t: string; r: string | number | null }>(c,
+    `SELECT TABLE_NAME AS t, TABLE_ROWS AS r FROM information_schema.TABLES
+      WHERE TABLE_SCHEMA = DATABASE()${one} AND TABLE_TYPE = 'BASE TABLE'`, p);
+  const trg = await rows<{ t: string; n: string | number }>(c,
+    `SELECT EVENT_OBJECT_TABLE AS t, COUNT(*) AS n FROM information_schema.TRIGGERS
+      WHERE EVENT_OBJECT_SCHEMA = DATABASE()${one.replace('TABLE_NAME', 'EVENT_OBJECT_TABLE')} GROUP BY EVENT_OBJECT_TABLE`, p);
+  const meta = new Map<string, TableMeta>();
+  for (const e of est) meta.set(e.t, { columns: [], pk: [], rowsEstimate: Number(e.r ?? 0) || 0, hasTriggers: false });
+  for (const x of cols) {
+    meta.get(x.t)?.columns.push({
       name: x.n,
       dataType: String(x.dt).toLowerCase(),
       columnType: normalizeColumnType(String(x.ct)),
       nullable: x.nl === 'YES',
       generated: /GENERATED/i.test(String(x.ex ?? '')),
-    })),
-    pk: pk.map((x) => x.n),
-    rowsEstimate: Number(est?.r ?? 0) || 0,
-    hasTriggers: Number(trg?.n ?? 0) > 0,
-  };
+    });
+  }
+  for (const x of pks) meta.get(x.t)?.pk.push(x.n);
+  for (const x of trg) { const m = meta.get(x.t); if (m) m.hasTriggers = Number(x.n) > 0; }
+  return meta;
+}
+
+async function tableMeta(c: mysql2.Connection, table: string): Promise<TableMeta> {
+  const m = (await loadMeta(c, table)).get(table);
+  if (!m) throw new Error(`table ${table} not found`);
+  return m;
 }
 
 /**
@@ -202,13 +237,15 @@ export function schemaMismatch(src: TableMeta, dst: TableMeta): string | null {
   return null;
 }
 
+type Query = <T = Record<string, unknown>>(sql: string, params?: unknown[]) => Promise<T[]>;
+
 /** Upper bounds (inclusive) of each chunk along the primary key, read from the source. */
-async function* chunkBounds(c: mysql2.Connection, table: string, pk: string[], size: number): AsyncGenerator<{ lo: Bound; hi: Bound }> {
+async function* chunkBounds(query: Query, table: string, pk: string[], size: number): AsyncGenerator<{ lo: Bound; hi: Bound }> {
   const cols = pk.map(qid).join(', ');
   let lo: Bound = null;
   for (;;) {
     const w = rangeWhere(pk, lo, null);
-    const r = await rows(c, `SELECT ${cols} FROM ${qid(table)} WHERE ${w.sql} ORDER BY ${cols} LIMIT 1 OFFSET ${size - 1}`, w.params);
+    const r = await query(`SELECT ${cols} FROM ${qid(table)} WHERE ${w.sql} ORDER BY ${cols} LIMIT 1 OFFSET ${size - 1}`, w.params);
     if (r.length === 0) {
       // Last chunk is open-ended: it also covers target rows past the source's last key
       yield { lo, hi: null };
@@ -220,13 +257,40 @@ async function* chunkBounds(c: mysql2.Connection, table: string, pk: string[], s
   }
 }
 
+/**
+ * Pull items from a generator while keeping up to `ahead` requested in
+ * advance, so the next chunk boundaries are found while chunks are checked.
+ */
+function prefetch<T>(gen: AsyncGenerator<T>, ahead: number): () => Promise<T | undefined> {
+  const buf: Promise<IteratorResult<T>>[] = [];
+  let ended = false;
+  const fill = () => {
+    while (!ended && buf.length < ahead) {
+      const p = gen.next();
+      p.then((r) => { if (r.done) ended = true; }, () => { ended = true; });
+      buf.push(p);
+    }
+  };
+  return async () => {
+    fill();
+    const p = buf.shift();
+    if (!p) return undefined;
+    const r = await p;
+    fill();
+    return r.done ? undefined : r.value;
+  };
+}
+
+/**
+ * Row count and a 64-bit checksum of a chunk: the XOR of the first half of each
+ * row's MD5. Each row is hashed once; a derived table with both halves would be
+ * merged by the optimizer and hash every row twice.
+ */
 async function chunkChecksum(c: mysql2.Connection, table: string, hash: string, where: { sql: string; params: unknown[] }) {
-  const [r] = await rows<{ n: string | number; a: string | number; b: string | number }>(c,
-    `SELECT COUNT(*) AS n,
-            COALESCE(BIT_XOR(CAST(CONV(SUBSTRING(h, 1, 16), 16, 10) AS UNSIGNED)), 0) AS a,
-            COALESCE(BIT_XOR(CAST(CONV(SUBSTRING(h, 17, 16), 16, 10) AS UNSIGNED)), 0) AS b
-       FROM (SELECT ${hash} AS h FROM ${qid(table)} WHERE ${where.sql}) s`, where.params);
-  return { n: Number(r.n), sum: `${r.n}:${r.a}:${r.b}` };
+  const [r] = await rows<{ n: string | number; a: string | number }>(c,
+    `SELECT COUNT(*) AS n, COALESCE(BIT_XOR(CAST(CONV(SUBSTRING(${hash}, 1, 16), 16, 10) AS UNSIGNED)), 0) AS a
+       FROM ${qid(table)} WHERE ${where.sql}`, where.params);
+  return { n: Number(r.n), sum: `${r.n}:${r.a}` };
 }
 
 async function rowHashes(c: mysql2.Connection, table: string, pk: string[], hash: string, where: { sql: string; params: unknown[] }) {
@@ -300,7 +364,112 @@ async function applyChunk(
   }
 }
 
-const isDuplicateKey = (err: unknown) => (err as { errno?: number })?.errno === 1062;
+// Another chunk still holds the old row with this unique value, or two chunks locked each other
+const isDeferrable = (err: unknown) => [1062, 1205, 1213].includes((err as { errno?: number })?.errno ?? 0);
+
+const LOST_CODES = new Set(['PROTOCOL_CONNECTION_LOST', 'ECONNRESET', 'EPIPE', 'ETIMEDOUT', 'ECONNREFUSED', 'ER_CLIENT_INTERACTION_TIMEOUT']);
+/** The connection itself broke (not an SQL error): worth reconnecting and trying again */
+const isConnectionLost = (err: unknown) => {
+  const e = err as { fatal?: boolean; code?: string } | null;
+  return !!e && (e.fatal === true || LOST_CODES.has(e.code ?? ''));
+};
+
+/** One connection, reopened (with its session settings) after it breaks. */
+class Session {
+  private res: MySQLConnectionResult | null = null;
+  constructor(private readonly config: ConnectionConfig, private readonly init: string[]) {}
+
+  get c(): mysql2.Connection {
+    if (!this.res) throw Object.assign(new Error('not connected'), { fatal: true });
+    return this.res.connection;
+  }
+
+  async open(): Promise<void> {
+    await this.close();
+    const r = await open(this.config);
+    // A broken idle connection emits 'error'; the next query reports it instead
+    r.connection.on('error', () => undefined);
+    this.res = r;
+    for (const sql of this.init) await r.connection.query(sql);
+  }
+
+  async close(): Promise<void> {
+    const r = this.res;
+    this.res = null;
+    if (!r) return;
+    await r.connection.end().catch(() => r.connection.destroy());
+    r.tunnel?.close();
+  }
+
+  /** A read that is safe to repeat: retried once on a fresh connection */
+  query: Query = async (sql, params = []) => {
+    try {
+      return await rows(this.c, sql, params);
+    } catch (err) {
+      if (!isConnectionLost(err)) throw err;
+      await this.open();
+      return rows(this.c, sql, params);
+    }
+  };
+}
+
+/** Run fn; when a connection broke, reopen these sessions and run it once more. */
+async function withReconnect<T>(sessions: Session[], fn: () => Promise<T>): Promise<T> {
+  try {
+    return await fn();
+  } catch (err) {
+    if (!isConnectionLost(err)) throw err;
+    for (const s of sessions) await s.open();
+    return fn();
+  }
+}
+
+interface Pair { src: Session; dst: Session }
+
+interface ChunkResult {
+  rows: number;
+  inserted: number;
+  updated: number;
+  deleted: number;
+  different: boolean;
+  deferred?: { toDelete: unknown[][]; toCopy: unknown[][] };
+}
+
+interface TableJob {
+  table: string;
+  dstTable: string;
+  meta: TableMeta;
+  hash: string;
+  apply: boolean;
+}
+
+/** Compare one chunk on both sides and, when applying, copy its differences. Safe to run again. */
+async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Promise<ChunkResult> {
+  const { table, dstTable, meta, hash } = job;
+  const where = rangeWhere(meta.pk, lo, hi);
+  const [a, b] = await Promise.all([chunkChecksum(pair.src.c, table, hash, where), chunkChecksum(pair.dst.c, dstTable, hash, where)]);
+  const out: ChunkResult = { rows: a.n, inserted: 0, updated: 0, deleted: 0, different: a.sum !== b.sum };
+  if (!out.different) return out;
+
+  const [sm, dm] = await Promise.all([rowHashes(pair.src.c, table, meta.pk, hash, where), rowHashes(pair.dst.c, dstTable, meta.pk, hash, where)]);
+  const toCopy: unknown[][] = [];
+  const toDelete: unknown[][] = [];
+  for (const [k, s] of sm) {
+    const d = dm.get(k);
+    if (!d) { out.inserted++; toCopy.push(s.key); }
+    else if (d.h !== s.h) { out.updated++; toCopy.push(s.key); toDelete.push(s.key); }
+  }
+  for (const [k, d] of dm) if (!sm.has(k)) { out.deleted++; toDelete.push(d.key); }
+  if (!job.apply || (toCopy.length === 0 && toDelete.length === 0)) return out;
+  try {
+    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy);
+  } catch (err) {
+    // A unique value that moved to a row in another chunk: retried once the rest of the table is done
+    if (!isDeferrable(err)) throw err;
+    out.deferred = { toDelete, toCopy };
+  }
+  return out;
+}
 
 export async function mysqlDataSync(
   sourceConfig: ConnectionConfig,
@@ -308,126 +477,143 @@ export async function mysqlDataSync(
   opts: DataSyncOptions,
 ): Promise<TableReport[]> {
   const size = Math.max(100, opts.chunkSize ?? 5000);
-  const source = await open(sourceConfig);
-  let target: MySQLConnectionResult | null = null;
+  const parallel = Math.min(16, Math.max(1, Math.floor(opts.parallel ?? 4)));
+  // Same text for TIMESTAMPs on both sides. The source is only read, and so is the target when comparing.
+  const srcInit = ["SET SESSION time_zone = '+00:00'", 'SET SESSION TRANSACTION READ ONLY'];
+  const dstInit = opts.apply
+    // Rows go in table by table, not in dependency order; zero dates and id 0 as in the source
+    ? ["SET SESSION time_zone = '+00:00'", 'SET SESSION foreign_key_checks = 0', "SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'"]
+    : ["SET SESSION time_zone = '+00:00'", 'SET SESSION TRANSACTION READ ONLY'];
+
+  // Control connections (lists, metadata, chunk boundaries, CREATE TABLE) and one pair per parallel worker
+  const ctlSrc = new Session(sourceConfig, srcInit);
+  const ctlDst = new Session(targetConfig, dstInit);
+  const pairs: Pair[] = Array.from({ length: parallel }, () => ({ src: new Session(sourceConfig, srcInit), dst: new Session(targetConfig, dstInit) }));
+  const all = [ctlSrc, ctlDst, ...pairs.flatMap((p) => [p.src, p.dst])];
   try {
-    target = await open(targetConfig);
-    const src = source.connection;
-    const dst = target.connection;
+    // One connection at a time per server (an SSH jump host may refuse many handshakes at once)
+    await Promise.all([
+      (async () => { for (const s of [ctlSrc, ...pairs.map((p) => p.src)]) await s.open(); })(),
+      (async () => { for (const s of [ctlDst, ...pairs.map((p) => p.dst)]) await s.open(); })(),
+    ]);
 
-    // Same text for TIMESTAMPs on both sides; the source is one consistent, read-only snapshot
-    await src.query("SET SESSION time_zone = '+00:00'");
-    await dst.query("SET SESSION time_zone = '+00:00'");
-    await src.query('SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ');
-    await src.query('START TRANSACTION WITH CONSISTENT SNAPSHOT, READ ONLY');
-    if (opts.apply) {
-      // Rows go in table by table, not in dependency order; zero dates and id 0 as in the source
-      await dst.query('SET SESSION foreign_key_checks = 0');
-      await dst.query("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'");
-    }
-
-    const srcTables = await tableNames(src);
-    let dstTables = await tableNames(dst);
+    const srcTables = await tableNames(ctlSrc.c);
+    let dstTables = await tableNames(ctlDst.c);
+    const [srcMetaAll, dstMetaAll] = await Promise.all([loadMeta(ctlSrc.c), loadMeta(ctlDst.c)]);
     // Table names typed by the user match regardless of case
     const wanted = opts.tables?.length ? new Set(opts.tables.map((t) => t.toLowerCase())) : null;
     const tables = srcTables.filter((t) => !wanted || wanted.has(t.toLowerCase()));
     const matchedTargets = new Set<string>();
     const reports: TableReport[] = [];
+
+    // Progress: real row counts for finished tables, statistics for the rest (they can be far off)
     let rowsChecked = 0;
-    const estimates = await rows<{ t: string; r: string | number | null }>(src,
-      "SELECT TABLE_NAME AS t, TABLE_ROWS AS r FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'");
-    const rowsEstimate = estimates.filter((e) => tables.includes(e.t)).reduce((n, e) => n + (Number(e.r) || 0), 0);
+    let remainingEstimate = tables.reduce((n, t) => n + (srcMetaAll.get(t)?.rowsEstimate ?? 0), 0);
+    let current = { table: '', index: 0, rows: 0, estimate: 0 };
+    const progress = () => opts.onProgress?.({
+      table: current.table,
+      tableIndex: current.index,
+      tableCount: tables.length,
+      rowsChecked,
+      rowsEstimate: rowsChecked - current.rows + Math.max(current.estimate, current.rows) + remainingEstimate,
+    });
 
     for (const [index, table] of tables.entries()) {
       if (opts.shouldStop?.()) throw new DataSyncStopped();
-      opts.onProgress?.({ table, tableIndex: index, tableCount: tables.length, rowsChecked, rowsEstimate });
+      const srcMeta = srcMetaAll.get(table) ?? await tableMeta(ctlSrc.c, table);
+      remainingEstimate -= srcMetaAll.get(table)?.rowsEstimate ?? 0;
+      current = { table, index, rows: 0, estimate: srcMeta.rowsEstimate };
+      progress();
+      const started = Date.now();
       const report: TableReport = { table, status: 'SAME', rows: 0, inserted: 0, updated: 0, deleted: 0, chunks: 0, chunksDifferent: 0 };
       try {
-        const srcMeta = await tableMeta(src, table);
-        let dstMeta: TableMeta;
         let dstTable = matchTargetTable(table, dstTables);
         if (dstTable) {
           matchedTargets.add(dstTable);
           if (dstTable !== table) report.targetTable = dstTable;
         }
+        let dstMeta: TableMeta;
         if (!dstTable) {
           if (!opts.apply) {
             report.status = 'ONLY_IN_SOURCE';
             report.rows = srcMeta.rowsEstimate;
             report.inserted = srcMeta.rowsEstimate;
             report.reason = 'missing on the target; syncing creates it';
-            reports.push(report);
-            opts.onTable?.(report);
-            continue;
+            throw Object.assign(new Error(report.reason), { done: true });
           }
-          const [ddl] = await rows<Record<string, string>>(src, `SHOW CREATE TABLE ${qid(table)}`);
-          await dst.query(ddl['Create Table']);
+          const [ddl] = await ctlSrc.query<Record<string, string>>(`SHOW CREATE TABLE ${qid(table)}`);
+          await ctlDst.c.query(ddl['Create Table']);
           // The target may have stored the name in lowercase
-          dstTables = await tableNames(dst);
+          dstTables = await tableNames(ctlDst.c);
           dstTable = matchTargetTable(table, dstTables);
           if (!dstTable) throw new Error('the table was created on the target but cannot be found there');
           matchedTargets.add(dstTable);
           if (dstTable !== table) report.targetTable = dstTable;
-          dstMeta = await tableMeta(dst, dstTable);
+          dstMeta = await tableMeta(ctlDst.c, dstTable);
           report.status = 'CREATED';
         } else {
-          dstMeta = await tableMeta(dst, dstTable);
+          dstMeta = dstMetaAll.get(dstTable) ?? await tableMeta(ctlDst.c, dstTable);
         }
-        const target = dstTable;
         const mismatch = schemaMismatch(srcMeta, dstMeta);
         if (mismatch) throw Object.assign(new Error(mismatch), { skip: true });
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';
 
-        const hash = rowHashExpr(srcMeta.columns);
+        const job: TableJob = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply };
+        const bounds = chunkBounds(ctlSrc.query, table, srcMeta.pk, size);
+        const next = prefetch(bounds, parallel * 2);
         const deferred: { toDelete: unknown[][]; toCopy: unknown[][] }[] = [];
-        for await (const { lo, hi } of chunkBounds(src, table, srcMeta.pk, size)) {
-          if (opts.shouldStop?.()) throw new DataSyncStopped();
-          const where = rangeWhere(srcMeta.pk, lo, hi);
-          const [a, b] = await Promise.all([chunkChecksum(src, table, hash, where), chunkChecksum(dst, target, hash, where)]);
-          report.chunks++;
-          report.rows += a.n;
-          rowsChecked += a.n;
-          opts.onProgress?.({ table, tableIndex: index, tableCount: tables.length, rowsChecked, rowsEstimate });
-          if (a.sum === b.sum) continue;
+        let failure: unknown = null;
+        await Promise.all(pairs.map(async (pair) => {
+          while (failure === null) {
+            if (opts.shouldStop?.()) { failure = new DataSyncStopped(); return; }
+            try {
+              const b = await next();
+              if (!b || failure !== null) return;
+              const r = await withReconnect([pair.src, pair.dst], () => checkChunk(pair, job, b.lo, b.hi));
+              report.chunks++;
+              report.rows += r.rows;
+              report.inserted += r.inserted;
+              report.updated += r.updated;
+              report.deleted += r.deleted;
+              if (r.different) report.chunksDifferent++;
+              if (r.deferred) deferred.push(r.deferred);
+              rowsChecked += r.rows;
+              current.rows += r.rows;
+              progress();
+            } catch (err) {
+              if (failure === null) failure = err;
+              return;
+            }
+          }
+        }));
+        await bounds.return(undefined).catch(() => undefined);
+        if (failure !== null) throw failure;
 
-          report.chunksDifferent++;
-          const [sm, dm] = await Promise.all([rowHashes(src, table, srcMeta.pk, hash, where), rowHashes(dst, target, srcMeta.pk, hash, where)]);
-          const toCopy: unknown[][] = [];
-          const toDelete: unknown[][] = [];
-          for (const [k, s] of sm) {
-            const d = dm.get(k);
-            if (!d) { report.inserted++; toCopy.push(s.key); }
-            else if (d.h !== s.h) { report.updated++; toCopy.push(s.key); toDelete.push(s.key); }
-          }
-          for (const [k, d] of dm) if (!sm.has(k)) { report.deleted++; toDelete.push(d.key); }
-          if (!opts.apply) continue;
-          try {
-            await applyChunk(src, dst, table, target, srcMeta, toDelete, toCopy);
-          } catch (err) {
-            // A unique value that moved to a row in a later chunk: retry once the rest is done
-            if (!isDuplicateKey(err)) throw err;
-            deferred.push({ toDelete, toCopy });
-          }
-        }
         if (deferred.length) {
           // Unique values that moved between rows (even swapped): fixing one chunk at a time
           // collides with the other row's old value, so apply all of them in one transaction,
           // every delete first. Every other chunk of the table is already right by now.
-          await applyChunk(
-            src, dst, table, target, srcMeta,
+          const pair = pairs[0];
+          await withReconnect([pair.src, pair.dst], () => applyChunk(
+            pair.src.c, pair.dst.c, table, job.dstTable, srcMeta,
             deferred.flatMap((d) => d.toDelete),
             deferred.flatMap((d) => d.toCopy),
-          );
+          ));
         }
 
         const changed = report.inserted + report.updated + report.deleted > 0;
         if (report.status !== 'CREATED') report.status = changed ? (opts.apply ? 'SYNCED' : 'DIFFERENT') : 'SAME';
       } catch (err) {
         if (err instanceof DataSyncStopped) throw err;
-        report.status = (err as { skip?: boolean }).skip ? 'SKIPPED' : 'ERROR';
-        report.reason = err instanceof Error ? err.message.slice(0, 500) : String(err);
+        if (!(err as { done?: boolean }).done) {
+          report.status = (err as { skip?: boolean }).skip ? 'SKIPPED' : 'ERROR';
+          report.reason = err instanceof Error ? err.message.slice(0, 500) : String(err);
+        }
       }
+      // Counted rows replace the estimate for this table
+      current = { table, index, rows: 0, estimate: 0 };
+      report.ms = Date.now() - started;
       reports.push(report);
       opts.onTable?.(report);
     }
@@ -440,14 +626,8 @@ export async function mysqlDataSync(
         opts.onTable?.(r);
       }
     }
-    await src.query('COMMIT').catch(() => undefined);
     return reports;
   } finally {
-    await source.connection.end().catch(() => undefined);
-    source.tunnel?.close();
-    if (target) {
-      await target.connection.end().catch(() => undefined);
-      target.tunnel?.close();
-    }
+    await Promise.all(all.map((s) => s.close().catch(() => undefined)));
   }
 }
