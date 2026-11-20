@@ -76,6 +76,15 @@ export const restoreSchema = z.object({
   strategy: toolStrategySchema.optional(),
 });
 
+// Compare & sync (copy only the differing rows, source → target)
+export const dataSyncSchema = z.object({
+  sourceConnectionId: z.string().uuid('Invalid source connection ID'),
+  targetConnectionId: z.string().uuid('Invalid target connection ID'),
+  mode: z.enum(['COMPARE', 'APPLY']),
+  tables: z.array(z.string().min(1).max(64)).max(1000).optional(),
+  confirmTarget: z.string().max(255).optional(),
+});
+
 // Schedule schemas
 export const scheduleSchema = z.object({
   connectionId: z.string().uuid('Invalid connection ID'),

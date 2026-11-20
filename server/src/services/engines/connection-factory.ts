@@ -37,7 +37,9 @@ export class ConnectionFactory {
      * Create a MySQL/MariaDB connection with optional SSH tunnel
      */
     static async createMySQLConnection(
-        connectionConfig: ConnectionConfig
+        connectionConfig: ConnectionConfig,
+        /** Extra mysql2 options (e.g. dateStrings for exact copies) */
+        extra: Partial<mysql2.ConnectionOptions> = {},
     ): Promise<MySQLConnectionResult> {
         let tunnel: SSHTunnel | null = null;
 
@@ -64,6 +66,7 @@ export class ConnectionFactory {
                 database: decryptedConfig.database,
                 ssl: nodeTlsOptions(decryptedConfig, 'mysql2'),
                 connectTimeout: decryptedConfig.connectionTimeout || 30000,
+                ...extra,
             });
 
             return { connection, tunnel };
