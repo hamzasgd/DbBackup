@@ -1,4 +1,5 @@
 import api from '../lib/api'
+import type { ToolStrategy } from '../lib/tool-strategy'
 
 export type BackupFormat = 'COMPRESSED_SQL' | 'PLAIN_SQL' | 'CUSTOM' | 'DIRECTORY' | 'TAR'
 export type ExportFormat = 'json' | 'csv' | 'sql'
@@ -43,6 +44,8 @@ export interface Backup {
   } | null
   checksum?: string
   storageType: 'LOCAL' | 'S3' | 'GOOGLE_DRIVE'
+  /** Where the dump ran */
+  strategy?: ToolStrategy
 }
 
 export const backupsApi = {
@@ -50,7 +53,7 @@ export const backupsApi = {
     api.get<{ success: boolean; data: { backups: Backup[]; total: number; serverTime?: string } }>('/backups', { params }),
   getOne: (id: string) =>
     api.get<{ success: boolean; data: Backup }>(`/backups/${id}`),
-  trigger: (data: { connectionId: string; snapshotName?: string; notes?: string; format?: BackupFormat }) =>
+  trigger: (data: { connectionId: string; snapshotName?: string; notes?: string; format?: BackupFormat; strategy?: ToolStrategy }) =>
     api.post<{ success: boolean; data: Backup }>('/backups', data),
   delete: (id: string) =>
     api.delete(`/backups/${id}`),
@@ -77,6 +80,7 @@ export interface RestoreRecord {
   targetName: string
   targetDatabase: string
   overwritesSource: boolean
+  strategy: ToolStrategy
   status: RestoreStatus
   stage: RestoreStage | null
   bytesRead: number
@@ -110,7 +114,7 @@ export interface RestoreCheck {
 
 export const restoreApi = {
   // Returns 202 with a jobId (the restore's id) — progress via list() or SSE at /restore/:jobId/progress
-  restore: (data: { backupId: string; targetConnectionId?: string; targetDatabase?: string; confirmOverwrite?: string }) =>
+  restore: (data: { backupId: string; targetConnectionId?: string; targetDatabase?: string; confirmOverwrite?: string; strategy?: ToolStrategy }) =>
     api.post<{ success: boolean; data: { jobId: string }; message: string }>('/restore', data),
   check: (params: { backupId: string; targetConnectionId: string }) =>
     api.get<{ success: boolean; data: RestoreCheck }>('/restore/check', { params }),

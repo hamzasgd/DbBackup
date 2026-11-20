@@ -118,6 +118,11 @@ export function RestoreItem({ restore: r, serverTime }: { restore: RestoreRecord
             <ArrowRight className="h-3.5 w-3.5 text-gray-400" />
             <span className="font-medium text-gray-900">{r.targetName}</span>
             <span className="text-gray-500 text-xs">database {r.targetDatabase}</span>
+            {r.strategy === 'SSH_SERVER' && (
+              <span className="text-[11px] text-gray-500 bg-gray-50 border border-gray-200 rounded px-1.5" title="mysql ran on the target's SSH server">
+                on SSH server
+              </span>
+            )}
             {r.overwritesSource && (
               <span className="text-[11px] font-medium text-red-700 bg-red-50 border border-red-200 rounded px-1.5">
                 overwrote its source

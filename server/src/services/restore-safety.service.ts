@@ -69,7 +69,7 @@ export interface RestoreTargetCheck {
     sourceConnectionId: string | null;
     sourceName: string | null;
   };
-  target: { connectionId: string; name: string; type: string; database: string };
+  target: { connectionId: string; name: string; type: string; database: string; sshEnabled: boolean };
   /** The target is the database this backup was taken from */
   overwritesSource: boolean;
   /** Why the target counts as the source: same connection, or another connection to the same place */
@@ -152,7 +152,7 @@ export async function checkRestoreTarget(
       sourceConnectionId: backup.connectionId,
       sourceName: backup.connection?.name ?? null,
     },
-    target: { connectionId: target.id, name: target.name, type: target.type, database },
+    target: { connectionId: target.id, name: target.name, type: target.type, database, sshEnabled: target.sshEnabled },
     overwritesSource: reason !== null,
     overwritesSourceReason: reason,
     incompatible,

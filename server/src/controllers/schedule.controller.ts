@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { resolveToolStrategy } from '../services/tool-strategy';
 import { randomUUID as uuidv4 } from 'crypto';
 import { CronExpressionParser } from 'cron-parser';
 import { prisma } from '../config/database';
@@ -86,12 +87,13 @@ async function assertRetentionAllowed(userId: string, retentionDays: number): Pr
 
 export async function createSchedule(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    const { connectionId, name, frequency, cronExpression, retentionDays, retentionCount } = req.body;
+    const { connectionId, name, frequency, cronExpression, retentionDays, retentionCount, strategy } = req.body;
 
     const conn = await prisma.connection.findFirst({
       where: { id: connectionId, userId: req.user!.userId },
     });
     if (!conn) throw new AppError('Connection not found', 404);
+    const resolvedStrategy = resolveToolStrategy(strategy, conn);
 
     await assertRetentionAllowed(req.user!.userId, retentionDays || 30);
 
@@ -105,6 +107,7 @@ export async function createSchedule(req: AuthRequest, res: Response, next: Next
         nextRunAt: getNextRunAt(cronExpression),
         retentionDays: retentionDays || 30,
         retentionCount: retentionCount ?? null,
+        strategy: resolvedStrategy,
         isActive: true,
       },
     });
@@ -121,10 +124,13 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
   try {
     const existing = await prisma.schedule.findFirst({
       where: { id: req.params.id, connection: { userId: req.user!.userId } },
+      include: { connection: { select: { name: true, type: true, sshEnabled: true } } },
     });
     if (!existing) throw new AppError('Schedule not found', 404);
 
-    const { name, frequency, cronExpression, isActive, retentionDays, retentionCount } = req.body;
+    const { name, frequency, cronExpression, isActive, retentionDays, retentionCount, strategy } = req.body;
+    // Unchanged when not sent
+    const resolvedStrategy = strategy === undefined ? undefined : resolveToolStrategy(strategy, existing.connection);
     await assertRetentionAllowed(req.user!.userId, retentionDays || 30);
     const nextRunAt = isActive === false
       ? null
@@ -132,7 +138,7 @@ export async function updateSchedule(req: AuthRequest, res: Response, next: Next
 
     const updated = await prisma.schedule.update({
       where: { id: req.params.id },
-      data: { name, frequency, cronExpression, isActive, retentionDays, retentionCount, nextRunAt },
+      data: { name, frequency, cronExpression, isActive, retentionDays, retentionCount, nextRunAt, strategy: resolvedStrategy },
     });
 
     await removeScheduleJob(req.params.id);

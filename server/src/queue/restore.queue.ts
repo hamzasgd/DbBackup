@@ -97,8 +97,12 @@ export function createRestoreWorker(): Worker<RestoreJobData> {
 
         // Progress = how much of the file the restore tool has read
         tracker.setStage('RESTORING', outputSize(localPath) || null);
+        const row = await prisma.restore.findUnique({ where: { id: jobId }, select: { strategy: true } });
         const engine = engineFactory(buildConnectionConfig(conn));
-        await engine.restore(localPath, targetDatabase, { onBytes: (b) => tracker.setBytes(b) });
+        await engine.restore(localPath, targetDatabase, {
+          onBytes: (b) => tracker.setBytes(b),
+          strategy: row?.strategy === 'SSH_SERVER' ? 'SSH_SERVER' : 'TUNNEL',
+        });
         await tracker.stop();
 
         if (tempPath) cleanupTempFile(tempPath);

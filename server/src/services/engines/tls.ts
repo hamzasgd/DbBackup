@@ -133,13 +133,33 @@ export function pgCliTls(
 
 /** The `mysql` binary on many systems (e.g. Alpine's mysql-client) is really the MariaDB client; their TLS flags differ. */
 export function mysqlClientFlavor(bin: string): 'mariadb' | 'mysql' {
-  return /mariadb/i.test(toolVersionText(bin)) ? 'mariadb' : 'mysql';
+  return mysqlFlavorFromVersion(toolVersionText(bin));
+}
+
+/** Flavor from a `--version` line ("mysql  Ver 15.1 Distrib 10.11.6-MariaDB" → mariadb). */
+export function mysqlFlavorFromVersion(versionText: string): 'mariadb' | 'mysql' {
+  return /mariadb/i.test(versionText) ? 'mariadb' : 'mysql';
 }
 
 /** TLS flags for mysql / mysqldump / mariadb-dump. `tunnelled` = connecting through an SSH tunnel. */
 export function mysqlCliTlsArgs(config: ConnectionConfig, bin: string, tunnelled: boolean, files: TlsFiles): string[] {
   if (!config.sslEnabled) return [];
-  const flavor = mysqlClientFlavor(bin);
+  return mysqlTlsArgsFor(config, mysqlClientFlavor(bin), tunnelled, (name, content) => files.write(name, content));
+}
+
+/**
+ * The same flags for a client of a known flavor, writing the certificate
+ * files through `write` (which returns the path to pass). Used for tools run
+ * on another machine, where the files go to a private directory there.
+ */
+export function mysqlTlsArgsFor(
+  config: ConnectionConfig,
+  flavor: 'mariadb' | 'mysql',
+  tunnelled: boolean,
+  write: (name: string, content: string) => string,
+): string[] {
+  if (!config.sslEnabled) return [];
+  const files = { write };
   const args: string[] = [];
   if (config.sslCert && config.sslKey) {
     args.push(`--ssl-cert=${files.write('client.crt', config.sslCert)}`, `--ssl-key=${files.write('client.key', config.sslKey)}`);
