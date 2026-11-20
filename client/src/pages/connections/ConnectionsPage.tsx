@@ -31,6 +31,7 @@ const schema = z.object({
   sslKey: z.string().optional().nullable(),
   sshEnabled: z.boolean().default(false),
   heartbeatEnabled: z.boolean().default(false),
+  compressTraffic: z.boolean().default(false),
   expectedBackupHours: z.coerce.number().int().positive().optional().nullable(),
   sshHost: z.string().optional().nullable(),
   sshPort: z.coerce.number().optional().nullable(),
@@ -62,10 +63,11 @@ export default function ConnectionsPage() {
 
   const { register, handleSubmit, reset, setValue, control, formState: { errors, isSubmitting } } = useForm<FormInput, unknown, FormData>({
     resolver: zodResolver(schema),
-    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false },
+    defaultValues: { type: 'MYSQL', port: 3306, sslEnabled: false, sshEnabled: false, heartbeatEnabled: false, compressTraffic: false },
   })
 
   const sshEnabled = useWatch({ control, name: 'sshEnabled' })
+  const connType = useWatch({ control, name: 'type' })
   const sslEnabled = useWatch({ control, name: 'sslEnabled' })
   const sslCa = useWatch({ control, name: 'sslCa' })
   const editing = editId ? connections.find((c) => c.id === editId) : undefined
@@ -303,6 +305,19 @@ export default function ConnectionsPage() {
                   />
                 </div>
               </details>
+            </div>
+          )}
+
+          {(connType === 'MYSQL' || connType === 'MARIADB') && (
+            <div className="flex items-start gap-2">
+              <input type="checkbox" id="compressTrafficChk" {...register('compressTraffic')} className="rounded mt-0.5" />
+              <label htmlFor="compressTrafficChk" className="text-sm text-gray-700">
+                Compress traffic{' '}
+                <span className="text-gray-400">
+                  (backups and restores send compressed data over the network; faster on slow or remote links,
+                  uses more CPU on the database server; the backup file is identical)
+                </span>
+              </label>
             </div>
           )}
 

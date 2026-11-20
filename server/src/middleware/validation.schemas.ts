@@ -51,6 +51,7 @@ export const connectionSchema = z.object({
   sshPassphrase: z.string().optional(),
   connectionTimeout: z.number().int().positive().optional(),
   heartbeatEnabled: z.boolean().optional(),
+  compressTraffic: z.boolean().optional(),
   expectedBackupHours: z.number().int().positive().optional().nullable(),
 });
 

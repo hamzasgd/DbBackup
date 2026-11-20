@@ -111,6 +111,7 @@ export class PostgreSQLEngine extends BaseEngine {
       };
       const { flag, ext } = formatMap[format] ?? formatMap['CUSTOM'];
       const { fileName, filePath: outputPath } = buildBackupPath(outputDir, 'postgres', this.config.database, timestamp, ext);
+      options.onOutputPath?.(outputPath);
 
       if (format === 'DIRECTORY') {
         mkdirSync(outputPath, { recursive: true });

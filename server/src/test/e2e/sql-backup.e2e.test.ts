@@ -154,6 +154,26 @@ describe.skipIf(!MARIADB)('MariaDB / MySQL backup and restore', () => {
     });
   }
 
+  // Protocol compression changes only how the bytes travel: the dump and the
+  // restored database must be identical to the uncompressed case
+  for (const type of ['MARIADB', 'MYSQL'] as const) {
+    it(`${type} backup with compressTraffic restores to an identical database`, async () => {
+      const engine = engineFactory(engineConfig(type, MARIADB!, source, { compressTraffic: true }));
+      expect((await engine.testConnection()).success).toBe(true);
+      const backup = await engine.backup(out, { format: 'COMPRESSED_SQL' });
+
+      const target = uniq('e2e_my_cmp');
+      await engine.createDatabase(target);
+      try {
+        await engine.restore(backup.filePath, target);
+        expect(await myFingerprint(target)).toEqual(expected);
+        expect((await engine.countAllTables(target)).rows).toBe(BigInt(BIG * 2));
+      } finally {
+        await engine.dropDatabase(target);
+      }
+    });
+  }
+
   it('a wrong password fails the backup', async () => {
     const engine = engineFactory(engineConfig('MARIADB', MARIADB!, source, { password: 'nope' }));
     await expect(engine.backup(out, { format: 'PLAIN_SQL' })).rejects.toThrow(/Access denied/);

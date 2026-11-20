@@ -91,6 +91,39 @@ export function mysqlRestoreGuardArgs(bin: string): string[] {
   return ['--binary-mode'];
 }
 
+/** Oracle MySQL client 8.0.18+: has --compression-algorithms (and zstd). */
+export function mysqlClientHasCompressionAlgorithms(versionText: string): boolean {
+  if (/mariadb/i.test(versionText)) return false;
+  // 5.7-era text is "Ver 10.13 Distrib 5.7.44"; 8.x is "Ver 8.0.40"
+  const m = /Distrib\s+(\d+)\.(\d+)\.(\d+)/.exec(versionText) ?? /Ver\s+(\d+)\.(\d+)\.(\d+)/.exec(versionText);
+  if (!m) return false;
+  const [major, minor, patch] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  return major > 8 || (major === 8 && (minor > 0 || patch >= 18));
+}
+
+/**
+ * Protocol-compression flags for a mysql / mysqldump / mariadb-dump client.
+ * The data travels compressed between server and client and is decompressed
+ * on arrival (lossless: the dump is byte-identical); it helps most over slow
+ * or remote links.
+ *
+ * `serverAlgorithms` is the server's @@protocol_compression_algorithms (null
+ * when unknown, e.g. MariaDB or MySQL < 8.0.18 servers, which only do zlib).
+ *
+ * - MariaDB and older Oracle clients: `--compress` (zlib).
+ * - Oracle 8.0.18+ client: zstd when the server allows it, else zlib. zstd is
+ *   asked for ALONE because MySQL picks zlib whenever both are allowed, and
+ *   zstd costs the database server far less CPU (measured: +0.6 s vs +2.9 s of
+ *   server CPU to dump 230 MB) while sending ~30% less data. "uncompressed"
+ *   keeps the connection working if the server allows no compression at all.
+ */
+export function mysqlCompressArgsFor(versionText: string, serverAlgorithms: string | null = null): string[] {
+  if (!mysqlClientHasCompressionAlgorithms(versionText)) return ['--compress'];
+  return /\bzstd\b/i.test(serverAlgorithms ?? '')
+    ? ['--compression-algorithms=zstd,uncompressed']
+    : ['--compression-algorithms=zlib,uncompressed'];
+}
+
 // ── psql
 
 /** First minor release of each major with psql \restrict (CVE-2025-8714). Every 18.x has it. */

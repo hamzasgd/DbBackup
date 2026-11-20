@@ -113,6 +113,7 @@ export class MongoEngine extends CliEngine {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const { fileName, filePath } = buildBackupPath(outputDir, 'mongodb', this.config.database, timestamp, '.archive.gz');
+      options.onOutputPath?.(filePath);
       options.onProgress?.(5);
 
       const stopWatch = watchOutputSize(filePath, options.onBytes);
@@ -210,6 +211,7 @@ export class RedisEngine extends CliEngine {
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
       const { fileName, filePath } = buildBackupPath(outputDir, 'redis', this.config.database, timestamp, '.rdb');
+      options.onOutputPath?.(filePath);
       options.onProgress?.(10);
 
       // redis-cli --rdb streams a BGSAVE snapshot to the given file
