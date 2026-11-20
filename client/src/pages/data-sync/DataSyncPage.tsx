@@ -161,7 +161,9 @@ function RunCard({ run, serverTime, onSyncThese, onStop }: {
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.inserted ? n(r.inserted) : '–'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.updated ? n(r.updated) : '–'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.deleted ? n(r.deleted) : '–'}</td>
-                      <td className="py-1.5 text-gray-500">{r.reason ?? r.warning ?? ''}</td>
+                      <td className="py-1.5 text-gray-500">
+                        {[r.targetTable && `named ${r.targetTable} on the target`, r.reason, r.warning].filter(Boolean).join(' · ')}
+                      </td>
                     </tr>
                   ))}
                   {shown.length === 0 && (

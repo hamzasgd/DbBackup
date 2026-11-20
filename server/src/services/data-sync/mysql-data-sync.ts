@@ -30,6 +30,8 @@ export type TableStatus =
 
 export interface TableReport {
   table: string;
+  /** The table's name on the target when it differs in case (e.g. "appsettings" for "AppSettings") */
+  targetTable?: string;
   status: TableStatus;
   /** Rows in the source table (counted while comparing) */
   rows: number;
@@ -175,16 +177,28 @@ async function tableMeta(c: mysql2.Connection, table: string): Promise<TableMeta
   };
 }
 
-/** Why the two tables can't be compared row by row, or null when they can. */
+/**
+ * The target table for a source table: the same name, or else the one table
+ * whose name differs only in case. A server with lower_case_table_names=1
+ * (aaPanel's default, and Windows) stores "AppSettings" as "appsettings";
+ * RDS and most Linux servers keep the case.
+ */
+export function matchTargetTable(source: string, targetNames: string[]): string | null {
+  if (targetNames.includes(source)) return source;
+  const same = targetNames.filter((t) => t.toLowerCase() === source.toLowerCase());
+  return same.length === 1 ? same[0] : null;
+}
+
+/** Why the two tables can't be compared row by row, or null when they can. Column names are case-insensitive in MySQL. */
 export function schemaMismatch(src: TableMeta, dst: TableMeta): string | null {
-  const a = src.columns.map((c) => `${c.name} ${c.columnType}${c.nullable ? '' : ' NOT NULL'}`);
-  const b = dst.columns.map((c) => `${c.name} ${c.columnType}${c.nullable ? '' : ' NOT NULL'}`);
+  const a = src.columns.map((c) => `${c.name.toLowerCase()} ${c.columnType}${c.nullable ? '' : ' NOT NULL'}`);
+  const b = dst.columns.map((c) => `${c.name.toLowerCase()} ${c.columnType}${c.nullable ? '' : ' NOT NULL'}`);
   if (a.join('|') !== b.join('|')) {
     const onlyA = a.filter((x) => !b.includes(x));
     const onlyB = b.filter((x) => !a.includes(x));
     return `columns differ (source: ${onlyA.join(', ') || '-'}; target: ${onlyB.join(', ') || '-'})`;
   }
-  if (src.pk.join(',') !== dst.pk.join(',')) return 'primary keys differ';
+  if (src.pk.join(',').toLowerCase() !== dst.pk.join(',').toLowerCase()) return 'primary keys differ';
   return null;
 }
 
@@ -245,7 +259,8 @@ function approxSize(v: unknown): number {
 async function applyChunk(
   src: mysql2.Connection,
   dst: mysql2.Connection,
-  table: string,
+  srcTable: string,
+  dstTable: string,
   meta: TableMeta,
   toDelete: unknown[][],
   toCopy: unknown[][],
@@ -256,17 +271,17 @@ async function applyChunk(
   try {
     for (let i = 0; i < toDelete.length; i += KEY_BATCH) {
       const w = keysIn(meta.pk, toDelete.slice(i, i + KEY_BATCH));
-      await dst.query(`DELETE FROM ${qid(table)} WHERE ${w.sql}`, w.params);
+      await dst.query(`DELETE FROM ${qid(dstTable)} WHERE ${w.sql}`, w.params);
     }
     for (let i = 0; i < toCopy.length; i += KEY_BATCH) {
       const w = keysIn(meta.pk, toCopy.slice(i, i + KEY_BATCH));
-      const data = await rows(src, `SELECT ${colList} FROM ${qid(table)} WHERE ${w.sql}`, w.params);
+      const data = await rows(src, `SELECT ${colList} FROM ${qid(srcTable)} WHERE ${w.sql}`, w.params);
       let batch: unknown[][] = [];
       let bytes = 0;
       const flush = async () => {
         if (batch.length === 0) return;
         const one = `(${insertCols.map(() => '?').join(', ')})`;
-        await dst.query(`INSERT INTO ${qid(table)} (${colList}) VALUES ${batch.map(() => one).join(', ')}`, batch.flat());
+        await dst.query(`INSERT INTO ${qid(dstTable)} (${colList}) VALUES ${batch.map(() => one).join(', ')}`, batch.flat());
         batch = [];
         bytes = 0;
       };
@@ -312,9 +327,11 @@ export async function mysqlDataSync(
     }
 
     const srcTables = await tableNames(src);
-    const dstTables = new Set(await tableNames(dst));
-    const wanted = opts.tables?.length ? new Set(opts.tables) : null;
-    const tables = srcTables.filter((t) => !wanted || wanted.has(t));
+    let dstTables = await tableNames(dst);
+    // Table names typed by the user match regardless of case
+    const wanted = opts.tables?.length ? new Set(opts.tables.map((t) => t.toLowerCase())) : null;
+    const tables = srcTables.filter((t) => !wanted || wanted.has(t.toLowerCase()));
+    const matchedTargets = new Set<string>();
     const reports: TableReport[] = [];
     let rowsChecked = 0;
     const estimates = await rows<{ t: string; r: string | number | null }>(src,
@@ -328,7 +345,12 @@ export async function mysqlDataSync(
       try {
         const srcMeta = await tableMeta(src, table);
         let dstMeta: TableMeta;
-        if (!dstTables.has(table)) {
+        let dstTable = matchTargetTable(table, dstTables);
+        if (dstTable) {
+          matchedTargets.add(dstTable);
+          if (dstTable !== table) report.targetTable = dstTable;
+        }
+        if (!dstTable) {
           if (!opts.apply) {
             report.status = 'ONLY_IN_SOURCE';
             report.rows = srcMeta.rowsEstimate;
@@ -340,11 +362,18 @@ export async function mysqlDataSync(
           }
           const [ddl] = await rows<Record<string, string>>(src, `SHOW CREATE TABLE ${qid(table)}`);
           await dst.query(ddl['Create Table']);
-          dstMeta = await tableMeta(dst, table);
+          // The target may have stored the name in lowercase
+          dstTables = await tableNames(dst);
+          dstTable = matchTargetTable(table, dstTables);
+          if (!dstTable) throw new Error('the table was created on the target but cannot be found there');
+          matchedTargets.add(dstTable);
+          if (dstTable !== table) report.targetTable = dstTable;
+          dstMeta = await tableMeta(dst, dstTable);
           report.status = 'CREATED';
         } else {
-          dstMeta = await tableMeta(dst, table);
+          dstMeta = await tableMeta(dst, dstTable);
         }
+        const target = dstTable;
         const mismatch = schemaMismatch(srcMeta, dstMeta);
         if (mismatch) throw Object.assign(new Error(mismatch), { skip: true });
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
@@ -355,7 +384,7 @@ export async function mysqlDataSync(
         for await (const { lo, hi } of chunkBounds(src, table, srcMeta.pk, size)) {
           if (opts.shouldStop?.()) throw new DataSyncStopped();
           const where = rangeWhere(srcMeta.pk, lo, hi);
-          const [a, b] = await Promise.all([chunkChecksum(src, table, hash, where), chunkChecksum(dst, table, hash, where)]);
+          const [a, b] = await Promise.all([chunkChecksum(src, table, hash, where), chunkChecksum(dst, target, hash, where)]);
           report.chunks++;
           report.rows += a.n;
           rowsChecked += a.n;
@@ -363,7 +392,7 @@ export async function mysqlDataSync(
           if (a.sum === b.sum) continue;
 
           report.chunksDifferent++;
-          const [sm, dm] = await Promise.all([rowHashes(src, table, srcMeta.pk, hash, where), rowHashes(dst, table, srcMeta.pk, hash, where)]);
+          const [sm, dm] = await Promise.all([rowHashes(src, table, srcMeta.pk, hash, where), rowHashes(dst, target, srcMeta.pk, hash, where)]);
           const toCopy: unknown[][] = [];
           const toDelete: unknown[][] = [];
           for (const [k, s] of sm) {
@@ -374,7 +403,7 @@ export async function mysqlDataSync(
           for (const [k, d] of dm) if (!sm.has(k)) { report.deleted++; toDelete.push(d.key); }
           if (!opts.apply) continue;
           try {
-            await applyChunk(src, dst, table, srcMeta, toDelete, toCopy);
+            await applyChunk(src, dst, table, target, srcMeta, toDelete, toCopy);
           } catch (err) {
             // A unique value that moved to a row in a later chunk: retry once the rest is done
             if (!isDuplicateKey(err)) throw err;
@@ -386,7 +415,7 @@ export async function mysqlDataSync(
           // collides with the other row's old value, so apply all of them in one transaction,
           // every delete first. Every other chunk of the table is already right by now.
           await applyChunk(
-            src, dst, table, srcMeta,
+            src, dst, table, target, srcMeta,
             deferred.flatMap((d) => d.toDelete),
             deferred.flatMap((d) => d.toCopy),
           );
@@ -404,7 +433,8 @@ export async function mysqlDataSync(
     }
 
     for (const t of dstTables) {
-      if (!srcTables.includes(t) && (!wanted || wanted.has(t))) {
+      const inSource = srcTables.some((x) => matchTargetTable(x, dstTables) === t);
+      if (!matchedTargets.has(t) && !inSource && (!wanted || wanted.has(t.toLowerCase()))) {
         const r: TableReport = { table: t, status: 'ONLY_IN_TARGET', rows: 0, inserted: 0, updated: 0, deleted: 0, chunks: 0, chunksDifferent: 0, reason: 'not in the source; left as it is' };
         reports.push(r);
         opts.onTable?.(r);
