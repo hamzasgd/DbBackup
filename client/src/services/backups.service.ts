@@ -63,8 +63,57 @@ export const backupsApi = {
   downloadUrl: (id: string) => `/api/backups/${id}/download`,
 }
 
+export type RestoreStage = 'PREPARING' | 'DOWNLOADING' | 'DECRYPTING' | 'RESTORING'
+export type RestoreStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED'
+
+/** One restore, with live progress while it runs (bytes of the backup file read in the current stage). */
+export interface RestoreRecord {
+  id: string
+  backupId: string | null
+  backupLabel: string
+  backupCreatedAt: string | null
+  backupSourceName: string | null
+  targetConnectionId: string | null
+  targetName: string
+  targetDatabase: string
+  overwritesSource: boolean
+  status: RestoreStatus
+  stage: RestoreStage | null
+  bytesRead: number
+  totalBytes: number | null
+  stageStartedAt: string | null
+  progressAt: string | null
+  error: string | null
+  startedAt: string | null
+  completedAt: string | null
+  createdAt: string
+}
+
+/** What a restore would do, checked before it starts. */
+export interface RestoreCheck {
+  backup: {
+    id: string
+    dbName: string
+    dbType: string
+    label: string
+    createdAt: string
+    fileSize: string
+    sourceConnectionId: string | null
+    sourceName: string | null
+  }
+  target: { connectionId: string; name: string; type: string; database: string }
+  overwritesSource: boolean
+  overwritesSourceReason: 'same-connection' | 'same-address' | null
+  incompatible: string | null
+  busy: { restoreId: string; status: string } | null
+}
+
 export const restoreApi = {
-  // Returns 202 with a jobId — track progress via SSE at /restore/:jobId/progress
-  restore: (data: { backupId: string; targetConnectionId?: string; targetDatabase?: string }) =>
+  // Returns 202 with a jobId (the restore's id) — progress via list() or SSE at /restore/:jobId/progress
+  restore: (data: { backupId: string; targetConnectionId?: string; targetDatabase?: string; confirmOverwrite?: string }) =>
     api.post<{ success: boolean; data: { jobId: string }; message: string }>('/restore', data),
+  check: (params: { backupId: string; targetConnectionId: string }) =>
+    api.get<{ success: boolean; data: RestoreCheck }>('/restore/check', { params }),
+  list: (limit = 10) =>
+    api.get<{ success: boolean; data: { restores: RestoreRecord[]; serverTime: string } }>('/restore', { params: { limit } }),
 }

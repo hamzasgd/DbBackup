@@ -54,11 +54,24 @@ export function statusBadgeColor(status: string): string {
   return map[status] ?? 'bg-gray-100 text-gray-700'
 }
 
-/** Message from an API error response (`{ message }`), or `fallback` when there isn't one. */
+/**
+ * Message from an API error response, or `fallback` when there isn't one.
+ * Handles both `{ message }` and the error handler's `{ error: { code, message } }`.
+ */
 export function getApiErrorMessage(error: unknown, fallback: string): string {
   if (axios.isAxiosError(error)) {
-    const message = (error.response?.data as { message?: unknown } | undefined)?.message
+    const data = error.response?.data as { message?: unknown; error?: { message?: unknown } } | undefined
+    const message = data?.error?.message ?? data?.message
     if (typeof message === 'string' && message) return message
   }
   return fallback
+}
+
+/** "45s", "3m 20s", "2h 5m" */
+export function formatDuration(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000))
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  if (m < 60) return `${m}m ${s % 60}s`
+  return `${Math.floor(m / 60)}h ${m % 60}m`
 }

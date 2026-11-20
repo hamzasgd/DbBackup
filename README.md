@@ -60,6 +60,7 @@
 - **Multi-Engine Support** — MySQL, MariaDB, and PostgreSQL via native CLI tools (`mysqldump`, `mariadb-dump`, `pg_dump`, `pg_restore`)
 - **MongoDB & Redis** — MongoDB backup and restore (`mongodump` / `mongorestore`); Redis RDB snapshot backups (`redis-cli --rdb`). Redis restore is manual (it needs a server restart), and migration, sync and export cover the SQL engines only
 - **Backup & Restore** — Multiple output formats: compressed SQL, plain SQL, custom (`.dump`), directory, and tar
+- **Safe restores** — A Restores panel shows every restore with its step (download, decrypt, restore), how much of the backup has been read, speed and time left, and how it ended (with the error). Restoring into the database a backup was taken from (the same connection, or another connection to the same host and database) needs the database name typed back; a second restore into a database that is already being restored is refused; a restore cut off by an app restart is marked failed instead of silently re-run
 - **Scheduled Backups** — Cron-based automation (hourly, daily, weekly, monthly, or custom cron expressions)
 - **Cross-Engine Migration** — Migrate data between databases of different types (e.g., MySQL → PostgreSQL)
 - **Data Export** — Export individual tables as JSON, CSV, or SQL

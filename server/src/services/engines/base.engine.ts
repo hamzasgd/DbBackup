@@ -46,6 +46,11 @@ export interface BackupOptions {
   onOutputPath?: (filePath: string) => void;
 }
 
+export interface RestoreOptions {
+  /** How much of the backup file has been read so far (bytes), reported while the restore runs. */
+  onBytes?: (bytes: number) => void;
+}
+
 export interface TestConnectionResult {
   success: boolean;
   version?: string;
@@ -126,7 +131,7 @@ export abstract class BaseEngine {
 
   abstract testConnection(): Promise<TestConnectionResult>;
   abstract backup(outputPath: string, options?: BackupOptions): Promise<BackupResult>;
-  abstract restore(backupFilePath: string, targetDatabase?: string): Promise<void>;
+  abstract restore(backupFilePath: string, targetDatabase?: string, options?: RestoreOptions): Promise<void>;
   abstract listDatabases(): Promise<string[]>;
   abstract getDbInfo(): Promise<DbInfo>;
 

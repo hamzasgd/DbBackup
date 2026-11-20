@@ -9,6 +9,8 @@ const integrationTests = [
   'src/services/quota.service.test.ts',
   'src/services/backup-progress.service.test.ts',
   'src/services/backup-recovery.service.test.ts',
+  'src/services/restore-safety.service.test.ts',
+  'src/services/restore-progress.service.test.ts',
   'src/controllers/connection-limit.test.ts',
   'src/controllers/retention-limit.test.ts',
   'src/services/sync/sync-engine.service.test.ts',

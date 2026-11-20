@@ -25,7 +25,8 @@ export function liveProgress(b: Backup, sse: ProgressEvent | null): LiveProgress
   }
   if (!sse?.at || (fromRow.progressAt && Date.parse(sse.at) < Date.parse(fromRow.progressAt))) return fromRow
   return {
-    stage: sse.stage ?? fromRow.stage,
+    // Backup SSE only ever carries backup stages
+    stage: (sse.stage as BackupStage | undefined) ?? fromRow.stage,
     progress: sse.progress ?? fromRow.progress,
     bytesWritten: sse.bytesWritten ?? fromRow.bytesWritten,
     expectedBytes: sse.expectedBytes ?? fromRow.expectedBytes,

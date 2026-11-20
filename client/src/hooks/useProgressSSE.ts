@@ -11,10 +11,14 @@ export interface ProgressEvent {
   rowsMigrated?: number
   verified?: boolean
   // Backup live progress
-  stage?: 'DUMPING' | 'VERIFYING' | 'ENCRYPTING' | 'UPLOADING'
+  stage?: 'DUMPING' | 'VERIFYING' | 'ENCRYPTING' | 'UPLOADING' | 'PREPARING' | 'DOWNLOADING' | 'DECRYPTING' | 'RESTORING'
   bytesWritten?: number
   expectedBytes?: number | null
   bytesChangedAt?: string
+  // Restore live progress
+  bytesRead?: number
+  totalBytes?: number | null
+  stageStartedAt?: string
   /** Server time the event was sent */
   at?: string
 }
