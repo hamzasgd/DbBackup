@@ -7,7 +7,8 @@ import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
 import { watchOutputSize } from './output-watcher';
-import { cliEnv, mysqlRestoreGuardArgs } from './cli-safety';
+import { cliEnv, mysqlRestoreGuardArgs, mysqlCompressArgsFor, mysqlClientHasCompressionAlgorithms, toolVersionText } from './cli-safety';
+import { logger } from '../../config/logger';
 
 export class MySQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
@@ -24,6 +25,34 @@ export class MySQLEngine extends BaseEngine {
       `-u${this.config.username}`,
       ...mysqlCliTlsArgs(this.config, bin, !!this.config.sshEnabled, files),
     ];
+  }
+
+  /**
+   * Protocol-compression flags for `bin` when the connection has
+   * compressTraffic on. A modern Oracle client first asks the server which
+   * algorithms it allows (one short query), so zstd is used where possible.
+   */
+  private async compressArgs(bin: string, files: TlsFiles): Promise<string[]> {
+    if (!this.config.compressTraffic) return [];
+    const version = toolVersionText(bin);
+    let serverAlgorithms: string | null = null;
+    if (mysqlClientHasCompressionAlgorithms(version)) {
+      serverAlgorithms = await this.queryVariable(files, 'SELECT @@protocol_compression_algorithms').catch(() => null);
+    }
+    const args = mysqlCompressArgsFor(version, serverAlgorithms);
+    logger.info(`${bin}: traffic compression on (${args.join(' ')})`);
+    return args;
+  }
+
+  /** One-value query through the mysql CLI; rejects when the server doesn't know it. */
+  private queryVariable(files: TlsFiles, sql: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const proc = spawn('mysql', [...this.getArgs('mysql', files), '--connect-timeout=15', '-Nse', sql], { env: this.getEnv() });
+      let out = '';
+      proc.stdout.on('data', (d: Buffer) => { out += d.toString(); });
+      proc.on('error', reject);
+      proc.on('close', (code) => (code === 0 ? resolve(out.trim()) : reject(new Error(`exit ${code}`))));
+    });
   }
 
   /** Minimal environment (none of the app's secrets) plus the password, which stays off argv. */
@@ -98,8 +127,10 @@ export class MySQLEngine extends BaseEngine {
 
       const dumpCmd = this.config.type === 'MARIADB' ? 'mariadb-dump' : 'mysqldump';
       const stopWatch = watchOutputSize(filePath, options.onBytes);
+      const compress = await this.compressArgs(dumpCmd, files);
       await dumpToFile(dumpCmd, [
         ...this.getArgs(dumpCmd, files),
+        ...compress,
         '--single-transaction',
         '--routines',
         '--triggers',
@@ -133,10 +164,11 @@ export class MySQLEngine extends BaseEngine {
 
       const dbName = targetDatabase || this.config.database;
       const isGzip = backupFilePath.endsWith('.gz');
+      const compress = await this.compressArgs('mysql', files);
 
       await new Promise<void>((resolve, reject) => {
         // The dump is only SQL to execute: client commands in it (\! shell, source, tee, connect) are refused
-        const mysqlArgs = [...this.getArgs('mysql', files), ...mysqlRestoreGuardArgs('mysql'), '--', dbName];
+        const mysqlArgs = [...this.getArgs('mysql', files), ...compress, ...mysqlRestoreGuardArgs('mysql'), '--', dbName];
         const mysql = spawn('mysql', mysqlArgs, { env: this.getEnv() });
 
         let error = '';

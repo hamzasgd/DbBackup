@@ -23,6 +23,7 @@ export interface StoredConnection {
   sshPrivateKeyPath: string | null;
   sshPassphrase: string | null;
   sshHostKey?: string | null;
+  compressTraffic?: boolean | null;
 }
 
 /**
@@ -76,5 +77,6 @@ function buildConfig(conn: StoredConnection): ConnectionConfig {
     sshPrivateKeyPath: conn.sshPrivateKeyPath ?? undefined,
     sshPassphrase: decryptIfPresent(conn.sshPassphrase) || undefined,
     sshHostKey: conn.sshHostKey ?? undefined,
+    compressTraffic: !!conn.compressTraffic,
   };
 }
