@@ -174,6 +174,7 @@ export async function importBundle(userId: string, data: Buffer, passphrase: str
         connectionTimeout: optInt(conn.connectionTimeout) ?? 30000,
         heartbeatEnabled: Boolean(conn.heartbeatEnabled),
         compressTraffic: Boolean(conn.compressTraffic),
+        writeProtected: Boolean(conn.writeProtected),
         expectedBackupHours: optInt(conn.expectedBackupHours),
         ...optional,
       },

@@ -1,4 +1,5 @@
 import { Queue, Worker, Job } from 'bullmq';
+import { assertWritable } from '../services/write-protection';
 import { getRedisConfig } from '../config/redis';
 import { prisma } from '../config/database';
 import { logger } from '../config/logger';
@@ -78,6 +79,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
           prisma.connection.findFirst({ where: { id: run.targetConnectionId ?? '', userId } }),
         ]);
         if (!source || !target) throw new Error('The source or target connection was deleted');
+        if (run.mode === 'APPLY') assertWritable(target, 'sync changes into it (Compare still works)');
 
         logger.info(`Data sync ${runId} (${run.mode}): ${run.sourceName} → ${run.targetName}`);
         const reports = await mysqlDataSync(toEngineConfig(source), toEngineConfig(target), {

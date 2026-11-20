@@ -20,6 +20,8 @@ export interface Connection {
   sshHostKey?: string | null
   heartbeatEnabled?: boolean
   compressTraffic?: boolean
+  /** DbBackup never writes to this database and the connection can't be deleted */
+  writeProtected?: boolean
   expectedBackupHours?: number | null
   latestHeartbeat?: { status: string; latencyMs: number | null; checkedAt: string } | null
   sshHost?: string

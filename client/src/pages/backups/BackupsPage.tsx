@@ -332,7 +332,8 @@ export default function BackupsPage() {
     (c) => !selectedBackupObj || sameFamily(c.type) === sameFamily(selectedBackupObj.dbType),
   )
   const confirmMatches = !!check && confirmText === check.target.database
-  const canRestore = !!check && !check.incompatible && !check.busy && (!check.overwritesSource || confirmMatches) && !restoreCheck.isFetching
+  const canRestore = !!check && !check.incompatible && !check.busy && !check.target.writeProtected
+    && (!check.overwritesSource || confirmMatches) && !restoreCheck.isFetching
   const queuedRestore = restoreJobId ? restores.find((r) => r.id === restoreJobId) : undefined
   const restoreTargetObj = connections.find((c) => c.id === restoreTargetConn)
   const openRestore = (b: Backup) => {
@@ -606,7 +607,7 @@ export default function BackupsPage() {
                 options={[
                   { label: 'Choose a database…', value: '' },
                   ...restoreTargets.map((c) => ({
-                    label: `${c.name} (${dbTypeLabel(c.type)})${c.id === selectedBackupObj?.connectionId ? ' — where this backup came from' : ''}`,
+                    label: `${c.name} (${dbTypeLabel(c.type)})${c.id === selectedBackupObj?.connectionId ? ' — where this backup came from' : ''}${c.writeProtected ? ' — write-protected' : ''}`,
                     value: c.id,
                   })),
                 ]}
@@ -627,14 +628,20 @@ export default function BackupsPage() {
               {check?.incompatible && (
                 <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{check.incompatible}</div>
               )}
-              {check && !check.incompatible && check.busy && (
+              {check && !check.incompatible && check.target.writeProtected && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900">
+                  <b>{check.target.name}</b> is write-protected, so nothing can be restored into it. Choose another
+                  database, or turn write protection off in the connection's settings if you really mean to.
+                </div>
+              )}
+              {check && !check.incompatible && !check.target.writeProtected && check.busy && (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
                   A restore into {check.target.name} (database {check.target.database}) is already {check.busy.status === 'RUNNING' ? 'running' : 'queued'}.
                   Wait for it to finish before starting another one.
                 </div>
               )}
 
-              {check && !check.incompatible && check.overwritesSource && (
+              {check && !check.incompatible && !check.target.writeProtected && check.overwritesSource && (
                 <div className="bg-red-50 border-2 border-red-300 rounded-lg p-3 space-y-2 text-sm text-red-800">
                   <p className="flex items-center gap-1.5 font-semibold text-red-700">
                     <AlertTriangle className="h-4 w-4 shrink-0" />This is the live database the backup came from
@@ -657,7 +664,7 @@ export default function BackupsPage() {
                 </div>
               )}
 
-              {check && !check.incompatible && !check.overwritesSource && !check.busy && (
+              {check && !check.incompatible && !check.target.writeProtected && !check.overwritesSource && !check.busy && (
                 <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
                   Restores into <b>{check.target.name}</b>, database <b>{check.target.database}</b>. Tables in this backup replace the
                   tables with the same names there; other tables are left as they are.

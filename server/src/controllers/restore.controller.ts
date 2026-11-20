@@ -1,4 +1,5 @@
 import { Response, NextFunction } from 'express';
+import { assertWritable } from '../services/write-protection';
 import { z } from 'zod';
 import { prisma } from '../config/database';
 import { AppError } from '../middleware/errorHandler';
@@ -53,6 +54,7 @@ export async function restoreBackup(req: AuthRequest, res: Response, next: NextF
 
     const check = await checkRestoreTarget(userId, backupId, targetConnectionId, targetDatabase);
     if (check.incompatible) throw new AppError(check.incompatible, 400, 'INCOMPATIBLE_TARGET');
+    assertWritable({ name: check.target.name, writeProtected: check.target.writeProtected }, 'restore into it');
     const resolvedStrategy = resolveToolStrategy(strategy, {
       name: check.target.name, type: check.target.type, sshEnabled: check.target.sshEnabled,
     });
