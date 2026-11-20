@@ -81,12 +81,19 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
         if (!source || !target) throw new Error('The source or target connection was deleted');
         if (run.mode === 'APPLY') assertWritable(target, 'sync changes into it (Compare still works)');
 
-        logger.info(`Data sync ${runId} (${run.mode}): ${run.sourceName} → ${run.targetName}`);
+        logger.info(`Data sync ${runId} (${run.mode}, ${run.parallel} at a time): ${run.sourceName} → ${run.targetName}`);
         const reports = await mysqlDataSync(toEngineConfig(source), toEngineConfig(target), {
           apply: run.mode === 'APPLY',
           tables: run.tables,
+          parallel: run.parallel,
           onProgress: (p) => { progress = p; },
-          onTable: (r) => { results.push(r); },
+          onTable: (r) => {
+            results.push(r);
+            if ((r.ms ?? 0) >= 10_000) {
+              const secs = (r.ms ?? 0) / 1000;
+              logger.info(`Data sync ${runId}: ${r.table} ${r.rows.toLocaleString()} rows in ${secs.toFixed(0)}s (${Math.round(r.rows / secs).toLocaleString()} rows/s)`);
+            }
+          },
           shouldStop: () => cancel,
         });
         await stopTimer();
@@ -96,6 +103,8 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
             status: 'COMPLETED', completedAt: new Date(), progressAt: new Date(), currentTable: null,
             tablesDone: reports.length, results: reports as never,
             rowsChecked: BigInt((progress as DataSyncProgress | null)?.rowsChecked ?? 0),
+            // Every row is counted by now
+            rowsEstimate: BigInt((progress as DataSyncProgress | null)?.rowsChecked ?? 0),
           },
         });
         logger.info(`Data sync ${runId} finished: ${summary(reports)}`);

@@ -84,6 +84,8 @@ export const dataSyncSchema = z.object({
   mode: z.enum(['COMPARE', 'APPLY']),
   tables: z.array(z.string().min(1).max(64)).max(1000).optional(),
   confirmTarget: z.string().max(255).optional(),
+  /** Chunks checked at the same time (more is faster but loads both servers more) */
+  parallel: z.number().int().min(1).max(8).optional(),
 });
 
 // Schedule schemas

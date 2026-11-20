@@ -102,6 +102,18 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(await checksums(dst, ['members', 'pairs'])).toEqual(before);
   });
 
+  it('gives the same answer one chunk at a time and many at once, with multi-column keys split into chunks', async () => {
+    const one = byTable(await mysqlDataSync(cfg(src), cfg(dst), { apply: false, chunkSize: 100, parallel: 1, tables: ['members', 'pairs'] }));
+    const many = byTable(await mysqlDataSync(cfg(src), cfg(dst), { apply: false, chunkSize: 100, parallel: 8, tables: ['members', 'pairs'] }));
+    for (const r of [one, many]) {
+      expect(r.members).toMatchObject({ status: 'DIFFERENT', rows: 12_000, inserted: 3, updated: 6, deleted: 1 });
+      // 900 rows keyed by (a, b): every row lands in exactly one chunk
+      expect(r.pairs).toMatchObject({ status: 'DIFFERENT', rows: 900, inserted: 1, updated: 1, deleted: 0 });
+      expect(r.pairs.chunks).toBeGreaterThanOrEqual(9);
+    }
+    expect(many.members.chunks).toBe(one.members.chunks);
+  });
+
   it('apply copies only the differences and leaves the tables identical', async () => {
     const progress: number[] = [];
     const r = byTable(await mysqlDataSync(cfg(src), cfg(dst), {

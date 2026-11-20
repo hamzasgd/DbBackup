@@ -18,6 +18,8 @@ export interface TableReport {
   chunksDifferent: number
   reason?: string
   warning?: string
+  /** How long the table took */
+  ms?: number
 }
 
 export interface DataSyncRun {
@@ -30,6 +32,8 @@ export interface DataSyncRun {
   targetDatabase: string
   mode: DataSyncMode
   tables: string[]
+  /** Chunks checked at the same time */
+  parallel: number
   status: DataSyncStatus
   cancelRequested: boolean
   currentTable: string | null
@@ -48,7 +52,7 @@ export interface DataSyncRun {
 export const dataSyncApi = {
   list: (limit = 10) =>
     api.get<{ success: boolean; data: { runs: DataSyncRun[]; serverTime: string } }>('/data-sync', { params: { limit } }),
-  start: (data: { sourceConnectionId: string; targetConnectionId: string; mode: DataSyncMode; tables?: string[]; confirmTarget?: string }) =>
+  start: (data: { sourceConnectionId: string; targetConnectionId: string; mode: DataSyncMode; tables?: string[]; confirmTarget?: string; parallel?: number }) =>
     api.post<{ success: boolean; data: { id: string } }>('/data-sync', data),
   cancel: (id: string) => api.post(`/data-sync/${id}/cancel`),
 }

@@ -18,8 +18,8 @@ const SUPPORTED = new Set(['MYSQL', 'MARIADB']);
 export async function startDataSync(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const { sourceConnectionId, targetConnectionId, mode, tables = [], confirmTarget } = req.body as {
-      sourceConnectionId: string; targetConnectionId: string; mode: 'COMPARE' | 'APPLY'; tables?: string[]; confirmTarget?: string;
+    const { sourceConnectionId, targetConnectionId, mode, tables = [], confirmTarget, parallel = 4 } = req.body as {
+      sourceConnectionId: string; targetConnectionId: string; mode: 'COMPARE' | 'APPLY'; tables?: string[]; confirmTarget?: string; parallel?: number;
     };
     const [source, target] = await Promise.all([
       prisma.connection.findFirst({ where: { id: sourceConnectionId, userId } }),
@@ -51,7 +51,7 @@ export async function startDataSync(req: AuthRequest, res: Response, next: NextF
       data: {
         userId, sourceConnectionId: source.id, targetConnectionId: target.id,
         sourceName: source.name, targetName: target.name, sourceDatabase: s.database, targetDatabase: t.database,
-        mode, tables,
+        mode, tables, parallel,
       },
     });
     try {
