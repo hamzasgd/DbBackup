@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { AlertTriangle } from 'lucide-react'
 import type { Backup, BackupStage } from '../../services/backups.service'
 import type { LiveProgress } from './live-progress'
-import { formatBytes } from '../../lib/utils'
+import { formatBytes, formatDuration as fmtDuration } from '../../lib/utils'
+import { useNow } from '../../hooks/useNow'
 
 const STAGE_LABEL: Record<BackupStage, string> = {
   DUMPING: 'Dumping',
@@ -33,24 +34,6 @@ const ETA_MIN_ELAPSED_MS = 60_000
 /** The since-start average is only trusted for time left after this long:
  * the first minutes (connecting, schema, small tables) make it pessimistic. */
 const AVG_ETA_MIN_ELAPSED_MS = 3 * 60_000
-
-function fmtDuration(ms: number): string {
-  const s = Math.max(0, Math.round(ms / 1000))
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  if (m < 60) return `${m}m ${s % 60}s`
-  return `${Math.floor(m / 60)}h ${m % 60}m`
-}
-
-/** Re-render on an interval so elapsed-time text and warnings stay current. */
-function useNow(intervalMs: number): number {
-  const [now, setNow] = useState(() => Date.now())
-  useEffect(() => {
-    const t = window.setInterval(() => setNow(Date.now()), intervalMs)
-    return () => window.clearInterval(t)
-  }, [intervalMs])
-  return now
-}
 
 export function BackupLiveProgress({ backup, live, freshness }: { backup: Backup; live: LiveProgress; freshness: Freshness }) {
   const now = useNow(1000)

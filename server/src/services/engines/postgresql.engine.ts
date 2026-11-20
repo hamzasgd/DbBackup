@@ -2,13 +2,13 @@ import { spawn } from 'child_process';
 import { statSync, createReadStream, mkdirSync } from 'fs';
 import { createGunzip } from 'zlib';
 import path from 'path';
-import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, DbInfo, TableInfo, ColumnInfo } from './base.engine';
+import { BaseEngine, BackupResult, BackupOptions, RestoreOptions, TestConnectionResult, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { dumpToFile } from './dump-to-file';
 import { Pool, Client } from 'pg';
 import { TlsFiles, nodeTlsOptions, pgCliTls } from './tls';
 import { buildBackupPath } from './backup-path';
-import { watchOutputSize } from './output-watcher';
+import { watchOutputSize, countStreamBytes, watchProcessReads } from './output-watcher';
 import { cliEnv, psqlRestrictLine } from './cli-safety';
 
 export class PostgreSQLEngine extends BaseEngine {
@@ -173,8 +173,9 @@ export class PostgreSQLEngine extends BaseEngine {
     }
   }
 
-  async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
+  async restore(backupFilePath: string, targetDatabase?: string, options: RestoreOptions = {}): Promise<void> {
     let tunnel: SSHTunnel | null = null;
+    let stopReads: () => void = () => undefined;
     const files = new TlsFiles();
     try {
       if (this.config.sshEnabled) {
@@ -204,6 +205,9 @@ export class PostgreSQLEngine extends BaseEngine {
           args.push(backupFilePath);
 
           proc = spawn('pg_restore', args, { env: this.getEnv(files) });
+          // pg_restore reads the file itself: follow its read offset (a directory
+          // dump is read by several workers, so it has no single offset to follow)
+          if (!isDirectory) stopReads = watchProcessReads(proc.pid, backupFilePath, options.onBytes);
         } else {
           proc = spawn('psql', [
             ...this.getBaseArgs(files),
@@ -211,9 +215,10 @@ export class PostgreSQLEngine extends BaseEngine {
             '--no-password',
           ], { env: this.getEnv(files) });
 
-          const fileStream = backupFilePath.endsWith('.gz')
-            ? createReadStream(backupFilePath).pipe(createGunzip())
-            : createReadStream(backupFilePath);
+          const file = createReadStream(backupFilePath);
+          countStreamBytes(file, options.onBytes);
+          const fileStream = backupFilePath.endsWith('.gz') ? file.pipe(createGunzip()) : file;
+          file.on('error', reject);
 
           // Prevent EPIPE crash: if psql exits early, handle the broken stdin pipe
           proc.stdin.on('error', (err: NodeJS.ErrnoException) => {
@@ -242,6 +247,7 @@ export class PostgreSQLEngine extends BaseEngine {
         proc.on('error', reject);
       });
     } finally {
+      stopReads();
       tunnel?.close();
       files.cleanup();
     }

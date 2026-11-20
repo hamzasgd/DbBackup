@@ -1,6 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff, FlaskConical } from 'lucide-react'
+import { Plus, Trash2, Download, RotateCcw, HardDrive, RefreshCw, Filter, ShieldCheck, ShieldAlert, ShieldOff, FlaskConical, AlertTriangle, Info, Loader2 } from 'lucide-react'
 import { backupsApi, restoreApi, type BackupFormat, type Backup } from '../../services/backups.service'
 import { connectionsApi } from '../../services/connections.service'
 import { toast } from '../../store/toast.store'
@@ -10,8 +10,10 @@ import { Badge } from '../../components/ui/Badge'
 import { Modal } from '../../components/ui/Modal'
 import { Select } from '../../components/ui/Select'
 import { Input } from '../../components/ui/Input'
-import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabel } from '../../lib/utils'
-import { useProgressSSE } from '../../hooks/useProgressSSE'
+import { formatBytes, formatDate, statusBadgeColor, dbTypeBadgeColor, dbTypeLabel, getApiErrorMessage } from '../../lib/utils'
+import { useProgressSSE, type ProgressEvent } from '../../hooks/useProgressSSE'
+import { RestoresPanel, RestoreEvents, RestoreItem } from './RestoresPanel'
+import { isActiveRestore, liveRestore } from './restore-live'
 import { BackupLiveProgress, type Freshness } from './BackupLiveProgress'
 import { liveProgress } from './live-progress'
 import { ConfirmDialog } from '../../components/ui/ConfirmDialog'
@@ -249,6 +251,7 @@ export default function BackupsPage() {
   const [backupFormat, setBackupFormat] = useState<BackupFormat>('COMPRESSED_SQL')
   const [restoreTargetConn, setRestoreTargetConn] = useState('')
   const [restoreJobId, setRestoreJobId] = useState<string | null>(null)
+  const [confirmText, setConfirmText] = useState('')
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null)
   const [purgeOpen, setPurgeOpen] = useState(false)
 
@@ -281,7 +284,57 @@ export default function BackupsPage() {
     COMPLETED: allBackups.filter(b => b.status === 'COMPLETED').length,
     FAILED: allBackups.filter(b => b.status === 'FAILED').length,
   }
-  const selectedBackupObj = backups.find(b => b.id === selectedBackup)
+  const selectedBackupObj = allBackups.find(b => b.id === selectedBackup)
+
+  // Restores: recent ones with live progress (polled while any runs, plus SSE per running restore)
+  const { data: restoresData } = useQuery({
+    queryKey: ['restores'],
+    queryFn: () => restoreApi.list(10),
+    refetchInterval: (query) => ((query.state.data?.data.data.restores ?? []).some(isActiveRestore) ? 5000 : false),
+  })
+  const restoreRows = restoresData?.data.data.restores
+  const restoreServerTime = restoresData?.data.data.serverTime ?? null
+  const [restoreLive, setRestoreLive] = useState<Record<string, ProgressEvent>>({})
+  const restores = (restoreRows ?? []).map((r) => liveRestore(r, restoreLive[r.id]))
+  const onRestoreEvent = (r: { id: string }, e: ProgressEvent) => {
+    setRestoreLive((prev) => ({ ...prev, [r.id]: e }))
+    if (e.status === 'COMPLETED' || e.status === 'FAILED') qc.invalidateQueries({ queryKey: ['restores'] })
+  }
+  // One toast when a restore seen running on this page finishes
+  const seenActive = useRef(new Set<string>())
+  useEffect(() => {
+    for (const r of restoreRows ?? []) {
+      if (isActiveRestore(r)) { seenActive.current.add(r.id); continue }
+      if (!seenActive.current.delete(r.id)) continue
+      if (r.status === 'COMPLETED') toast.success(`Restore into ${r.targetName} completed`)
+      else toast.error(`Restore into ${r.targetName} failed${r.error ? `: ${r.error.slice(0, 160)}` : ''}`)
+    }
+  }, [restoreRows])
+
+  // What the chosen restore would do, checked by the server before it can start
+  const restoreCheck = useQuery({
+    queryKey: ['restore-check', selectedBackup, restoreTargetConn],
+    queryFn: () => restoreApi.check({ backupId: selectedBackup!, targetConnectionId: restoreTargetConn }),
+    enabled: restoreModal && !!selectedBackup && !!restoreTargetConn && !restoreJobId,
+    retry: false,
+    staleTime: 0,
+  })
+  const check = restoreTargetConn ? restoreCheck.data?.data.data : undefined
+  const sameFamily = (t: string) => (t === 'MARIADB' ? 'MYSQL' : t)
+  const restoreTargets = connections.filter(
+    (c) => !selectedBackupObj || sameFamily(c.type) === sameFamily(selectedBackupObj.dbType),
+  )
+  const confirmMatches = !!check && confirmText === check.target.database
+  const canRestore = !!check && !check.incompatible && !check.busy && (!check.overwritesSource || confirmMatches) && !restoreCheck.isFetching
+  const queuedRestore = restoreJobId ? restores.find((r) => r.id === restoreJobId) : undefined
+  const openRestore = (b: Backup) => {
+    setSelectedBackup(b.id)
+    setRestoreTargetConn('') // no default: the backup's own database is the dangerous choice
+    setConfirmText('')
+    setRestoreJobId(null)
+    setRestoreModal(true)
+  }
+  const closeRestore = () => { setRestoreModal(false); setRestoreJobId(null); setConfirmText('') }
 
   const triggerMutation = useMutation({
     mutationFn: () => backupsApi.trigger({
@@ -338,27 +391,20 @@ export default function BackupsPage() {
     onError: () => toast.error('Failed to run retention'),
   })
 
-  // Restore runs async in a queue — track it via SSE
-  const restoreProgress = useProgressSSE(
-    restoreJobId ? `/restore/${restoreJobId}/progress` : null,
-    restoreJobId !== null,
-    (event) => {
-      if (event.status === 'COMPLETED') {
-        toast.success('Restore completed successfully')
-        setRestoreJobId(null)
-        setRestoreModal(false)
-      } else if (event.status === 'FAILED') {
-        toast.error(`Restore failed: ${event.error ?? 'unknown error'}`)
-        setRestoreJobId(null)
-        setRestoreModal(false)
-      }
-    },
-  )
-
   const restoreMutation = useMutation({
-    mutationFn: () => restoreApi.restore({ backupId: selectedBackup!, targetConnectionId: restoreTargetConn || undefined }),
-    onSuccess: (res) => { setRestoreJobId(res.data.data.jobId) },
-    onError: () => toast.error('Failed to queue restore'),
+    mutationFn: () => restoreApi.restore({
+      backupId: selectedBackup!,
+      targetConnectionId: restoreTargetConn,
+      confirmOverwrite: check?.overwritesSource ? confirmText : undefined,
+    }),
+    onSuccess: (res) => {
+      setRestoreJobId(res.data.data.jobId)
+      qc.invalidateQueries({ queryKey: ['restores'] })
+    },
+    onError: (e: unknown) => {
+      toast.error(getApiErrorMessage(e, 'Failed to queue restore'))
+      qc.invalidateQueries({ queryKey: ['restore-check'] })
+    },
   })
 
   return (
@@ -383,6 +429,10 @@ export default function BackupsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Running restores with live progress, and the latest finished ones */}
+      {restores.filter(isActiveRestore).map((r) => <RestoreEvents key={r.id} restore={r} onEvent={onRestoreEvent} />)}
+      <RestoresPanel restores={restores} serverTime={restoreServerTime} />
 
       {connections.length > 0 && (
         <div className="flex items-center gap-2">
@@ -450,7 +500,7 @@ export default function BackupsPage() {
                   <BackupRow
                     key={b.id}
                     b={b}
-                    onRestore={() => { setSelectedBackup(b.id); setRestoreTargetConn(b.connectionId ?? ''); setRestoreModal(true) }}
+                    onRestore={() => openRestore(b)}
                     onDelete={() => setDeleteTarget(b.id)}
                     onVerified={() => qc.invalidateQueries({ queryKey: ['backups'] })}
                     onDrill={() => drillMutation.mutate(b.id)}
@@ -502,46 +552,110 @@ export default function BackupsPage() {
         </div>
       </Modal>
 
-      <Modal open={restoreModal} onClose={() => setRestoreModal(false)} title="Restore Backup">
+      <Modal open={restoreModal} onClose={closeRestore} title="Restore Backup">
         <div className="space-y-4">
           {restoreJobId ? (
-            <div className="space-y-3 py-2">
-              <div className="flex items-center gap-3 text-sm text-gray-600">
-                <RotateCcw className="h-4 w-4 animate-spin" />
-                Restore in progress — you can safely close this dialog, the job keeps running.
-              </div>
-              {restoreProgress?.error && (
-                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">
-                  {restoreProgress.error}
+            <div className="space-y-3">
+              {queuedRestore ? (
+                <div className="border border-gray-200 rounded-lg px-3">
+                  <RestoreItem restore={queuedRestore} serverTime={restoreServerTime} />
                 </div>
+              ) : (
+                <p className="flex items-center gap-2 text-sm text-gray-600">
+                  <Loader2 className="h-4 w-4 animate-spin" />Restore queued…
+                </p>
               )}
+              <p className="flex items-start gap-1.5 text-xs text-gray-500">
+                <Info className="h-3.5 w-3.5 mt-px shrink-0" />
+                You can close this window. The restore keeps running on the server, and its progress stays on this page under Restores.
+              </p>
               <div className="flex justify-end">
-                <Button variant="outline" onClick={() => { setRestoreJobId(null); setRestoreModal(false) }}>Close</Button>
+                <Button variant="outline" onClick={closeRestore}>Close</Button>
               </div>
             </div>
           ) : (
             <>
-              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-3 text-sm text-yellow-800">
-                ⚠️ This will overwrite the target database. Make sure you have a backup before proceeding.
-              </div>
-              <Select
-                label="Restore to connection"
-                options={connections.map((c) => ({ label: `${c.name} (${dbTypeLabel(c.type)})`, value: c.id }))}
-                value={restoreTargetConn}
-                onChange={(e) => setRestoreTargetConn(e.target.value)}
-              />
-              {!selectedBackupObj?.connectionId && !restoreTargetConn && (
-                <p className="text-xs text-red-600">This backup's source connection was deleted — pick a target connection above to restore.</p>
+              {selectedBackupObj && (
+                <div className="text-sm">
+                  <p className="text-xs font-medium text-gray-500 mb-0.5">Backup</p>
+                  <p className="text-gray-900">
+                    <span className="font-medium">{selectedBackupObj.snapshotName || selectedBackupObj.dbName}</span>
+                    <span className="text-gray-500">
+                      {' · '}{formatDate(selectedBackupObj.createdAt)}{' · '}{formatBytes(selectedBackupObj.fileSize)}
+                      {selectedBackupObj.connection?.name && <> · from {selectedBackupObj.connection.name}</>}
+                    </span>
+                  </p>
+                </div>
               )}
+              <Select
+                label="Restore into"
+                options={[
+                  { label: 'Choose a database…', value: '' },
+                  ...restoreTargets.map((c) => ({
+                    label: `${c.name} (${dbTypeLabel(c.type)})${c.id === selectedBackupObj?.connectionId ? ' — where this backup came from' : ''}`,
+                    value: c.id,
+                  })),
+                ]}
+                value={restoreTargetConn}
+                onChange={(e) => { setRestoreTargetConn(e.target.value); setConfirmText('') }}
+              />
+
+              {restoreTargetConn && restoreCheck.isFetching && !check && (
+                <p className="flex items-center gap-2 text-xs text-gray-500"><Loader2 className="h-3.5 w-3.5 animate-spin" />Checking the target…</p>
+              )}
+              {restoreTargetConn && restoreCheck.isError && (
+                <p className="text-sm text-red-600">{getApiErrorMessage(restoreCheck.error, 'Could not check this target')}</p>
+              )}
+
+              {check?.incompatible && (
+                <div className="bg-red-50 border border-red-200 rounded-lg p-3 text-sm text-red-700">{check.incompatible}</div>
+              )}
+              {check && !check.incompatible && check.busy && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                  A restore into {check.target.name} (database {check.target.database}) is already {check.busy.status === 'RUNNING' ? 'running' : 'queued'}.
+                  Wait for it to finish before starting another one.
+                </div>
+              )}
+
+              {check && !check.incompatible && check.overwritesSource && (
+                <div className="bg-red-50 border-2 border-red-300 rounded-lg p-3 space-y-2 text-sm text-red-800">
+                  <p className="flex items-center gap-1.5 font-semibold text-red-700">
+                    <AlertTriangle className="h-4 w-4 shrink-0" />This is the live database the backup came from
+                  </p>
+                  <p>
+                    {check.overwritesSourceReason === 'same-address'
+                      ? <>“{check.target.name}” points to the same database as “{check.backup.sourceName}”, where this backup was taken.</>
+                      : <>“{check.target.name}” is the connection this backup was taken from.</>}
+                    {' '}Restoring replaces the current data in <b>{check.target.database}</b> with the data from{' '}
+                    <b>{formatDate(check.backup.createdAt)}</b>. Everything written since then is lost.
+                  </p>
+                  <p>If you want a copy to look at or test with, choose a different database instead.</p>
+                  <Input
+                    label={`Type ${check.target.database} to confirm`}
+                    value={confirmText}
+                    onChange={(e) => setConfirmText(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+
+              {check && !check.incompatible && !check.overwritesSource && !check.busy && (
+                <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-800">
+                  Restores into <b>{check.target.name}</b>, database <b>{check.target.database}</b>. Tables in this backup replace the
+                  tables with the same names there; other tables are left as they are.
+                </div>
+              )}
+
               <div className="flex gap-2 justify-end">
-                <Button variant="outline" onClick={() => setRestoreModal(false)}>Cancel</Button>
+                <Button variant="outline" onClick={closeRestore}>Cancel</Button>
                 <Button
                   variant="danger"
                   onClick={() => restoreMutation.mutate()}
                   loading={restoreMutation.isPending}
-                  disabled={!selectedBackupObj?.connectionId && !restoreTargetConn}
+                  disabled={!canRestore}
                 >
-                  <RotateCcw className="h-4 w-4" />Restore
+                  <RotateCcw className="h-4 w-4" />{check?.overwritesSource ? 'Overwrite live database' : 'Restore'}
                 </Button>
               </div>
             </>

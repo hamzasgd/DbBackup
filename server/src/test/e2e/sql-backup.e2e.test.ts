@@ -56,8 +56,13 @@ describe.skipIf(!PG)('PostgreSQL backup and restore', () => {
       const target = uniq('e2e_pg_rst');
       await pgCreateDb(target);
       try {
-        await engine.restore(result.filePath, target);
+        const read: number[] = [];
+        await engine.restore(result.filePath, target, { onBytes: (n) => read.push(n) });
         expect(await pgFingerprint(target)).toEqual(expected);
+        // Restore progress: psql formats are piped, so the count ends on the whole file;
+        // pg_restore's read offset is sampled (a fast restore may finish between samples)
+        if (format === 'PLAIN_SQL' || format === 'COMPRESSED_SQL') expect(read.at(-1)).toBe(result.fileSize);
+        for (const n of read) expect(n).toBeLessThanOrEqual(result.fileSize);
         // Objects other than tables came along too, and sequences continue after the restored ids
         await pgAdmin(target, async (c) => {
           const { rows: [v] } = await c.query('SELECT count(*)::int AS n FROM big_spenders');
@@ -144,8 +149,11 @@ describe.skipIf(!MARIADB)('MariaDB / MySQL backup and restore', () => {
       const target = uniq('e2e_my_rst');
       await engine.createDatabase(target);
       try {
-        await engine.restore(backup.filePath, target);
+        const read: number[] = [];
+        await engine.restore(backup.filePath, target, { onBytes: (n) => read.push(n) });
         expect(await myFingerprint(target)).toEqual(expected);
+        // Restore progress ends on the whole file having been read
+        expect(read.at(-1)).toBe(backup.fileSize);
         const counts = await engine.countAllTables(target);
         expect(counts.rows).toBe(BigInt(BIG * 2));
       } finally {

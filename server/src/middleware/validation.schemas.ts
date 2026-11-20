@@ -66,6 +66,8 @@ export const restoreSchema = z.object({
   backupId: z.string().uuid('Invalid backup ID'),
   targetConnectionId: z.string().uuid('Invalid connection ID').optional(),
   targetDatabase: z.string().regex(databaseNameRegex, 'Invalid database name').optional(),
+  /** Required (the target database's name) when the target is the backup's own source database */
+  confirmOverwrite: z.string().max(255).optional(),
 });
 
 // Schedule schemas

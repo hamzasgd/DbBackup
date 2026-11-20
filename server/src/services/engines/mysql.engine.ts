@@ -1,12 +1,13 @@
 import { spawn } from 'child_process';
-import { statSync } from 'fs';
-import { BaseEngine, BackupResult, BackupOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
+import { statSync, createReadStream } from 'fs';
+import { createGunzip } from 'zlib';
+import { BaseEngine, BackupResult, BackupOptions, RestoreOptions, TestConnectionResult, ConnectionConfig, DbInfo, TableInfo, ColumnInfo } from './base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { dumpToFile } from './dump-to-file';
 import mysql2 from 'mysql2/promise';
 import { TlsFiles, nodeTlsOptions, mysqlCliTlsArgs } from './tls';
 import { buildBackupPath } from './backup-path';
-import { watchOutputSize } from './output-watcher';
+import { watchOutputSize, countStreamBytes } from './output-watcher';
 import { cliEnv, mysqlRestoreGuardArgs, mysqlCompressArgsFor, mysqlClientHasCompressionAlgorithms, toolVersionText } from './cli-safety';
 import { logger } from '../../config/logger';
 
@@ -152,7 +153,7 @@ export class MySQLEngine extends BaseEngine {
     }
   }
 
-  async restore(backupFilePath: string, targetDatabase?: string): Promise<void> {
+  async restore(backupFilePath: string, targetDatabase?: string, options: RestoreOptions = {}): Promise<void> {
     let tunnel: SSHTunnel | null = null;
     const files = new TlsFiles();
     try {
@@ -199,16 +200,12 @@ export class MySQLEngine extends BaseEngine {
           }
         });
 
-        const source = isGzip
-          ? (() => {
-              const { createReadStream } = require('fs');
-              const { createGunzip } = require('zlib');
-              return createReadStream(backupFilePath).pipe(createGunzip());
-            })()
-          : (() => {
-              const { createReadStream } = require('fs');
-              return createReadStream(backupFilePath);
-            })();
+        // Bytes are counted as read from the file (compressed when .gz); mysql
+        // applies backpressure, so this tracks how far the restore really is
+        const file = createReadStream(backupFilePath);
+        countStreamBytes(file, options.onBytes);
+        file.on('error', settle);
+        const source = isGzip ? file.pipe(createGunzip()) : file;
 
         source.on('error', settle);
         source.pipe(mysql.stdin);

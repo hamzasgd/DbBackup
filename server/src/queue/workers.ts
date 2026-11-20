@@ -1,10 +1,10 @@
 import { createBackupWorker, getBackupQueue } from './backup.queue';
-import { reconcileInterruptedBackups } from '../services/backup-recovery.service';
+import { reconcileInterruptedBackups, reconcileInterruptedRestores } from '../services/backup-recovery.service';
 import { createScheduleWorker } from './schedule.queue';
 import { createMigrationWorker } from './migration.queue';
 import { createSyncWorker } from './sync';
 import { createRetentionWorker, scheduleRetentionSweep } from './retention.queue';
-import { createRestoreWorker } from './restore.queue';
+import { createRestoreWorker, getRestoreQueue } from './restore.queue';
 import { createHeartbeatWorker, scheduleHeartbeatChecks } from './heartbeat.queue';
 import { logger } from '../config/logger';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
@@ -26,6 +26,9 @@ function runBackupReconcile(): void {
   reconcileInterruptedBackups(getBackupQueue())
     .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted backup(s) as FAILED`); })
     .catch((err) => logger.warn('Backup reconcile failed:', err));
+  reconcileInterruptedRestores(getRestoreQueue())
+    .then((n) => { if (n > 0) logger.warn(`Marked ${n} interrupted restore(s) as FAILED`); })
+    .catch((err) => logger.warn('Restore reconcile failed:', err));
 }
 
 export async function startWorkers(): Promise<void> {
