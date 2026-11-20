@@ -30,6 +30,9 @@ const RATE_WINDOW_MS = 60_000
 const RATE_MIN_SPAN_MS = 20_000
 /** No time-left guess before the dump has run this long. */
 const ETA_MIN_ELAPSED_MS = 60_000
+/** The since-start average is only trusted for time left after this long:
+ * the first minutes (connecting, schema, small tables) make it pessimistic. */
+const AVG_ETA_MIN_ELAPSED_MS = 3 * 60_000
 
 function fmtDuration(ms: number): string {
   const s = Math.max(0, Math.round(ms / 1000))
@@ -97,7 +100,10 @@ export function BackupLiveProgress({ backup, live, freshness }: { backup: Backup
         ? live.bytesWritten / (measuredMs / 1000)
         : null
   const remainingBytes = hasEstimate && !overEstimate ? live.expectedBytes! - live.bytesWritten : null
-  const etaMs = rate && span >= RATE_MIN_SPAN_MS && elapsedMs !== null && elapsedMs >= ETA_MIN_ELAPSED_MS &&
+  // The recent-speed window only fills while this page is open, so a page
+  // opened mid-dump uses the since-start average until it has ~20s of samples
+  const windowed = span >= RATE_MIN_SPAN_MS
+  const etaMs = rate && elapsedMs !== null && elapsedMs >= (windowed ? ETA_MIN_ELAPSED_MS : AVG_ETA_MIN_ELAPSED_MS) &&
     remainingBytes !== null && remainingBytes > 0
     ? (remainingBytes / rate) * 1000
     : null
