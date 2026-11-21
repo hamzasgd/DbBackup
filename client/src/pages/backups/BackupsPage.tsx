@@ -266,6 +266,15 @@ export default function BackupsPage() {
   const connections = connsData?.data.data ?? []
 
   const selectedConnObj = connections.find(c => c.id === triggerConnId)
+  // A server that stores table names in lowercase makes backups with lowercase names
+  const backupCase = useQuery({
+    queryKey: ['table-case', triggerConnId],
+    queryFn: () => connectionsApi.tableCase(triggerConnId),
+    enabled: triggerModal && !!triggerConnId && (selectedConnObj?.type === 'MYSQL' || selectedConnObj?.type === 'MARIADB'),
+    retry: false,
+    staleTime: 5 * 60_000,
+  })
+  const backupCaseWarning = triggerConnId ? backupCase.data?.data.data.warning ?? null : null
   const formatOptions = selectedConnObj?.type === 'POSTGRESQL' ? PG_FORMATS : (selectedConnObj?.type === 'MONGODB' || selectedConnObj?.type === 'REDIS') ? NOSQL_FORMATS : MYSQL_FORMATS
 
   const { data, isLoading, refetch, isRefetchError, dataUpdatedAt } = useQuery({
@@ -327,6 +336,15 @@ export default function BackupsPage() {
     staleTime: 0,
   })
   const check = restoreTargetConn ? restoreCheck.data?.data.data : undefined
+  // Table names that change case on the way (lower_case_table_names): a warning only, never blocks
+  const restoreCase = useQuery({
+    queryKey: ['restore-case', selectedBackup, restoreTargetConn],
+    queryFn: () => restoreApi.caseCheck({ backupId: selectedBackup!, targetConnectionId: restoreTargetConn }),
+    enabled: restoreModal && !!selectedBackup && !!restoreTargetConn && !restoreJobId,
+    retry: false,
+    staleTime: 60_000,
+  })
+  const restoreCaseWarning = restoreTargetConn ? restoreCase.data?.data.data.warning ?? null : null
   const sameFamily = (t: string) => (t === 'MARIADB' ? 'MYSQL' : t)
   const restoreTargets = connections.filter(
     (c) => !selectedBackupObj || sameFamily(c.type) === sameFamily(selectedBackupObj.dbType),
@@ -552,6 +570,11 @@ export default function BackupsPage() {
             </select>
           </div>
           <ToolStrategyPicker value={backupStrategy} onChange={setBackupStrategy} connection={selectedConnObj} action="backup" />
+          {backupCaseWarning && (
+            <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900">
+              <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" /><p>{backupCaseWarning}</p>
+            </div>
+          )}
           <Input label="Snapshot name (optional)" placeholder="e.g. before-migration" value={snapshotName} onChange={(e) => setSnapshotName(e.target.value)} />
           <div>
             <label className="text-sm font-medium text-gray-700">Notes (optional)</label>
@@ -661,6 +684,12 @@ export default function BackupsPage() {
                     autoComplete="off"
                     spellCheck={false}
                   />
+                </div>
+              )}
+
+              {restoreCaseWarning && (
+                <div className="flex items-start gap-2 bg-amber-50 border border-amber-200 rounded-lg p-3 text-sm text-amber-900">
+                  <AlertTriangle className="h-4 w-4 mt-0.5 shrink-0" /><p>{restoreCaseWarning}</p>
                 </div>
               )}
 

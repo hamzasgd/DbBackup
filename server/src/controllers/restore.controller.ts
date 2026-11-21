@@ -8,6 +8,7 @@ import { addRestoreJob } from '../queue/restore.queue';
 import { checkRestoreTarget, type RestoreTargetCheck } from '../services/restore-safety.service';
 import { logger } from '../config/logger';
 import { resolveToolStrategy } from '../services/tool-strategy';
+import { tableCaseInfo, restoreCaseWarning, supportsTableCase, type TableCaseInfo } from '../services/table-case.service';
 
 const checkQuerySchema = z.object({
   backupId: z.string().uuid('Invalid backup ID'),
@@ -151,5 +152,41 @@ export async function listRestores(req: AuthRequest, res: Response, next: NextFu
       createdAt: r.createdAt.toISOString(),
     }));
     res.json({ success: true, data: { restores, serverTime: new Date().toISOString() } });
+  } catch (err) { next(err); }
+}
+
+const caseQuerySchema = z.object({
+  backupId: z.string().uuid('Invalid backup ID'),
+  targetConnectionId: z.string().uuid('Invalid connection ID'),
+  targetDatabase: z.string().min(1).max(255).optional(),
+});
+
+/**
+ * Whether restoring changes the case of table names: a target that stores
+ * them in lowercase, or a lowercase backup going to a server that keeps case.
+ * Connects to both servers, so the dialog asks separately from /check; when
+ * a server can't be reached it simply has no warning.
+ */
+export async function checkRestoreCase(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const parsed = caseQuerySchema.safeParse(req.query);
+    if (!parsed.success) throw new AppError(parsed.error.issues[0]?.message ?? 'Invalid request', 400, 'VALIDATION_ERROR');
+    const userId = req.user!.userId;
+    const { backupId, targetConnectionId, targetDatabase } = parsed.data;
+    const backup = await prisma.backup.findFirst({ where: { id: backupId, userId }, select: { connectionId: true, dbName: true } });
+    if (!backup) throw new AppError('Backup not found', 404, 'NOT_FOUND');
+    const [target, source] = await Promise.all([
+      prisma.connection.findFirst({ where: { id: targetConnectionId, userId } }),
+      backup.connectionId ? prisma.connection.findFirst({ where: { id: backup.connectionId, userId } }) : null,
+    ]);
+    if (!target) throw new AppError('Connection not found', 404, 'NOT_FOUND');
+    if (!supportsTableCase(target.type)) { res.json({ success: true, data: { warning: null } }); return; }
+
+    const quiet = (p: Promise<TableCaseInfo>) => p.catch((err) => { logger.debug(`Table case check: ${err instanceof Error ? err.message : err}`); return null; });
+    const [t, s] = await Promise.all([
+      quiet(tableCaseInfo(target, targetDatabase)),
+      source && supportsTableCase(source.type) ? quiet(tableCaseInfo(source, backup.dbName)) : Promise.resolve(null),
+    ]);
+    res.json({ success: true, data: { warning: t ? restoreCaseWarning(s, t) : null, target: t, source: s } });
   } catch (err) { next(err); }
 }
