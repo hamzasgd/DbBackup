@@ -89,6 +89,12 @@ export const dataSyncSchema = z.object({
   method: z.enum(['FULL', 'QUICK']).optional(),
 });
 
+export const liveSyncSchema = z.object({
+  sourceConnectionId: z.string().uuid('Invalid source connection ID'),
+  targetConnectionId: z.string().uuid('Invalid target connection ID'),
+  confirmTarget: z.string().max(255).optional(),
+});
+
 // Schedule schemas
 export const scheduleSchema = z.object({
   connectionId: z.string().uuid('Invalid connection ID'),

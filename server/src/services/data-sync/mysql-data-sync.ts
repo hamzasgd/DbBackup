@@ -100,7 +100,7 @@ export class DataSyncStopped extends Error {
 }
 
 // Exact copies: dates, big numbers, decimals and JSON as text, never re-interpreted by JavaScript
-const EXACT: Partial<mysql2.ConnectionOptions> = {
+export const EXACT: Partial<mysql2.ConnectionOptions> = {
   dateStrings: true,
   supportBigNumbers: true,
   bigNumberStrings: true,
@@ -115,7 +115,7 @@ const BINARY_TYPES = new Set([
   'geometrycollection', 'geomcollection',
 ]);
 
-interface Column {
+export interface Column {
   name: string;
   dataType: string;
   columnType: string;
@@ -123,7 +123,7 @@ interface Column {
   generated: boolean;
 }
 
-interface TableMeta {
+export interface TableMeta {
   columns: Column[];
   pk: string[];
   rowsEstimate: number;
@@ -192,14 +192,14 @@ async function rows<T = Record<string, unknown>>(c: mysql2.Connection, sql: stri
   return r as T[];
 }
 
-async function tableNames(c: mysql2.Connection): Promise<string[]> {
+export async function tableNames(c: mysql2.Connection): Promise<string[]> {
   const r = await rows<{ t: string }>(c,
     "SELECT TABLE_NAME AS t FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE' ORDER BY TABLE_NAME");
   return r.map((x) => x.t);
 }
 
 /** Columns, primary key, row estimate and triggers of every table (or one), in four queries. */
-async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string, TableMeta>> {
+export async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string, TableMeta>> {
   const one = only === undefined ? '' : ' AND TABLE_NAME = ?';
   const p = only === undefined ? [] : [only];
   const cols = await rows<{ t: string; n: string; dt: string; ct: string; nl: string; ex: string }>(c,
