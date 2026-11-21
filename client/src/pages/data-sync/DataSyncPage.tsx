@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, GitCompareArrows, Loader2, OctagonX, Radio, Search, Square, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, GitCompareArrows, Loader2, OctagonX, Radio, Search, Square, XCircle } from 'lucide-react'
 import { connectionsApi, type Connection } from '../../services/connections.service'
 import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type LiveSync, type SchemaReport, type TableReport, type TableStatus } from '../../services/data-sync.service'
 import { LiveSyncCard } from './LiveSyncCard'
@@ -129,8 +129,11 @@ function SchemaSection({ schema, compare }: { schema: SchemaReport; compare: boo
 }
 
 /** One run: progress while it works, then a per-table report. */
-function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
+function RunRow({ run, serverTime, onSyncThese, onStop, targetProtected, open, onToggle }: {
   run: DataSyncRun
+  /** Details shown */
+  open: boolean
+  onToggle: () => void
   serverTime: string | null
   /** The target connection is write-protected now: no "Sync these differences" */
   targetProtected: boolean
@@ -154,41 +157,60 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
   const silentMs = serverTime && run.progressAt && run.status === 'RUNNING' ? Date.parse(serverTime) - Date.parse(run.progressAt) : 0
   const compare = run.mode === 'COMPARE'
 
+  const summary = run.status === 'FAILED' ? null
+    : isActive(run) ? (pct !== null ? `${pct < 10 ? pct.toFixed(1) : Math.floor(pct)}%` : null)
+      : results.length === 0 ? null
+        : changes === 0 ? 'No differences'
+          : `${n(changes)} row${changes === 1 ? '' : 's'} ${compare ? (changes === 1 ? 'differs' : 'differ') : 'copied'}`
+
   return (
-    <Card>
-      <CardHeader className="items-start gap-3">
-        <div className="min-w-0">
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <span className={`text-[11px] font-semibold uppercase tracking-wide rounded px-1.5 py-0.5 ${compare ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>
-              {compare ? 'Compare' : 'Sync'}
-            </span>
-            <span className="font-medium text-gray-900">{run.sourceName}</span>
-            <span className="text-gray-400 text-xs">{run.sourceDatabase}</span>
-            <span className="text-gray-400">→</span>
-            <span className="font-medium text-gray-900">{run.targetName}</span>
-            <span className="text-gray-400 text-xs">{run.targetDatabase}</span>
+    <div className="border-b border-gray-100 last:border-0">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-expanded={open}
+        onClick={onToggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle() } }}
+        className="flex flex-wrap sm:flex-nowrap items-center gap-x-3 gap-y-1 px-4 sm:px-6 py-3 cursor-pointer hover:bg-gray-50 select-none"
+      >
+        <span className={`text-[11px] font-semibold uppercase tracking-wide rounded px-1.5 py-0.5 shrink-0 ${compare ? 'bg-blue-50 text-blue-700' : 'bg-red-50 text-red-700'}`}>
+          {compare ? 'Compare' : 'Sync'}
+        </span>
+        <div className="min-w-[12rem] sm:min-w-0 flex-1">
+          <div className="flex items-center gap-1.5 text-sm min-w-0">
+            <span className="font-medium text-gray-900 truncate">{run.sourceName}</span>
+            <span className="text-gray-400 shrink-0">→</span>
+            <span className="font-medium text-gray-900 truncate">{run.targetName}</span>
           </div>
-          <p className="text-xs text-gray-400 mt-1">
+          <p className="text-xs text-gray-400 truncate">
             {formatDate(run.startedAt ?? run.createdAt)}
             {elapsed !== null && <> · {isActive(run) ? 'running' : 'took'} {formatDuration(elapsed)}</>}
-            {run.liveSyncId && <> · catch-up for Live sync</>}
-            {run.method === 'QUICK' && <> · quick: changes since {run.since ? formatDate(run.since) : 'the last sync'}</>}
-            {run.parallel > 1 && <> · {run.parallel} chunks at a time</>}
-            {run.tables.length > 0 && <> · tables: {run.tables.join(', ')}</>}
+            {run.liveSyncId ? <> · Live sync catch-up</> : run.method === 'QUICK' ? <> · Quick</> : <> · Full</>}
+            {run.tables.length > 0 && <> · {run.tables.length} table{run.tables.length === 1 ? '' : 's'}</>}
           </p>
         </div>
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-3 shrink-0 ml-auto">
+          {summary && <span className={`text-xs tabular-nums ${problems.length ? 'text-red-600' : 'text-gray-600'}`}>{summary}{problems.length > 0 && !isActive(run) ? ` · ${problems.length} table${problems.length === 1 ? '' : 's'} failed` : ''}</span>}
           {run.status === 'COMPLETED' && <span className="inline-flex items-center gap-1 text-xs font-medium text-green-700"><CheckCircle2 className="h-4 w-4" />Done</span>}
           {run.status === 'FAILED' && <span className="inline-flex items-center gap-1 text-xs font-medium text-red-700"><XCircle className="h-4 w-4" />Failed</span>}
           {run.status === 'CANCELLED' && <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-500"><OctagonX className="h-4 w-4" />Stopped</span>}
+          {run.status === 'PENDING' && <span className="inline-flex items-center gap-1 text-xs font-medium text-gray-500"><Loader2 className="h-4 w-4 animate-spin" />Queued</span>}
           {isActive(run) && (
-            <Button size="sm" variant="outline" onClick={() => onStop(run)} disabled={run.cancelRequested}>
+            <Button size="sm" variant="outline" onClick={(e) => { e.stopPropagation(); onStop(run) }} disabled={run.cancelRequested}>
               <Square className="h-3.5 w-3.5" />{run.cancelRequested ? 'Stopping…' : 'Stop'}
             </Button>
           )}
+          <ChevronDown className={`h-4 w-4 text-gray-400 transition-transform ${open ? 'rotate-180' : ''}`} />
         </div>
-      </CardHeader>
-      <CardContent className="space-y-3">
+      </div>
+      {open && (
+      <div className="px-4 sm:px-6 pb-4 pt-1 space-y-3">
+        <p className="text-xs text-gray-400">
+          {run.sourceDatabase} → {run.targetDatabase}
+          {run.method === 'QUICK' && <> · quick: changes since {run.since ? formatDate(run.since) : 'the last sync'}</>}
+          {run.parallel > 1 && <> · {run.parallel} chunks at a time</>}
+          {run.tables.length > 0 && <> · tables: {run.tables.join(', ')}</>}
+        </p>
         {run.status === 'PENDING' && <p className="text-sm text-gray-500">Queued — waits for any other compare or sync to finish…</p>}
         {run.status === 'RUNNING' && (
           <div className="space-y-1">
@@ -291,8 +313,9 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
             </Button>
           </div>
         )}
-      </CardContent>
-    </Card>
+      </div>
+      )}
+    </div>
   )
 }
 
@@ -307,6 +330,9 @@ export default function DataSyncPage() {
   const [confirmText, setConfirmText] = useState('')
   const [liveConfirm, setLiveConfirm] = useState<{ source: Connection; target: Connection } | null>(null)
   const [liveConfirmText, setLiveConfirmText] = useState('')
+  const [runLimit, setRunLimit] = useState(10)
+  /** Runs opened or closed by the user; others: open while running */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
   const connections = (connsData?.data.data ?? []).filter((c) => SUPPORTED.has(c.type))
@@ -325,8 +351,9 @@ export default function DataSyncPage() {
   const liveSettling = lives.some((l) => l.enabled && l.status !== 'RUNNING')
 
   const { data: runsData } = useQuery({
-    queryKey: ['data-sync'],
-    queryFn: () => dataSyncApi.list(10),
+    queryKey: ['data-sync', runLimit],
+    queryFn: () => dataSyncApi.list(runLimit),
+    placeholderData: (prev) => prev,
     refetchInterval: (q) => ((q.state.data?.data.data.runs ?? []).some(isActive) || liveSettling ? 3000 : false),
   })
   const runs = runsData?.data.data.runs ?? []
@@ -480,10 +507,13 @@ export default function DataSyncPage() {
       {runs.length > 0 && (
         <div className="space-y-4">
           <h2 className="text-sm font-semibold text-gray-700">Recent runs</h2>
+          <Card className="overflow-hidden">
           {runs.map((r) => (
-            <RunCard
+            <RunRow
               key={r.id}
               run={r}
+              open={expanded[r.id] ?? isActive(r)}
+              onToggle={() => setExpanded((x) => ({ ...x, [r.id]: !(x[r.id] ?? isActive(r)) }))}
               serverTime={serverTime}
               targetProtected={!!connections.find((c) => c.id === r.targetConnectionId)?.writeProtected}
               onStop={(run) => stop.mutate(run)}
@@ -498,6 +528,12 @@ export default function DataSyncPage() {
               }}
             />
           ))}
+          </Card>
+          {runs.length >= runLimit && runLimit < 50 && (
+            <div className="flex justify-center">
+              <Button size="sm" variant="ghost" onClick={() => setRunLimit((l) => Math.min(50, l + 10))}>Show older runs</Button>
+            </div>
+          )}
         </div>
       )}
 

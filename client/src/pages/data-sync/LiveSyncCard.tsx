@@ -93,9 +93,12 @@ export function LiveSyncCard({ live, serverTime, onStop, onStart, onRemove, busy
             <span>
               {caughtUp
                 ? <b className="font-medium text-green-700">Up to date</b>
-                : behindBytes !== null
-                  ? <>Behind: <b className="font-medium">{formatBytes(behindBytes)}</b> of changes to apply</>
-                  : hasHead ? <>Behind: applying older log files</> : <>Checking…</>}
+                : hasHead
+                  ? <>
+                    Behind{live.lastEventAt && <>: about <b className="font-medium">{ago(live.lastEventAt)}</b></>}
+                    {behindBytes !== null && <span className="text-gray-500"> ({formatBytes(behindBytes)} of changes to apply)</span>}
+                  </>
+                  : <>Checking…</>}
               {live.checkedAt && <span className="text-gray-400"> · checked {ago(live.checkedAt)} ago</span>}
             </span>
             {live.lastEventAt && (

@@ -262,8 +262,16 @@ interface Plan {
 }
 
 /** Changes buffered before the source stream is paused */
-const HIGH_WATER = 200;
-const LOW_WATER = 50;
+const HIGH_WATER = 5000;
+const LOW_WATER = 1000;
+/**
+ * Source transactions applied together in one target transaction. Each round
+ * trip to a distant target costs tens of milliseconds, so one at a time can't
+ * keep up with a busy source; together, consecutive rows of a table go in one
+ * statement. Still all or nothing, and in order.
+ */
+const GROUP_TXNS = 1000;
+const GROUP_ROWS = 20_000;
 /** Rows per statement */
 const BATCH_ROWS = 200;
 const BATCH_BYTES = 4 * 1024 * 1024;
@@ -407,12 +415,23 @@ function run(z: ZongJi, src: MySQLConnectionResult, dst: Target, db: string, opt
   const drain = async () => {
     while (queue.length && !stopping) {
       const item = queue.shift()!;
+      // Transactions waiting behind it go along (up to a schema change)
+      const group: Item[] = [item];
+      if (item.type !== 'ddl') {
+        let txns = item.type === 'txn' ? 1 : 0;
+        let rowCount = item.type === 'txn' ? item.ops.reduce((n, o) => n + o.rows.length, 0) : 0;
+        while (queue.length && queue[0].type !== 'ddl' && txns < GROUP_TXNS && rowCount < GROUP_ROWS) {
+          const next = queue.shift()!;
+          group.push(next);
+          if (next.type === 'txn') { txns++; rowCount += next.ops.reduce((n, o) => n + o.rows.length, 0); }
+        }
+      }
       if (paused && queue.length <= LOW_WATER) {
         paused = false;
         z.connection?.resume();
       }
       try {
-        await apply(item);
+        await apply(group);
       } catch (err) {
         fail(err instanceof LiveSyncError ? err : new LiveSyncError(messageOf(err), isLost(err) ? 'TRANSIENT' : 'APPLY'));
         return;
@@ -517,22 +536,38 @@ function run(z: ZongJi, src: MySQLConnectionResult, dst: Target, db: string, opt
     }
   };
 
-  const applyOp = async (op: Op, counts: { inserted: number; updated: number; deleted: number }) => {
-    const p = await plan(op.table);
-    if (p.skip) return;
-    if (op.kind === 'writerows') {
-      await write(p, op.rows);
-      counts.inserted += op.rows.length;
-    } else if (op.kind === 'deleterows') {
-      await remove(p, op.rows.map((r) => keyOf(p, r)));
-      counts.deleted += op.rows.length;
-    } else {
-      // Rows whose key changed lose their old key first, then every row gets its new image
-      const moved = op.rows.filter((r) => !sameKey(keyOf(p, r.before), keyOf(p, r.after)));
-      if (moved.length) await remove(p, moved.map((r) => keyOf(p, r.before)));
-      await write(p, op.rows.map((r) => r.after));
-      counts.updated += op.rows.length;
+  type Step = { p: Plan; kind: 'write'; rows: RowData[] } | { p: Plan; kind: 'delete'; keys: unknown[][] };
+
+  /** The writes and deletes for these changes, consecutive ones on the same table merged */
+  const steps = (ops: Op[], planOf: Map<string, Plan>, counts: { inserted: number; updated: number; deleted: number }) => {
+    const out: Step[] = [];
+    const push = (st: Step) => {
+      const last = out[out.length - 1];
+      if (last && last.p === st.p && last.kind === st.kind) {
+        if (last.kind === 'write' && st.kind === 'write') last.rows.push(...st.rows);
+        else if (last.kind === 'delete' && st.kind === 'delete') last.keys.push(...st.keys);
+      } else {
+        out.push(st.kind === 'write' ? { ...st, rows: [...st.rows] } : { ...st, keys: [...st.keys] });
+      }
+    };
+    for (const op of ops) {
+      const p = planOf.get(op.table)!;
+      if (p.skip) continue;
+      if (op.kind === 'writerows') {
+        push({ p, kind: 'write', rows: op.rows });
+        counts.inserted += op.rows.length;
+      } else if (op.kind === 'deleterows') {
+        push({ p, kind: 'delete', keys: op.rows.map((r) => keyOf(p, r)) });
+        counts.deleted += op.rows.length;
+      } else {
+        // Rows whose key changed lose their old key first, then every row gets its new image
+        const moved = op.rows.filter((r) => !sameKey(keyOf(p, r.before), keyOf(p, r.after)));
+        if (moved.length) push({ p, kind: 'delete', keys: moved.map((r) => keyOf(p, r.before)) });
+        push({ p, kind: 'write', rows: op.rows.map((r) => r.after) });
+        counts.updated += op.rows.length;
+      }
     }
+    return out;
   };
 
   /** Run fn in a target transaction; reconnect or retry when that is safe */
@@ -557,31 +592,38 @@ function run(z: ZongJi, src: MySQLConnectionResult, dst: Target, db: string, opt
     }
   };
 
-  const apply = async (item: Item) => {
-    if (item.type === 'mark') {
-      opts.onProgress({ position: item.position, eventAt: null, inserted: 0, updated: 0, deleted: 0, transactions: 0 });
+  const apply = async (group: Item[]) => {
+    const last = group[group.length - 1];
+    if (group.length === 1 && last.type === 'ddl') {
+      await applyDdl(last);
+      opts.onProgress({ position: last.position, eventAt: new Date(last.at), inserted: 0, updated: 0, deleted: 0, transactions: 0 });
       return;
     }
-    if (item.type === 'ddl') {
-      await applyDdl(item);
-      opts.onProgress({ position: item.position, eventAt: new Date(item.at), inserted: 0, updated: 0, deleted: 0, transactions: 0 });
+    const txns = group.filter((g): g is Extract<Item, { type: 'txn' }> => g.type === 'txn');
+    if (txns.length === 0) {
+      opts.onProgress({ position: last.position, eventAt: null, inserted: 0, updated: 0, deleted: 0, transactions: 0 });
       return;
     }
+    const ops = txns.flatMap((t) => t.ops);
     // Table definitions first (they may add a table or column to the target), outside the transaction
-    for (const op of item.ops) await withTarget(() => plan(op.table));
+    const planOf = new Map<string, Plan>();
+    for (const table of new Set(ops.map((o) => o.table))) planOf.set(table, await withTarget(() => plan(table)));
     let counts = { inserted: 0, updated: 0, deleted: 0 };
     try {
       await inTransaction(async () => {
         counts = { inserted: 0, updated: 0, deleted: 0 };
-        for (const op of item.ops) await applyOp(op, counts);
+        for (const st of steps(ops, planOf, counts)) {
+          if (st.kind === 'write') await write(st.p, st.rows);
+          else await remove(st.p, st.keys);
+        }
       });
     } catch (err) {
       if (err instanceof LiveSyncError) throw err;
       if (isLost(err)) throw new LiveSyncError(messageOf(err), 'TRANSIENT');
-      const table = item.ops[0]?.table ?? '';
-      throw new LiveSyncError(`Could not apply a change to ${table} on the target: ${messageOf(err)}`, 'APPLY');
+      const tables = [...new Set(ops.map((o) => o.table))].slice(0, 5).join(', ');
+      throw new LiveSyncError(`Could not apply changes to ${tables} on the target: ${messageOf(err)}`, 'APPLY');
     }
-    opts.onProgress({ position: item.position, eventAt: new Date(item.at), ...counts, transactions: 1 });
+    opts.onProgress({ position: last.position, eventAt: new Date(txns[txns.length - 1].at), ...counts, transactions: txns.length });
   };
 
   const withTarget = async <T>(fn: () => Promise<T>): Promise<T> => {
