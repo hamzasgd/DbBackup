@@ -214,7 +214,9 @@ async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string
       dataType: String(x.dt).toLowerCase(),
       columnType: normalizeColumnType(String(x.ct)),
       nullable: x.nl === 'YES',
-      generated: /GENERATED/i.test(String(x.ex ?? '')),
+      // Computed columns only. MySQL 8 also marks plain defaults like DEFAULT CURRENT_TIMESTAMP
+      // (Prisma's @default(now())) as "DEFAULT_GENERATED": those hold real data and must be copied.
+      generated: /\b(VIRTUAL|STORED|PERSISTENT) GENERATED\b|^(VIRTUAL|PERSISTENT)$/i.test(String(x.ex ?? '').trim()),
     });
   }
   for (const x of idx) {

@@ -28,7 +28,8 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
         CREATE TABLE \`${src}\`.members (
           id INT PRIMARY KEY AUTO_INCREMENT, email VARCHAR(80) NOT NULL UNIQUE, note TEXT NULL, raw VARBINARY(16) NULL,
           amount DECIMAL(30,10) NOT NULL, big BIGINT UNSIGNED NOT NULL, created DATETIME(6) NOT NULL, seen TIMESTAMP NULL,
-          doc JSON NULL, flag BIT(1) NOT NULL, ratio DOUBLE NULL, shout VARCHAR(90) AS (UPPER(email)) STORED);
+          doc JSON NULL, flag BIT(1) NOT NULL, ratio DOUBLE NULL, shout VARCHAR(90) AS (UPPER(email)) STORED,
+          added DATETIME(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3), touched TIMESTAMP(3) NULL DEFAULT NULL ON UPDATE CURRENT_TIMESTAMP(3));
         CREATE TABLE \`${src}\`.pairs (a INT NOT NULL, b VARCHAR(20) NOT NULL, v TEXT, PRIMARY KEY (a, b));
         CREATE TABLE \`${src}\`.nopk (x INT, y TEXT);
         CREATE TABLE \`${src}\`.shape (id INT PRIMARY KEY, v TEXT);
@@ -60,7 +61,7 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
       // Target: a copy, then drift
       for (const t of ['members', 'pairs', 'nopk']) {
         await c.query(`CREATE TABLE \`${dst}\`.\`${t}\` LIKE \`${src}\`.\`${t}\``);
-        const cols = t === 'members' ? 'id, email, note, raw, amount, big, created, seen, doc, flag, ratio' : '*';
+        const cols = t === 'members' ? 'id, email, note, raw, amount, big, created, seen, doc, flag, ratio, added, touched' : '*';
         await c.query(`INSERT INTO \`${dst}\`.\`${t}\` ${cols === '*' ? '' : `(${cols})`} SELECT ${cols} FROM \`${src}\`.\`${t}\``);
       }
       await c.query(`
