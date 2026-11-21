@@ -62,9 +62,9 @@ function TableRow({ table, connectionId }: { table: TableInfo; connectionId: str
         <span className="font-mono text-sm font-medium text-gray-800 flex-1 truncate">{table.name}</span>
         <div className="flex items-center gap-3 shrink-0">
           <div className="flex items-center gap-4 text-xs text-gray-500">
-            <span className="flex items-center gap-1">
+            <span className="flex items-center gap-1" title={table.rowCountEstimated ? "MySQL's estimate: big tables aren't counted row by row, which would scan the whole table" : undefined}>
               <Rows3 className="h-3.5 w-3.5" />
-              {table.rowCount.toLocaleString()} rows
+              {table.rowCountEstimated && '~'}{table.rowCount.toLocaleString()} rows
             </span>
             <span className="flex items-center gap-1">
               <HardDrive className="h-3.5 w-3.5" />
