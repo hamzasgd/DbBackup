@@ -560,15 +560,19 @@ async function quickTable(
     }
   };
 
-  // 1. Rows changed since the last sync, in (updatedAt, key) order off the updatedAt index
-  const order = [upd.name, ...pk];
-  const cols = order.map(qid).join(', ');
+  // 1. Rows changed since the last sync. With an index on updatedAt, pages follow it in
+  // (updatedAt, key) order. Without one, every such page would scan the whole table again,
+  // so walk the table once in key order instead, keeping only the changed rows.
+  const indexed = meta.leading.includes(upd.name.toLowerCase());
+  const order = indexed ? [upd.name, ...pk] : pk;
+  const cols = [...new Set([upd.name, ...order])].map(qid).join(', ');
+  const orderBy = order.map(qid).join(', ');
   let lo: unknown[] | null = null;
   for (;;) {
     if (shouldStop()) throw new DataSyncStopped();
     const w = rangeWhere(order, lo, null);
     const page = await rows(pair.src.c,
-      `SELECT ${cols}, ${hash} AS __h FROM ${qid(table)} WHERE ${qid(upd.name)} >= ? AND ${w.sql} ORDER BY ${cols} LIMIT ${QUICK_PAGE}`,
+      `SELECT ${cols}, ${hash} AS __h FROM ${qid(table)} WHERE ${qid(upd.name)} >= ? AND ${w.sql} ORDER BY ${orderBy} LIMIT ${QUICK_PAGE}`,
       [since, ...w.params]);
     if (page.length === 0) break;
     lo = order.map((k) => page[page.length - 1][k]);
