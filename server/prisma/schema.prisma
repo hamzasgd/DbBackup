@@ -402,6 +402,8 @@ model DataSyncRun {
   rowsEstimate       BigInt?
   /// Per-table results (TableReport[])
   results            Json?
+  /// Schema differences: additions applied (or, when comparing, to apply) and differences only reported
+  schema             Json?
   error              String?
   progressAt         DateTime?
   startedAt          DateTime?

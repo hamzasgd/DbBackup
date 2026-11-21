@@ -1,6 +1,7 @@
 import type * as mysql2 from 'mysql2/promise';
 import { ConnectionFactory, type MySQLConnectionResult } from '../engines/connection-factory';
 import type { ConnectionConfig } from '../engines/base.engine';
+import { compareMysqlSchema, applyMysqlSchema, type SchemaReport } from './mysql-schema';
 
 /**
  * Compare two MySQL/MariaDB databases with the same schema and copy only the
@@ -85,6 +86,13 @@ export interface DataSyncOptions {
   quick?: { since: string; minRows?: number };
   /** Called once connected, with the source server's clock (UTC): the "since" of the next quick run */
   onStart?: (info: { sourceTime: string }) => void;
+  /**
+   * Schema first: compare tables, columns, indexes and foreign keys, and when
+   * applying, add what the target lacks (never removing or changing anything).
+   * Called with the report (applied changes marked). Default on.
+   */
+  schema?: boolean;
+  onSchema?: (report: SchemaReport) => void;
 }
 
 export class DataSyncStopped extends Error {
@@ -727,11 +735,26 @@ export async function mysqlDataSync(
     const [clock] = await ctlSrc.query<{ t: string }>('SELECT UTC_TIMESTAMP(3) AS t');
     opts.onStart?.({ sourceTime: String(clock.t) });
 
+    // Table names typed by the user match regardless of case
+    const wanted = opts.tables?.length ? new Set(opts.tables.map((t) => t.toLowerCase())) : null;
+
+    // Schema before rows: add the tables, columns, indexes and foreign keys the target lacks
+    /** Tables that lack columns on the target (compare only: a sync adds them before copying rows) */
+    const missingColumns = new Set<string>();
+    if (opts.schema !== false) {
+      const report = await compareMysqlSchema(ctlSrc.c, ctlDst.c, opts.tables);
+      for (const c of report.changes) if (c.kind === 'ADD_COLUMN' && !opts.apply) missingColumns.add(c.table.toLowerCase());
+      if (opts.apply && report.changes.length) {
+        await applyMysqlSchema(ctlDst.c, report, () => opts.onSchema?.(report), () => { if (opts.shouldStop?.()) throw new DataSyncStopped(); });
+        // The session settings the data sync relies on (applyMysqlSchema already turned FK checks off)
+        await ctlDst.c.query("SET SESSION sql_mode = 'NO_AUTO_VALUE_ON_ZERO'");
+      }
+      opts.onSchema?.(report);
+    }
+
     const srcTables = await tableNames(ctlSrc.c);
     let dstTables = await tableNames(ctlDst.c);
     const [srcMetaAll, dstMetaAll] = await Promise.all([loadMeta(ctlSrc.c), loadMeta(ctlDst.c)]);
-    // Table names typed by the user match regardless of case
-    const wanted = opts.tables?.length ? new Set(opts.tables.map((t) => t.toLowerCase())) : null;
     const tables = srcTables.filter((t) => !wanted || wanted.has(t.toLowerCase()));
     const matchedTargets = new Set<string>();
     const reports: TableReport[] = [];
@@ -790,6 +813,9 @@ export async function mysqlDataSync(
           dstMeta = dstMetaAll.get(dstTable) ?? await tableMeta(ctlDst.c, dstTable);
         }
         const mismatch = schemaMismatch(srcMeta, dstMeta);
+        if (mismatch && missingColumns.has(table.toLowerCase())) {
+          throw Object.assign(new Error('the target lacks columns (see Schema); a sync adds them first, then compares the rows'), { skip: true });
+        }
         if (mismatch) throw Object.assign(new Error(mismatch), { skip: true });
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';

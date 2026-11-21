@@ -6,6 +6,7 @@ import { logger } from '../config/logger';
 import { notify } from '../services/notification.service';
 import { toEngineConfig } from '../services/engines/connection-config';
 import { mysqlDataSync, DataSyncStopped, type TableReport, type DataSyncProgress } from '../services/data-sync/mysql-data-sync';
+import type { SchemaReport } from '../services/data-sync/mysql-schema';
 
 export const DATA_SYNC_QUEUE_NAME = 'data-sync';
 
@@ -48,6 +49,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
       }
 
       const results: TableReport[] = [];
+      let schema: SchemaReport | null = null;
       let progress: DataSyncProgress | null = null;
       let cancel = false;
       const write = async () => {
@@ -60,6 +62,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
             rowsChecked: BigInt(progress?.rowsChecked ?? 0),
             rowsEstimate: progress ? BigInt(progress.rowsEstimate) : null,
             results: results as never,
+            ...(schema ? { schema: schema as never } : {}),
             progressAt: new Date(),
           },
           select: { cancelRequested: true },
@@ -86,6 +89,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
           apply: run.mode === 'APPLY',
           tables: run.tables,
           parallel: run.parallel,
+          onSchema: (r) => { schema = r; },
           quick: run.method === 'QUICK' && run.since ? { since: run.since.toISOString().replace('T', ' ').replace('Z', '') } : undefined,
           onStart: ({ sourceTime }) => {
             const t = new Date(`${sourceTime.replace(' ', 'T')}Z`);
@@ -109,6 +113,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
           data: {
             status: 'COMPLETED', completedAt: new Date(), progressAt: new Date(), currentTable: null,
             tablesDone: reports.length, results: reports as never,
+            ...(schema ? { schema: schema as never } : {}),
             rowsChecked: BigInt((progress as DataSyncProgress | null)?.rowsChecked ?? 0),
             // Every row is counted by now
             rowsEstimate: BigInt((progress as DataSyncProgress | null)?.rowsChecked ?? 0),
@@ -131,6 +136,7 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
           data: {
             status: stopped ? 'CANCELLED' : 'FAILED', completedAt: new Date(), currentTable: null,
             error: stopped ? null : message.slice(0, 4000), results: results as never,
+            ...(schema ? { schema: schema as never } : {}),
           },
         }).catch(() => undefined);
         if (stopped) { logger.info(`Data sync ${runId} stopped by the user`); return; }
