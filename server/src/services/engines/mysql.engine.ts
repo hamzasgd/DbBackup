@@ -12,6 +12,9 @@ import { remoteMysqlBackup, remoteMysqlRestore } from './mysql-remote';
 import { cliEnv, mysqlRestoreGuardArgs, mysqlCompressArgsFor, mysqlClientHasCompressionAlgorithms, toolVersionText } from './cli-safety';
 import { logger } from '../../config/logger';
 
+/** Tables estimated below this many rows are counted exactly on the Database Info page */
+const EXACT_COUNT_MAX_ROWS = 100_000;
+
 export class MySQLEngine extends BaseEngine {
   private quoteIdentifier(identifier: string): string {
     return `\`${identifier.replace(/`/g, '``')}\``;
@@ -296,13 +299,14 @@ export class MySQLEngine extends BaseEngine {
       const [[versionRow]] = await conn.query<mysql2.RowDataPacket[]>('SELECT VERSION() AS v');
       const version = (versionRow as mysql2.RowDataPacket)['v'] as string;
 
-      // Table sizes from information_schema. Row counts are fetched exactly per table below.
+      // Table sizes and row estimates from information_schema
       const [tableRows] = await conn.query<mysql2.RowDataPacket[]>(`
         SELECT
           TABLE_NAME        AS name,
           DATA_LENGTH       AS data_bytes,
           INDEX_LENGTH      AS index_bytes,
-          DATA_LENGTH + INDEX_LENGTH AS size_bytes
+          DATA_LENGTH + INDEX_LENGTH AS size_bytes,
+          TABLE_ROWS        AS est_rows
         FROM information_schema.TABLES
         WHERE TABLE_SCHEMA = ?
           AND TABLE_TYPE = 'BASE TABLE'
@@ -317,56 +321,57 @@ export class MySQLEngine extends BaseEngine {
       `, [this.config.database]);
       const totalSizeBytes = Number((totalRow as mysql2.RowDataPacket)['total']);
 
-      // Columns for each table
-      const tables: TableInfo[] = await Promise.all(
-        (tableRows as mysql2.RowDataPacket[]).map(async (t) => {
+      // Columns, indexes and foreign keys of every table: three queries, not three per table
+      // (each one is a round trip, slow over an SSH tunnel)
+      const byTable = (rows: mysql2.RowDataPacket[]) => {
+        const m = new Map<string, mysql2.RowDataPacket[]>();
+        for (const r of rows) {
+          const k = String(r['table_name']);
+          if (!m.has(k)) m.set(k, []);
+          m.get(k)!.push(r);
+        }
+        return m;
+      };
+      const [colAll] = await conn.query<mysql2.RowDataPacket[]>(`
+        SELECT TABLE_NAME AS table_name, COLUMN_NAME AS col_name, COLUMN_TYPE AS col_type, IS_NULLABLE AS nullable,
+               COLUMN_DEFAULT AS default_val, COLUMN_KEY AS col_key, EXTRA AS extra
+        FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME, ORDINAL_POSITION`, [this.config.database]);
+      const [idxAll] = await conn.query<mysql2.RowDataPacket[]>(`
+        SELECT TABLE_NAME AS table_name, INDEX_NAME AS index_name, NON_UNIQUE AS non_unique,
+               COLUMN_NAME AS column_name, SEQ_IN_INDEX AS seq_in_index
+        FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = ?
+        ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, [this.config.database]);
+      const [fkAll] = await conn.query<mysql2.RowDataPacket[]>(`
+        SELECT TABLE_NAME AS table_name, CONSTRAINT_NAME AS constraint_name, COLUMN_NAME AS column_name,
+               REFERENCED_TABLE_NAME AS referenced_table, REFERENCED_COLUMN_NAME AS referenced_column
+        FROM information_schema.KEY_COLUMN_USAGE
+        WHERE TABLE_SCHEMA = ? AND REFERENCED_TABLE_NAME IS NOT NULL
+        ORDER BY TABLE_NAME, CONSTRAINT_NAME, ORDINAL_POSITION`, [this.config.database]);
+      const colsByTable = byTable(colAll);
+      const idxByTable = byTable(idxAll);
+      const fkByTable = byTable(fkAll);
+
+      // Exact row counts only where counting is cheap. COUNT(*) reads the whole table, so a
+      // table with millions of rows would take minutes and load the server: those show the
+      // server's own estimate instead (marked as such).
+      const counts = new Map<string, number>();
+      const small = (tableRows as mysql2.RowDataPacket[])
+        .filter((t) => (Number(t['est_rows']) || 0) < EXACT_COUNT_MAX_ROWS)
+        .map((t) => String(t['name']));
+      for (let i = 0; i < small.length; i += 50) {
+        const batch = small.slice(i, i + 50);
+        const [countRows] = await conn.query<mysql2.RowDataPacket[]>(
+          batch.map((name) => `SELECT ? AS t, COUNT(*) AS n FROM ${this.quoteIdentifier(name)}`).join(' UNION ALL '),
+          batch,
+        );
+        for (const r of countRows) counts.set(String(r['t']), Number(r['n']) || 0);
+      }
+
+      const tables: TableInfo[] = (tableRows as mysql2.RowDataPacket[]).map((t) => {
           const tableName = t['name'] as string;
-          const safeTable = this.quoteIdentifier(tableName);
-
-          const [[countRow]] = await conn!.query<mysql2.RowDataPacket[]>(
-            `SELECT COUNT(*) AS row_count FROM ${safeTable}`
-          );
-
-          const [colRows] = await conn!.query<mysql2.RowDataPacket[]>(`
-            SELECT
-              COLUMN_NAME             AS col_name,
-              COLUMN_TYPE             AS col_type,
-              IS_NULLABLE             AS nullable,
-              COLUMN_DEFAULT          AS default_val,
-              COLUMN_KEY              AS col_key,
-              EXTRA                   AS extra
-            FROM information_schema.COLUMNS
-            WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
-            ORDER BY ORDINAL_POSITION
-          `, [this.config.database, tableName]);
-
-          const [idxRows] = await conn!.query<mysql2.RowDataPacket[]>(`
-            SELECT
-              INDEX_NAME AS index_name,
-              NON_UNIQUE AS non_unique,
-              COLUMN_NAME AS column_name,
-              SEQ_IN_INDEX AS seq_in_index
-            FROM information_schema.STATISTICS
-            WHERE TABLE_SCHEMA = ?
-              AND TABLE_NAME = ?
-            ORDER BY INDEX_NAME, SEQ_IN_INDEX
-          `, [this.config.database, tableName]);
-
-          const [fkRows] = await conn!.query<mysql2.RowDataPacket[]>(`
-            SELECT
-              CONSTRAINT_NAME AS constraint_name,
-              COLUMN_NAME AS column_name,
-              REFERENCED_TABLE_NAME AS referenced_table,
-              REFERENCED_COLUMN_NAME AS referenced_column
-            FROM information_schema.KEY_COLUMN_USAGE
-            WHERE TABLE_SCHEMA = ?
-              AND TABLE_NAME = ?
-              AND REFERENCED_TABLE_NAME IS NOT NULL
-            ORDER BY CONSTRAINT_NAME, ORDINAL_POSITION
-          `, [this.config.database, tableName]);
-
           const indexMap = new Map<string, { name: string; unique: boolean; primary: boolean; columns: string[] }>();
-          (idxRows as mysql2.RowDataPacket[]).forEach((r) => {
+          (idxByTable.get(tableName) ?? []).forEach((r) => {
             const indexName = String(r['index_name']);
             if (!indexMap.has(indexName)) {
               indexMap.set(indexName, {
@@ -390,7 +395,7 @@ export class MySQLEngine extends BaseEngine {
           const indexedColumns = new Set(indexes.flatMap((i) => i.columns));
           const uniqueColumns = new Set(indexes.filter((i) => i.unique).flatMap((i) => i.columns));
 
-          const foreignKeys = (fkRows as mysql2.RowDataPacket[]).map((r) => ({
+          const foreignKeys = (fkByTable.get(tableName) ?? []).map((r) => ({
             constraintName: String(r['constraint_name']),
             column: String(r['column_name']),
             referencedTable: String(r['referenced_table']),
@@ -398,7 +403,7 @@ export class MySQLEngine extends BaseEngine {
           }));
           const foreignKeyByColumn = new Map(foreignKeys.map((fk) => [fk.column, fk]));
 
-          const columns: ColumnInfo[] = (colRows as mysql2.RowDataPacket[]).map((c) => ({
+          const columns: ColumnInfo[] = (colsByTable.get(tableName) ?? []).map((c) => ({
             name: c['col_name'] as string,
             type: c['col_type'] as string,
             nullable: c['nullable'] === 'YES',
@@ -419,7 +424,8 @@ export class MySQLEngine extends BaseEngine {
 
           return {
             name: tableName,
-            rowCount: Number((countRow as mysql2.RowDataPacket)['row_count']) || 0,
+            rowCount: counts.get(tableName) ?? (Number(t['est_rows']) || 0),
+            rowCountEstimated: !counts.has(tableName),
             sizeBytes: Number(t['size_bytes']) || 0,
             logicalSizeBytes: Number(t['data_bytes']) || 0,
             indexSizeBytes: Number(t['index_bytes']) || 0,
@@ -437,8 +443,7 @@ export class MySQLEngine extends BaseEngine {
             foreignKeys,
             columns,
           };
-        })
-      );
+        });
 
       const logicalSizeBytes = tables.reduce((sum, t) => sum + t.logicalSizeBytes, 0);
       const indexSizeBytes = tables.reduce((sum, t) => sum + t.indexSizeBytes, 0);

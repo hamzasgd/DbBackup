@@ -112,6 +112,8 @@ export interface TableForeignKeyInfo {
 export interface TableInfo {
   name: string;
   rowCount: number;
+  /** rowCount is the server's estimate (big tables aren't counted row by row) */
+  rowCountEstimated?: boolean;
   sizeBytes: number;
   logicalSizeBytes: number;
   indexSizeBytes: number;

@@ -94,7 +94,8 @@ export default function TableDetailsPage() {
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
               <p className="text-xs text-gray-500 uppercase tracking-wide">Rows</p>
               <p className="text-sm font-semibold text-gray-800 flex items-center gap-1 mt-1">
-                <Rows3 className="h-4 w-4 text-gray-500" /> {table.rowCount.toLocaleString()}
+                <Rows3 className="h-4 w-4 text-gray-500" /> {table.rowCountEstimated && '~'}{table.rowCount.toLocaleString()}
+                {table.rowCountEstimated && <span className="text-[11px] font-normal text-gray-400">(estimate)</span>}
               </p>
             </div>
             <div className="bg-white border border-gray-200 rounded-xl px-4 py-3 shadow-sm">
