@@ -39,6 +39,34 @@ describe('data sync API guards', () => {
     return { r, err: next.mock.calls[0]?.[0] };
   }
 
+  it('quick needs a completed sync to start from, and looks back from it with a margin', async () => {
+    const a = await conn('Prod', 'a.example.com', 'shop');
+    const b = await conn('Copy', 'b.example.com', 'shop_copy');
+    const quick = { sourceConnectionId: a.id, targetConnectionId: b.id, mode: 'COMPARE', method: 'QUICK' };
+    const base = { userId, sourceConnectionId: a.id, targetConnectionId: b.id, sourceName: 'Prod', targetName: 'Copy', sourceDatabase: 'shop', targetDatabase: 'shop_copy' };
+    expect((await call(quick)).err).toMatchObject({ code: 'NO_BASELINE', statusCode: 400 });
+
+    // A compare alone is no starting point; a completed sync of all tables is
+    const t0 = new Date('2026-11-20T10:00:00.000Z');
+    await prisma.dataSyncRun.create({ data: { ...base, mode: 'COMPARE', status: 'COMPLETED', sourceTime: new Date('2026-11-20T08:00:00.000Z'), createdAt: new Date('2026-11-20T08:00:00.000Z') } });
+    expect((await call(quick)).err).toMatchObject({ code: 'NO_BASELINE' });
+    await prisma.dataSyncRun.create({ data: { ...base, mode: 'APPLY', status: 'COMPLETED', sourceTime: t0, createdAt: t0 } });
+    const ok = await call(quick);
+    expect(ok.err).toBeUndefined();
+    const run = await prisma.dataSyncRun.findUniqueOrThrow({ where: { id: ok.r.json.mock.calls[0][0].data.id } });
+    expect(run.method).toBe('QUICK');
+    expect(run.since?.toISOString()).toBe('2026-11-20T09:45:00.000Z');
+    await prisma.dataSyncRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } });
+
+    // A sync of only some tables: the other tables were last checked by the full compare before it
+    await prisma.dataSyncRun.create({ data: { ...base, mode: 'COMPARE', status: 'COMPLETED', sourceTime: new Date('2026-11-21T09:00:00.000Z'), createdAt: new Date('2026-11-21T09:00:00.000Z') } });
+    await prisma.dataSyncRun.create({ data: { ...base, mode: 'APPLY', status: 'COMPLETED', tables: ['orders'], sourceTime: new Date('2026-11-21T10:00:00.000Z'), createdAt: new Date('2026-11-21T10:00:00.000Z') } });
+    const partial = await call(quick);
+    expect(partial.err).toBeUndefined();
+    const run2 = await prisma.dataSyncRun.findUniqueOrThrow({ where: { id: partial.r.json.mock.calls[0][0].data.id } });
+    expect(run2.since?.toISOString()).toBe('2026-11-21T08:45:00.000Z');
+  });
+
   it('refuses the same database as source and target', async () => {
     const a = await conn('Prod', 'db.example.com', 'shop');
     const b = await conn('Prod again', 'DB.example.com', 'shop');

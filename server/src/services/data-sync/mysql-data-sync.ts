@@ -48,6 +48,10 @@ export interface TableReport {
   warning?: string;
   /** How long the table took */
   ms?: number;
+  /** QUICK: only rows changed since the last sync were compared; FULL: every row */
+  method?: 'QUICK' | 'FULL';
+  /** How the table was compared, when that's worth saying */
+  note?: string;
 }
 
 export interface DataSyncProgress {
@@ -73,6 +77,14 @@ export interface DataSyncOptions {
   onTable?: (r: TableReport) => void;
   /** Checked between chunks; true stops the run */
   shouldStop?: () => boolean;
+  /**
+   * Quick mode: for big tables with an updatedAt column, compare only the rows
+   * changed since `since` (UTC, 'YYYY-MM-DD HH:MM:SS'), plus new and deleted
+   * rows found from the primary keys. Other tables are compared in full.
+   */
+  quick?: { since: string; minRows?: number };
+  /** Called once connected, with the source server's clock (UTC): the "since" of the next quick run */
+  onStart?: (info: { sourceTime: string }) => void;
 }
 
 export class DataSyncStopped extends Error {
@@ -108,6 +120,10 @@ interface TableMeta {
   pk: string[];
   rowsEstimate: number;
   hasTriggers: boolean;
+  /** Columns that lead some index (lowercase) */
+  leading: string[];
+  /** Whether the table has an index besides the primary key */
+  hasSecondary: boolean;
 }
 
 export const qid = (name: string) => `\`${name.replace(/`/g, '``')}\``;
@@ -181,9 +197,9 @@ async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string
   const cols = await rows<{ t: string; n: string; dt: string; ct: string; nl: string; ex: string }>(c,
     `SELECT TABLE_NAME AS t, COLUMN_NAME AS n, DATA_TYPE AS dt, COLUMN_TYPE AS ct, IS_NULLABLE AS nl, EXTRA AS ex
        FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE()${one} ORDER BY TABLE_NAME, ORDINAL_POSITION`, p);
-  const pks = await rows<{ t: string; n: string }>(c,
-    `SELECT TABLE_NAME AS t, COLUMN_NAME AS n FROM information_schema.STATISTICS
-      WHERE TABLE_SCHEMA = DATABASE()${one} AND INDEX_NAME = 'PRIMARY' ORDER BY TABLE_NAME, SEQ_IN_INDEX`, p);
+  const idx = await rows<{ t: string; i: string; q: string | number; n: string }>(c,
+    `SELECT TABLE_NAME AS t, INDEX_NAME AS i, SEQ_IN_INDEX AS q, COLUMN_NAME AS n FROM information_schema.STATISTICS
+      WHERE TABLE_SCHEMA = DATABASE()${one} ORDER BY TABLE_NAME, INDEX_NAME, SEQ_IN_INDEX`, p);
   const est = await rows<{ t: string; r: string | number | null }>(c,
     `SELECT TABLE_NAME AS t, TABLE_ROWS AS r FROM information_schema.TABLES
       WHERE TABLE_SCHEMA = DATABASE()${one} AND TABLE_TYPE = 'BASE TABLE'`, p);
@@ -191,7 +207,7 @@ async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string
     `SELECT EVENT_OBJECT_TABLE AS t, COUNT(*) AS n FROM information_schema.TRIGGERS
       WHERE EVENT_OBJECT_SCHEMA = DATABASE()${one.replace('TABLE_NAME', 'EVENT_OBJECT_TABLE')} GROUP BY EVENT_OBJECT_TABLE`, p);
   const meta = new Map<string, TableMeta>();
-  for (const e of est) meta.set(e.t, { columns: [], pk: [], rowsEstimate: Number(e.r ?? 0) || 0, hasTriggers: false });
+  for (const e of est) meta.set(e.t, { columns: [], pk: [], rowsEstimate: Number(e.r ?? 0) || 0, hasTriggers: false, leading: [], hasSecondary: false });
   for (const x of cols) {
     meta.get(x.t)?.columns.push({
       name: x.n,
@@ -201,7 +217,13 @@ async function loadMeta(c: mysql2.Connection, only?: string): Promise<Map<string
       generated: /GENERATED/i.test(String(x.ex ?? '')),
     });
   }
-  for (const x of pks) meta.get(x.t)?.pk.push(x.n);
+  for (const x of idx) {
+    const m = meta.get(x.t);
+    if (!m) continue;
+    if (x.i === 'PRIMARY') m.pk.push(x.n);
+    else m.hasSecondary = true;
+    if (Number(x.q) === 1) m.leading.push(String(x.n).toLowerCase());
+  }
   for (const x of trg) { const m = meta.get(x.t); if (m) m.hasTriggers = Number(x.n) > 0; }
   return meta;
 }
@@ -490,6 +512,134 @@ async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Prom
   return out;
 }
 
+const UPDATED_AT = /^updated_?at$/i;
+const INT_TYPES = new Set(['tinyint', 'smallint', 'mediumint', 'int', 'integer', 'bigint']);
+/** Changed rows read per page in quick mode */
+const QUICK_PAGE = 5000;
+/** Groups the key range is split into when looking for new and deleted rows */
+const KEY_BUCKETS = 2000;
+
+/** The table's last-modified column, if it has one */
+export function updatedAtColumn(meta: { columns: Column[] }): Column | undefined {
+  return meta.columns.find((c) => UPDATED_AT.test(c.name) && (c.dataType === 'datetime' || c.dataType === 'timestamp'));
+}
+
+const hasIntKey = (meta: TableMeta) =>
+  meta.pk.length === 1 && INT_TYPES.has(meta.columns.find((c) => c.name.toLowerCase() === meta.pk[0].toLowerCase())?.dataType ?? '');
+
+interface QuickResult { rows: number; inserted: number; updated: number; deleted: number; batches: number; batchesDifferent: number }
+
+/**
+ * Quick compare of one table: rows changed since `since` (by their updatedAt),
+ * then new and deleted rows. With a whole-number primary key, both sides
+ * summarise their keys in ~2000 ranges from an index, and only ranges whose
+ * summaries differ are listed. Other keys compare row counts. Returns null
+ * when the table has to be compared in full instead (the counts differ).
+ */
+async function quickTable(
+  pair: Pair,
+  job: TableJob,
+  upd: Column,
+  since: string,
+  onRows: (n: number) => void,
+  shouldStop: () => boolean,
+): Promise<QuickResult | null> {
+  const { table, dstTable, meta, hash } = job;
+  const pk = meta.pk;
+  const out: QuickResult = { rows: 0, inserted: 0, updated: 0, deleted: 0, batches: 0, batchesDifferent: 0 };
+  const deferred: { toDelete: unknown[][]; toCopy: unknown[][] }[] = [];
+  /** Rows found missing on the target (compare only: not counted twice) */
+  const missing = new Set<string>();
+  const apply = async (toDelete: unknown[][], toCopy: unknown[][]) => {
+    if (!job.apply || (toDelete.length === 0 && toCopy.length === 0)) return;
+    try {
+      await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy);
+    } catch (err) {
+      if (!isDeferrable(err)) throw err;
+      deferred.push({ toDelete, toCopy });
+    }
+  };
+
+  // 1. Rows changed since the last sync, in (updatedAt, key) order off the updatedAt index
+  const order = [upd.name, ...pk];
+  const cols = order.map(qid).join(', ');
+  let lo: unknown[] | null = null;
+  for (;;) {
+    if (shouldStop()) throw new DataSyncStopped();
+    const w = rangeWhere(order, lo, null);
+    const page = await rows(pair.src.c,
+      `SELECT ${cols}, ${hash} AS __h FROM ${qid(table)} WHERE ${qid(upd.name)} >= ? AND ${w.sql} ORDER BY ${cols} LIMIT ${QUICK_PAGE}`,
+      [since, ...w.params]);
+    if (page.length === 0) break;
+    lo = order.map((k) => page[page.length - 1][k]);
+    const keys = page.map((r) => pk.map((k) => r[k]));
+    const dm = new Map<string, string>();
+    for (let i = 0; i < keys.length; i += KEY_BATCH) {
+      for (const [k, v] of await rowHashes(pair.dst.c, dstTable, pk, hash, keysIn(pk, keys.slice(i, i + KEY_BATCH)))) dm.set(k, v.h);
+    }
+    const toCopy: unknown[][] = [];
+    const toDelete: unknown[][] = [];
+    for (const [i, r] of page.entries()) {
+      const k = keyOf(r, pk);
+      const d = dm.get(k);
+      if (d === undefined) { out.inserted++; toCopy.push(keys[i]); missing.add(k); }
+      else if (d !== String(r.__h)) { out.updated++; toCopy.push(keys[i]); toDelete.push(keys[i]); }
+    }
+    out.batches++;
+    if (toCopy.length) out.batchesDifferent++;
+    out.rows += page.length;
+    onRows(page.length);
+    await apply(toDelete, toCopy);
+    if (page.length < QUICK_PAGE) break;
+  }
+
+  // 2. New and deleted rows (also ones whose updatedAt wasn't touched)
+  if (hasIntKey(meta)) {
+    const key = qid(pk[0]);
+    const [a] = await rows<{ lo: string | null; hi: string | null }>(pair.src.c, `SELECT MIN(${key}) AS lo, MAX(${key}) AS hi FROM ${qid(table)}`);
+    const [b] = await rows<{ lo: string | null; hi: string | null }>(pair.dst.c, `SELECT MIN(${key}) AS lo, MAX(${key}) AS hi FROM ${qid(dstTable)}`);
+    const ends = [a.lo, a.hi, b.lo, b.hi].filter((v): v is string => v !== null && v !== undefined).map((v) => BigInt(v));
+    if (ends.length) {
+      const min = ends.reduce((x, y) => (y < x ? y : x));
+      const max = ends.reduce((x, y) => (y > x ? y : x));
+      const width = (max - min) / BigInt(KEY_BUCKETS) + 1n;
+      const summary = async (c: mysql2.Connection, t: string) => {
+        const r = await rows<{ b: string | number; n: string | number; x: string | number }>(c,
+          `SELECT FLOOR((${key} - ?) / ?) AS b, COUNT(*) AS n, BIT_XOR(CRC32(${key})) AS x FROM ${qid(t)} GROUP BY b`,
+          [min.toString(), width.toString()]);
+        return new Map(r.map((x) => [String(x.b), `${x.n}:${x.x}`]));
+      };
+      const [sb, db] = await Promise.all([summary(pair.src.c, table), summary(pair.dst.c, dstTable)]);
+      const differ = [...new Set([...sb.keys(), ...db.keys()])].filter((b) => sb.get(b) !== db.get(b));
+      for (const bucket of differ) {
+        if (shouldStop()) throw new DataSyncStopped();
+        const from = min + BigInt(bucket) * width;
+        const range = { sql: `${key} >= ? AND ${key} < ?`, params: [from.toString(), (from + width).toString()] };
+        const list = async (c: mysql2.Connection, t: string) =>
+          new Map((await rows(c, `SELECT ${key} FROM ${qid(t)} WHERE ${range.sql}`, range.params)).map((r) => [keyOf(r, pk), [r[pk[0]]]]));
+        const [sk, dk] = await Promise.all([list(pair.src.c, table), list(pair.dst.c, dstTable)]);
+        const toCopy: unknown[][] = [];
+        const toDelete: unknown[][] = [];
+        for (const [k, v] of sk) if (!dk.has(k) && !missing.has(k)) { out.inserted++; toCopy.push(v); }
+        for (const [k, v] of dk) if (!sk.has(k)) { out.deleted++; toDelete.push(v); }
+        out.batches++;
+        if (toCopy.length || toDelete.length) out.batchesDifferent++;
+        await apply(toDelete, toCopy);
+      }
+    }
+  } else {
+    // Without a whole-number key: equal row counts mean nothing was added or deleted
+    const count = async (c: mysql2.Connection, t: string) => Number((await rows<{ n: string | number }>(c, `SELECT COUNT(*) AS n FROM ${qid(t)}`))[0].n);
+    const [n, m] = await Promise.all([count(pair.src.c, table), count(pair.dst.c, dstTable)]);
+    if (n !== m + (job.apply ? 0 : missing.size)) return null;
+  }
+
+  if (deferred.length) {
+    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, deferred.flatMap((d) => d.toDelete), deferred.flatMap((d) => d.toCopy));
+  }
+  return out;
+}
+
 export async function mysqlDataSync(
   sourceConfig: ConnectionConfig,
   targetConfig: ConnectionConfig,
@@ -516,6 +666,10 @@ export async function mysqlDataSync(
       (async () => { for (const s of [ctlDst, ...pairs.map((p) => p.dst)]) await s.open(); })(),
     ]);
 
+    // The source's own clock: the next quick run looks for changes from here on
+    const [clock] = await ctlSrc.query<{ t: string }>('SELECT UTC_TIMESTAMP(3) AS t');
+    opts.onStart?.({ sourceTime: String(clock.t) });
+
     const srcTables = await tableNames(ctlSrc.c);
     let dstTables = await tableNames(ctlDst.c);
     const [srcMetaAll, dstMetaAll] = await Promise.all([loadMeta(ctlSrc.c), loadMeta(ctlDst.c)]);
@@ -527,7 +681,12 @@ export async function mysqlDataSync(
 
     // Progress: real row counts for finished tables, statistics for the rest (they can be far off)
     let rowsChecked = 0;
-    let remainingEstimate = tables.reduce((n, t) => n + (srcMetaAll.get(t)?.rowsEstimate ?? 0), 0);
+    const quick = opts.quick ?? null;
+    const quickMinRows = quick?.minRows ?? 100_000;
+    // Big tables with an updatedAt column are compared quickly; the estimate only covers the rest
+    const quickable = (m: TableMeta | undefined) => !!quick && !!m && m.rowsEstimate >= quickMinRows && !!updatedAtColumn(m) && m.pk.length > 0;
+    const fullEstimate = (t: string) => (quickable(srcMetaAll.get(t)) ? 0 : srcMetaAll.get(t)?.rowsEstimate ?? 0);
+    let remainingEstimate = tables.reduce((n, t) => n + fullEstimate(t), 0);
     let current = { table: '', index: 0, rows: 0, estimate: 0 };
     const progress = () => opts.onProgress?.({
       table: current.table,
@@ -540,8 +699,8 @@ export async function mysqlDataSync(
     for (const [index, table] of tables.entries()) {
       if (opts.shouldStop?.()) throw new DataSyncStopped();
       const srcMeta = srcMetaAll.get(table) ?? await tableMeta(ctlSrc.c, table);
-      remainingEstimate -= srcMetaAll.get(table)?.rowsEstimate ?? 0;
-      current = { table, index, rows: 0, estimate: srcMeta.rowsEstimate };
+      remainingEstimate -= fullEstimate(table);
+      current = { table, index, rows: 0, estimate: fullEstimate(table) };
       progress();
       const started = Date.now();
       const report: TableReport = { table, status: 'SAME', rows: 0, inserted: 0, updated: 0, deleted: 0, chunks: 0, chunksDifferent: 0 };
@@ -579,6 +738,36 @@ export async function mysqlDataSync(
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';
 
         const job: TableJob = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [] };
+        const upd = updatedAtColumn(srcMeta);
+        if (quick && report.status !== 'CREATED' && quickable(srcMeta) && upd) {
+          const pair = pairs[0];
+          const q = await withReconnect([pair.src, pair.dst], () => quickTable(pair, job, upd, quick.since,
+            (n) => { rowsChecked += n; current.rows += n; progress(); },
+            () => !!opts.shouldStop?.()));
+          if (q) {
+            report.method = 'QUICK';
+            report.rows = q.rows;
+            report.inserted = q.inserted;
+            report.updated = q.updated;
+            report.deleted = q.deleted;
+            report.chunks = q.batches;
+            report.chunksDifferent = q.batchesDifferent;
+            const notes = [`only rows changed since ${quick.since.slice(0, 16)} UTC`];
+            if (!srcMeta.leading.includes(upd.name.toLowerCase())) notes.push(`no index on ${upd.name}, so finding them read the whole table; adding one makes this fast`);
+            else if (hasIntKey(srcMeta) && !srcMeta.hasSecondary) notes.push('no secondary index, so checking for new and deleted rows read the whole table');
+            report.note = notes.join('; ');
+            const changed = report.inserted + report.updated + report.deleted > 0;
+            report.status = changed ? (opts.apply ? 'SYNCED' : 'DIFFERENT') : 'SAME';
+            throw Object.assign(new Error('quick'), { done: true });
+          }
+          // Row counts differ: compare it in full
+          rowsChecked -= current.rows;
+          current.rows = 0;
+          report.note = 'row counts differed, so compared in full';
+        } else if (quick && srcMeta.rowsEstimate >= quickMinRows && !upd) {
+          report.note = 'no updatedAt column, so compared in full';
+        }
+        report.method = 'FULL';
         const bounds = chunkBounds(ctlSrc.query, table, srcMeta.pk, size);
         const next = prefetch(bounds, parallel * 2);
         const deferred: { toDelete: unknown[][]; toCopy: unknown[][] }[] = [];
