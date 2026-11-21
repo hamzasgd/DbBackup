@@ -65,7 +65,10 @@ export async function startDataSync(req: AuthRequest, res: Response, next: NextF
         // That sync covered only some tables (e.g. "Sync these differences"); the others were last
         // checked by the compare of all tables before it, so look from there
         const before = await prisma.dataSyncRun.findFirst({
-          where: { ...pair, tables: { isEmpty: true }, createdAt: { lt: last.createdAt } },
+          where: {
+            ...pair, tables: { isEmpty: true }, createdAt: { lt: last.createdAt },
+            OR: [{ sourceTime: { not: null } }, { startedAt: { not: null } }],
+          },
           orderBy: { createdAt: 'desc' },
           select: { sourceTime: true, startedAt: true },
         });
