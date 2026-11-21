@@ -56,7 +56,9 @@ describe('data sync API guards', () => {
     const run = await prisma.dataSyncRun.findUniqueOrThrow({ where: { id: ok.r.json.mock.calls[0][0].data.id } });
     expect(run.method).toBe('QUICK');
     expect(run.since?.toISOString()).toBe('2026-11-20T09:45:00.000Z');
-    await prisma.dataSyncRun.update({ where: { id: run.id }, data: { status: 'COMPLETED' } });
+    // Out of the way (it is queued, so it would block the next start), whatever the current time is
+    await getDataSyncQueue().remove(run.id).catch(() => undefined);
+    await prisma.dataSyncRun.delete({ where: { id: run.id } });
 
     // A sync of only some tables: the other tables were last checked by the full compare before it
     await prisma.dataSyncRun.create({ data: { ...base, mode: 'COMPARE', status: 'COMPLETED', sourceTime: new Date('2026-11-21T09:00:00.000Z'), createdAt: new Date('2026-11-21T09:00:00.000Z') } });
