@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, GitCompareArrows, Loader2, OctagonX, Search, Square, XCircle } from 'lucide-react'
 import { connectionsApi, type Connection } from '../../services/connections.service'
-import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type TableReport, type TableStatus } from '../../services/data-sync.service'
+import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type SchemaReport, type TableReport, type TableStatus } from '../../services/data-sync.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
@@ -55,6 +55,75 @@ function totals(results: TableReport[]) {
   return results.reduce(
     (t, r) => ({ inserted: t.inserted + r.inserted, updated: t.updated + r.updated, deleted: t.deleted + r.deleted }),
     { inserted: 0, updated: 0, deleted: 0 },
+  )
+}
+
+const CHANGE_LABEL: Record<string, string> = {
+  CREATE_TABLE: 'table', ADD_COLUMN: 'column', ADD_INDEX: 'index', ADD_FOREIGN_KEY: 'foreign key',
+}
+const NOTE_LABEL: Record<string, string> = {
+  COLUMN_DIFFERS: 'column differs',
+  COLUMN_ONLY_ON_TARGET: 'column only on the target',
+  INDEX_DIFFERS: 'index differs',
+  INDEX_ONLY_ON_TARGET: 'index only on the target',
+  FOREIGN_KEY_DIFFERS: 'foreign key differs',
+  FOREIGN_KEY_ONLY_ON_TARGET: 'foreign key only on the target',
+  PRIMARY_KEY_DIFFERS: 'primary key differs',
+  TABLE_ONLY_ON_TARGET: 'table only on the target',
+}
+
+/** Schema differences of a run: additions (applied when syncing) and what is only reported. */
+function SchemaSection({ schema, compare }: { schema: SchemaReport; compare: boolean }) {
+  const [open, setOpen] = useState(false)
+  const failed = schema.changes.filter((c) => c.status === 'FAILED')
+  if (schema.changes.length === 0 && schema.notes.length === 0) {
+    return <p className="text-xs text-gray-500">Schema: same tables, columns, indexes and foreign keys ({schema.tablesCompared} tables checked).</p>
+  }
+  return (
+    <div className="text-xs border border-gray-100 rounded-lg p-2.5 space-y-1.5">
+      <p className="text-gray-700">
+        <b className="font-medium">Schema:</b>{' '}
+        {schema.changes.length > 0 && (compare
+          ? <>{schema.changes.length} missing on the target (a sync adds them)</>
+          : <>{schema.changes.length - failed.length} added to the target{failed.length > 0 && <span className="text-red-600">, {failed.length} failed</span>}</>)}
+        {schema.changes.length > 0 && schema.notes.length > 0 && ' · '}
+        {schema.notes.length > 0 && <>{schema.notes.length} other difference{schema.notes.length === 1 ? '' : 's'}, not changed (never removed or altered automatically)</>}
+        <button className="ml-2 text-blue-600 hover:underline" onClick={() => setOpen((v) => !v)}>{open ? 'Hide' : 'Show'}</button>
+      </p>
+      {open && (
+        <div className="space-y-2">
+          {schema.changes.length > 0 && (
+            <ul className="space-y-1">
+              {schema.changes.map((c, i) => (
+                <li key={i}>
+                  <span className={c.status === 'FAILED' ? 'text-red-600' : c.status === 'APPLIED' ? 'text-green-700' : 'text-amber-700'}>
+                    {c.status === 'APPLIED' ? 'Added' : c.status === 'FAILED' ? 'Failed' : 'Missing'}
+                  </span>{' '}
+                  {CHANGE_LABEL[c.kind]} <span className="font-mono">{c.kind === 'CREATE_TABLE' ? c.table : `${c.table}.${c.name}`}</span>
+                  {c.error && <span className="text-red-600"> — {c.error}</span>}
+                  <pre className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[11px] text-gray-500 bg-gray-50 rounded px-1.5 py-1 max-h-32 overflow-auto">{c.sql}</pre>
+                </li>
+              ))}
+            </ul>
+          )}
+          {schema.notes.length > 0 && (
+            <div>
+              <p className="text-gray-500 mb-1">Not changed: fixing these means altering or removing something, which can lose data. Review the SQL and run it yourself if you want it.</p>
+              <ul className="space-y-1">
+                {schema.notes.map((n, i) => (
+                  <li key={i}>
+                    <span className="text-gray-700">{NOTE_LABEL[n.kind] ?? n.kind}</span>{' '}
+                    <span className="font-mono">{n.kind === 'TABLE_ONLY_ON_TARGET' ? n.table : `${n.table}.${n.name}`}</span>
+                    {(n.source || n.target) && <span className="text-gray-500"> — source: {n.source ?? 'none'}; target: {n.target ?? 'none'}</span>}
+                    {n.suggestedSql && <pre className="mt-0.5 whitespace-pre-wrap break-all font-mono text-[11px] text-gray-500 bg-gray-50 rounded px-1.5 py-1">{n.suggestedSql}</pre>}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   )
 }
 
@@ -158,6 +227,8 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
         {run.status === 'FAILED' && run.error && (
           <p className="text-xs text-red-700 bg-red-50 border border-red-100 rounded-lg px-2.5 py-1.5 whitespace-pre-wrap break-words">{run.error}</p>
         )}
+
+        {run.schema && <SchemaSection schema={run.schema} compare={compare} />}
 
         {results.length > 0 && (
           <div>
@@ -375,8 +446,8 @@ export default function DataSyncPage() {
               <ul className="list-disc pl-5 space-y-0.5">
                 <li>rows missing on the target are added, changed rows are replaced</li>
                 <li><b>rows that exist only on the target are deleted</b></li>
-                <li>tables missing on the target are created; tables only on the target are left alone</li>
-                <li>tables whose columns differ are skipped and reported</li>
+                <li>schema first: missing tables, columns, indexes and foreign keys are added on the target; nothing is ever removed or altered</li>
+                <li>tables only on the target are left alone; tables whose columns still differ are skipped and reported</li>
               </ul>
             </div>
             <Select

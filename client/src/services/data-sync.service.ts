@@ -27,6 +27,32 @@ export interface TableReport {
   note?: string
 }
 
+export interface SchemaChange {
+  kind: 'CREATE_TABLE' | 'ADD_COLUMN' | 'ADD_INDEX' | 'ADD_FOREIGN_KEY'
+  table: string
+  targetTable: string
+  name: string
+  sql: string
+  status?: 'APPLIED' | 'FAILED'
+  error?: string
+}
+
+export interface SchemaNote {
+  kind: string
+  table: string
+  name: string
+  source?: string
+  target?: string
+  suggestedSql?: string
+}
+
+/** Schema check: additions (applied when syncing) and differences that are only reported */
+export interface SchemaReport {
+  changes: SchemaChange[]
+  notes: SchemaNote[]
+  tablesCompared: number
+}
+
 export interface DataSyncRun {
   id: string
   sourceConnectionId: string | null
@@ -50,6 +76,7 @@ export interface DataSyncRun {
   rowsChecked: number
   rowsEstimate: number | null
   results: TableReport[] | null
+  schema: SchemaReport | null
   error: string | null
   progressAt: string | null
   startedAt: string | null

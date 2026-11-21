@@ -139,7 +139,8 @@ describe.skipIf(!MARIADB)('MySQL data sync (compare and copy differences)', () =
     expect(r.members.reason).toBeUndefined();
     expect(r.members).toMatchObject({ status: 'SYNCED', inserted: 3, updated: 6, deleted: 1 });
     expect(r.pairs).toMatchObject({ status: 'SYNCED' });
-    expect(r.only_src).toMatchObject({ status: 'CREATED', inserted: 2 });
+    // The schema step creates the missing table first; then its rows are copied
+    expect(r.only_src).toMatchObject({ status: 'SYNCED', inserted: 2 });
     expect(r.AppSettings).toMatchObject({ status: 'SYNCED', targetTable: 'appsettings' });
     const [srcApp, dstApp] = await Promise.all([
       myAdmin(async (c) => (await c.query<mysql2.RowDataPacket[]>(`CHECKSUM TABLE \`${src}\`.AppSettings EXTENDED`))[0][0].Checksum),
