@@ -99,8 +99,11 @@ export class DataSyncStopped extends Error {
   constructor() { super('Stopped by the user'); }
 }
 
-// Exact copies: dates, big numbers, decimals and JSON as text, never re-interpreted by JavaScript
+// Exact copies: dates, big numbers, decimals, JSON and floating point as text, never re-interpreted by JavaScript
 export const EXACT: Partial<mysql2.ConnectionOptions> = {
+  // mysql2's own text-to-number parsing can be off in the last digit of a DOUBLE
+  // (901703.0398196997 read as ...6996); the server's text is exact, so keep it
+  typeCast: (field, next) => (field.type === 'DOUBLE' || field.type === 'FLOAT' ? field.string() : next()),
   dateStrings: true,
   supportBigNumbers: true,
   bigNumberStrings: true,
@@ -141,9 +144,20 @@ export function normalizeColumnType(t: string): string {
   return t.toLowerCase().replace(/^(tinyint|smallint|mediumint|int|integer|bigint)\(\d+\)/, '$1').trim();
 }
 
+const FLOATING = new Set(['float', 'double', 'real']);
+
+/**
+ * A column as read for copying or hashing. MySQL shows a FLOAT with 6 digits
+ * (0.0000968527 for 0.00009685273107606918), which loses precision when copied
+ * and hides differences when compared; as a DOUBLE it shows every digit.
+ */
+export function exactColumn(c: Column): string {
+  return FLOATING.has(c.dataType) ? `(${qid(c.name)} + 0E0)` : qid(c.name);
+}
+
 /** Per-row hash expression: every column, NULL told apart from '' by a flag string. */
 export function rowHashExpr(columns: Column[]): string {
-  const parts = columns.map((c) => (BINARY_TYPES.has(c.dataType) ? `HEX(${qid(c.name)})` : `CONVERT(${qid(c.name)} USING utf8mb4)`));
+  const parts = columns.map((c) => (BINARY_TYPES.has(c.dataType) ? `HEX(${qid(c.name)})` : `CONVERT(${exactColumn(c)} USING utf8mb4)`));
   const nullFlags = `CONCAT(${columns.map((c) => `ISNULL(${qid(c.name)})`).join(', ')})`;
   return `MD5(CONCAT_WS('#', ${[...parts, nullFlags].join(', ')}))`;
 }
@@ -361,8 +375,10 @@ async function applyChunk(
   toDelete: unknown[][],
   toCopy: unknown[][],
 ): Promise<void> {
-  const insertCols = meta.columns.filter((c) => !c.generated).map((c) => c.name);
+  const copied = meta.columns.filter((c) => !c.generated);
+  const insertCols = copied.map((c) => c.name);
   const colList = insertCols.map(qid).join(', ');
+  const selectList = copied.map((c) => (exactColumn(c) === qid(c.name) ? qid(c.name) : `${exactColumn(c)} AS ${qid(c.name)}`)).join(', ');
   await dst.beginTransaction();
   try {
     for (let i = 0; i < toDelete.length; i += KEY_BATCH) {
@@ -371,7 +387,7 @@ async function applyChunk(
     }
     for (let i = 0; i < toCopy.length; i += KEY_BATCH) {
       const w = keysIn(meta.pk, toCopy.slice(i, i + KEY_BATCH));
-      const data = await rows(src, `SELECT ${colList} FROM ${qid(srcTable)} WHERE ${w.sql}`, w.params);
+      const data = await rows(src, `SELECT ${selectList} FROM ${qid(srcTable)} WHERE ${w.sql}`, w.params);
       let batch: unknown[][] = [];
       let bytes = 0;
       const flush = async () => {
