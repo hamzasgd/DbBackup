@@ -339,7 +339,7 @@ const isRetryable = (err: unknown) => [1205, 1213].includes(errno(err));
  */
 export async function startLiveStream(source: ConnectionConfig, target: ConnectionConfig, opts: LiveStreamOptions): Promise<LiveStream> {
   // Values exactly as stored: dates as text in UTC, big numbers and JSON as text
-  const src = await ConnectionFactory.createMySQLConnection(source, { ...EXACT, timezone: 'Z' });
+  const src = await ConnectionFactory.createMySQLConnection(source, { ...EXACT, typeCast: true, timezone: 'Z' });
   src.connection.on('error', () => undefined);
   const dst = new Target(target);
   let z: ZongJi | null = null;
