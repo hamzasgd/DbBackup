@@ -13,8 +13,13 @@ describe.skipIf(!MARIADB)('MySQL data sync stop', () => {
     await myAdmin(async (c) => {
       await c.query(`CREATE DATABASE \`${src}\`; CREATE DATABASE \`${dst}\``);
       await c.query(`CREATE TABLE \`${src}\`.big (id INT PRIMARY KEY, v TEXT NOT NULL)`);
-      await c.query('SET SESSION cte_max_recursion_depth = 1000000');
-      await c.query(`INSERT INTO \`${src}\`.big WITH RECURSIVE s(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM s WHERE n < 400000) SELECT n, REPEAT('x', 400) FROM s`);
+      // 400,000 rows from a digits table (works on MySQL and MariaDB alike)
+      await c.query(`CREATE TABLE \`${src}\`.digits (d INT); INSERT INTO \`${src}\`.digits VALUES (0),(1),(2),(3),(4),(5),(6),(7),(8),(9)`);
+      await c.query(`INSERT INTO \`${src}\`.big SELECT n, REPEAT('x', 400) FROM (
+        SELECT 1 + a.d + 10 * b.d + 100 * c.d + 1000 * e.d + 10000 * f.d + 100000 * g.d AS n
+          FROM \`${src}\`.digits a, \`${src}\`.digits b, \`${src}\`.digits c, \`${src}\`.digits e, \`${src}\`.digits f, \`${src}\`.digits g
+         WHERE g.d < 4) s`);
+      await c.query(`DROP TABLE \`${src}\`.digits`);
       await c.query(`CREATE TABLE \`${dst}\`.big LIKE \`${src}\`.big`);
       await c.query(`INSERT INTO \`${dst}\`.big SELECT * FROM \`${src}\`.big`);
     });
