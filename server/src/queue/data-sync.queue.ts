@@ -123,7 +123,8 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
         }).catch(() => undefined);
       } catch (err) {
         await stopTimer();
-        const stopped = err instanceof DataSyncStopped;
+        // A query cancelled by Stop (MySQL error 1317) also means stopped
+        const stopped = err instanceof DataSyncStopped || (cancel && (err as { errno?: number })?.errno === 1317);
         const message = err instanceof Error ? err.message : String(err);
         await prisma.dataSyncRun.update({
           where: { id: runId },

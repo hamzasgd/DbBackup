@@ -401,7 +401,16 @@ const isConnectionLost = (err: unknown) => {
 /** One connection, reopened (with its session settings) after it breaks. */
 class Session {
   private res: MySQLConnectionResult | null = null;
-  constructor(private readonly config: ConnectionConfig, private readonly init: string[]) {}
+  constructor(private readonly cfg: ConnectionConfig, private readonly init: string[]) {}
+
+  /** The server's id for this connection (what KILL QUERY takes), while open */
+  get threadId(): number | null {
+    return this.res?.connection.threadId ?? null;
+  }
+
+  get config(): ConnectionConfig {
+    return this.cfg;
+  }
 
   get c(): mysql2.Connection {
     if (!this.res) throw Object.assign(new Error('not connected'), { fatal: true });
@@ -410,7 +419,7 @@ class Session {
 
   async open(): Promise<void> {
     await this.close();
-    const r = await open(this.config);
+    const r = await open(this.cfg);
     // A broken idle connection emits 'error'; the next query reports it instead
     r.connection.on('error', () => undefined);
     this.res = r;
@@ -435,6 +444,31 @@ class Session {
       return rows(this.c, sql, params);
     }
   };
+}
+
+/** MySQL's error when KILL QUERY cancelled the statement */
+const isInterrupted = (err: unknown) => (err as { errno?: number })?.errno === 1317;
+
+/**
+ * Cancel the statements running on these connections, so Stop doesn't wait
+ * for a long query to finish. Only the given connection ids (this run's own)
+ * are touched. A cancelled read changes nothing; a cancelled write is inside
+ * a transaction that MySQL rolls back. RDS refuses KILL for some setups and
+ * offers mysql.rds_kill_query instead.
+ */
+export async function killQueries(config: ConnectionConfig, threadIds: number[]): Promise<void> {
+  if (threadIds.length === 0) return;
+  const { connection, tunnel } = await ConnectionFactory.createMySQLConnection(config, { connectTimeout: 15_000 });
+  try {
+    for (const id of threadIds) {
+      await connection.query('KILL QUERY ?', [id])
+        .catch(() => connection.query('CALL mysql.rds_kill_query(?)', [id]))
+        .catch(() => undefined);
+    }
+  } finally {
+    await connection.end().catch(() => undefined);
+    tunnel?.close();
+  }
 }
 
 /** Run fn; when a connection broke, reopen these sessions and run it once more. */
@@ -665,12 +699,29 @@ export async function mysqlDataSync(
   const ctlDst = new Session(targetConfig, dstInit);
   const pairs: Pair[] = Array.from({ length: parallel }, () => ({ src: new Session(sourceConfig, srcInit), dst: new Session(targetConfig, dstInit) }));
   const all = [ctlSrc, ctlDst, ...pairs.flatMap((p) => [p.src, p.dst])];
+  const stopWatches: ReturnType<typeof setInterval>[] = [];
   try {
     // One connection at a time per server (an SSH jump host may refuse many handshakes at once)
     await Promise.all([
       (async () => { for (const s of [ctlSrc, ...pairs.map((p) => p.src)]) await s.open(); })(),
       (async () => { for (const s of [ctlDst, ...pairs.map((p) => p.dst)]) await s.open(); })(),
     ]);
+
+    // Stop: also cancel whatever this run's connections are executing, instead of
+    // waiting for a long query (e.g. scanning a big table) to finish
+    let killing: Promise<void> | null = null;
+    const stopWatch = setInterval(() => {
+      if (killing || !opts.shouldStop?.()) return;
+      const ids = (side: Session[]) => side.map((x) => x.threadId).filter((x): x is number => x !== null);
+      const srcSide = [ctlSrc, ...pairs.map((p) => p.src)];
+      const dstSide = [ctlDst, ...pairs.map((p) => p.dst)];
+      killing = Promise.all([
+        killQueries(sourceConfig, ids(srcSide)),
+        killQueries(targetConfig, ids(dstSide)),
+      ]).then(() => undefined, () => undefined);
+    }, 1000);
+    stopWatch.unref?.();
+    stopWatches.push(stopWatch);
 
     // The source's own clock: the next quick run looks for changes from here on
     const [clock] = await ctlSrc.query<{ t: string }>('SELECT UTC_TIMESTAMP(3) AS t');
@@ -822,6 +873,7 @@ export async function mysqlDataSync(
         if (report.status !== 'CREATED') report.status = changed ? (opts.apply ? 'SYNCED' : 'DIFFERENT') : 'SAME';
       } catch (err) {
         if (err instanceof DataSyncStopped) throw err;
+        if (isInterrupted(err) && opts.shouldStop?.()) throw new DataSyncStopped();
         if (!(err as { done?: boolean }).done) {
           report.status = (err as { skip?: boolean }).skip ? 'SKIPPED' : 'ERROR';
           report.reason = err instanceof Error ? err.message.slice(0, 500) : String(err);
@@ -844,6 +896,7 @@ export async function mysqlDataSync(
     }
     return reports;
   } finally {
+    for (const t of stopWatches) clearInterval(t);
     await Promise.all(all.map((s) => s.close().catch(() => undefined)));
   }
 }
