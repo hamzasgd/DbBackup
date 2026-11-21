@@ -9,6 +9,8 @@ import { addDataSyncJob, getDataSyncQueue } from '../queue/data-sync.queue';
 import { logAudit } from '../services/audit.service';
 
 const SUPPORTED = new Set(['MYSQL', 'MARIADB']);
+/** Quick sync looks this far before the last sync started */
+export const QUICK_MARGIN_MS = 15 * 60 * 1000;
 
 /**
  * Start a compare (read-only) or apply (copy the differences) run from a
@@ -18,8 +20,9 @@ const SUPPORTED = new Set(['MYSQL', 'MARIADB']);
 export async function startDataSync(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const userId = req.user!.userId;
-    const { sourceConnectionId, targetConnectionId, mode, tables = [], confirmTarget, parallel = 4 } = req.body as {
+    const { sourceConnectionId, targetConnectionId, mode, tables = [], confirmTarget, parallel = 4, method = 'FULL' } = req.body as {
       sourceConnectionId: string; targetConnectionId: string; mode: 'COMPARE' | 'APPLY'; tables?: string[]; confirmTarget?: string; parallel?: number;
+      method?: 'FULL' | 'QUICK';
     };
     const [source, target] = await Promise.all([
       prisma.connection.findFirst({ where: { id: sourceConnectionId, userId } }),
@@ -47,11 +50,42 @@ export async function startDataSync(req: AuthRequest, res: Response, next: NextF
     });
     if (busy) throw new AppError(`A compare or sync with "${target.name}" as the target is already running`, 409, 'SYNC_IN_PROGRESS');
 
+    // Quick: changes since the last completed sync between these two databases, with a margin
+    // for clocks that differ a little and transactions that committed late
+    let since: Date | null = null;
+    if (method === 'QUICK') {
+      const pair = { userId, sourceConnectionId: source.id, targetConnectionId: target.id, status: 'COMPLETED' };
+      const last = await prisma.dataSyncRun.findFirst({
+        where: { ...pair, mode: 'APPLY' },
+        orderBy: { createdAt: 'desc' },
+        select: { sourceTime: true, startedAt: true, tables: true, createdAt: true },
+      });
+      let base = last?.sourceTime ?? last?.startedAt ?? null;
+      if (last && base && last.tables.length > 0) {
+        // That sync covered only some tables (e.g. "Sync these differences"); the others were last
+        // checked by the compare of all tables before it, so look from there
+        const before = await prisma.dataSyncRun.findFirst({
+          where: { ...pair, tables: { isEmpty: true }, createdAt: { lt: last.createdAt } },
+          orderBy: { createdAt: 'desc' },
+          select: { sourceTime: true, startedAt: true },
+        });
+        const other = before?.sourceTime ?? before?.startedAt ?? null;
+        base = other && other < base ? other : before ? base : null;
+      }
+      if (!base) {
+        throw new AppError(
+          `Quick sync needs one completed full sync from "${source.name}" to "${target.name}" first, to know where to start. Run "Sync differences" with Full once.`,
+          400, 'NO_BASELINE',
+        );
+      }
+      since = new Date(base.getTime() - QUICK_MARGIN_MS);
+    }
+
     const run = await prisma.dataSyncRun.create({
       data: {
         userId, sourceConnectionId: source.id, targetConnectionId: target.id,
         sourceName: source.name, targetName: target.name, sourceDatabase: s.database, targetDatabase: t.database,
-        mode, tables, parallel,
+        mode, tables, parallel, method, since,
       },
     });
     try {

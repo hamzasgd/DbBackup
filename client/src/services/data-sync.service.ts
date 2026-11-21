@@ -1,6 +1,7 @@
 import api from '../lib/api'
 
 export type DataSyncMode = 'COMPARE' | 'APPLY'
+export type DataSyncMethod = 'FULL' | 'QUICK'
 export type DataSyncStatus = 'PENDING' | 'RUNNING' | 'COMPLETED' | 'FAILED' | 'CANCELLED'
 export type TableStatus = 'SAME' | 'DIFFERENT' | 'SYNCED' | 'CREATED' | 'ONLY_IN_SOURCE' | 'ONLY_IN_TARGET' | 'SKIPPED' | 'ERROR'
 
@@ -20,6 +21,10 @@ export interface TableReport {
   warning?: string
   /** How long the table took */
   ms?: number
+  /** QUICK: only rows changed since the last sync; FULL: every row */
+  method?: 'QUICK' | 'FULL'
+  /** How the table was compared, when worth saying */
+  note?: string
 }
 
 export interface DataSyncRun {
@@ -34,6 +39,9 @@ export interface DataSyncRun {
   tables: string[]
   /** Chunks checked at the same time */
   parallel: number
+  /** FULL: every row; QUICK: rows changed since `since` (by updatedAt), plus new and deleted rows */
+  method: DataSyncMethod
+  since: string | null
   status: DataSyncStatus
   cancelRequested: boolean
   currentTable: string | null
@@ -52,7 +60,7 @@ export interface DataSyncRun {
 export const dataSyncApi = {
   list: (limit = 10) =>
     api.get<{ success: boolean; data: { runs: DataSyncRun[]; serverTime: string } }>('/data-sync', { params: { limit } }),
-  start: (data: { sourceConnectionId: string; targetConnectionId: string; mode: DataSyncMode; tables?: string[]; confirmTarget?: string; parallel?: number }) =>
+  start: (data: { sourceConnectionId: string; targetConnectionId: string; mode: DataSyncMode; tables?: string[]; confirmTarget?: string; parallel?: number; method?: DataSyncMethod }) =>
     api.post<{ success: boolean; data: { id: string } }>('/data-sync', data),
   cancel: (id: string) => api.post(`/data-sync/${id}/cancel`),
 }

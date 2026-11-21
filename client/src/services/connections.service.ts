@@ -117,6 +117,8 @@ export interface DbInfo {
 }
 
 export const connectionsApi = {
+  /** How the server stores table names, and a warning when its backups get lowercase names */
+  tableCase: (id: string) => api.get<{ success: boolean; data: { warning: string | null } }>(`/connections/${id}/table-case`),
   getAll: () => api.get<{ success: boolean; data: Connection[] }>('/connections'),
   getOne: (id: string) => api.get<{ success: boolean; data: Connection }>(`/connections/${id}`),
   create: (data: CreateConnectionPayload) => api.post<{ success: boolean; data: Connection }>('/connections', data),

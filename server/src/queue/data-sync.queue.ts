@@ -81,11 +81,18 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
         if (!source || !target) throw new Error('The source or target connection was deleted');
         if (run.mode === 'APPLY') assertWritable(target, 'sync changes into it (Compare still works)');
 
-        logger.info(`Data sync ${runId} (${run.mode}, ${run.parallel} at a time): ${run.sourceName} → ${run.targetName}`);
+        logger.info(`Data sync ${runId} (${run.mode} ${run.method}${run.since ? ` since ${run.since.toISOString()}` : ''}, ${run.parallel} at a time): ${run.sourceName} → ${run.targetName}`);
         const reports = await mysqlDataSync(toEngineConfig(source), toEngineConfig(target), {
           apply: run.mode === 'APPLY',
           tables: run.tables,
           parallel: run.parallel,
+          quick: run.method === 'QUICK' && run.since ? { since: run.since.toISOString().replace('T', ' ').replace('Z', '') } : undefined,
+          onStart: ({ sourceTime }) => {
+            const t = new Date(`${sourceTime.replace(' ', 'T')}Z`);
+            if (!Number.isNaN(t.getTime())) {
+              void prisma.dataSyncRun.update({ where: { id: runId }, data: { sourceTime: t } }).catch(() => undefined);
+            }
+          },
           onProgress: (p) => { progress = p; },
           onTable: (r) => {
             results.push(r);

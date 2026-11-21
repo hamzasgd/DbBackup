@@ -306,3 +306,17 @@ export async function resetSshHostKey(req: AuthRequest, res: Response, next: Nex
     res.json({ success: true, message: 'SSH host key forgotten. The next connection will pin the key the server presents.' });
   } catch (err) { next(err); }
 }
+
+// ─── Table name case (lower_case_table_names) ───────────────────────────────
+import { tableCaseInfo, backupCaseWarning, supportsTableCase } from '../services/table-case.service';
+
+/** How the server stores table names; the New Backup dialog warns when its backups get lowercase names. */
+export async function getTableCase(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const conn = await prisma.connection.findFirst({ where: { id: req.params.id, userId: req.user!.userId } });
+    if (!conn) throw new AppError('Connection not found', 404);
+    if (!supportsTableCase(conn.type)) { res.json({ success: true, data: { info: null, warning: null } }); return; }
+    const info = await tableCaseInfo(conn);
+    res.json({ success: true, data: { info, warning: backupCaseWarning(info) } });
+  } catch (err) { next(err); }
+}

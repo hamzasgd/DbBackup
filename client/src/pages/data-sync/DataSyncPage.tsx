@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, GitCompareArrows, Loader2, OctagonX, Search, Square, XCircle } from 'lucide-react'
 import { connectionsApi, type Connection } from '../../services/connections.service'
-import { dataSyncApi, type DataSyncRun, type TableReport, type TableStatus } from '../../services/data-sync.service'
+import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type TableReport, type TableStatus } from '../../services/data-sync.service'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
@@ -37,6 +37,11 @@ const STATUS_COLOR: Record<TableStatus, string> = {
 }
 
 const isActive = (r: DataSyncRun) => r.status === 'PENDING' || r.status === 'RUNNING'
+
+const METHOD_OPTIONS = [
+  { label: 'Full — every row', value: 'FULL' },
+  { label: 'Quick — changes since last sync', value: 'QUICK' },
+]
 
 const PARALLEL_OPTIONS = [
   { label: '1 at a time — lightest on both servers', value: '1' },
@@ -96,6 +101,7 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
           <p className="text-xs text-gray-400 mt-1">
             {formatDate(run.startedAt ?? run.createdAt)}
             {elapsed !== null && <> · {isActive(run) ? 'running' : 'took'} {formatDuration(elapsed)}</>}
+            {run.method === 'QUICK' && <> · quick: changes since {run.since ? formatDate(run.since) : 'the last sync'}</>}
             {run.parallel > 1 && <> · {run.parallel} chunks at a time</>}
             {run.tables.length > 0 && <> · tables: {run.tables.join(', ')}</>}
           </p>
@@ -180,7 +186,7 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
                       <td className="py-1.5 pr-3 text-right tabular-nums">{r.deleted ? n(r.deleted) : '–'}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums text-gray-500">{r.ms === undefined ? '' : r.ms < 1000 ? '<1s' : formatDuration(r.ms)}</td>
                       <td className="py-1.5 text-gray-500">
-                        {[r.targetTable && `named ${r.targetTable} on the target`, r.reason, r.warning].filter(Boolean).join(' · ')}
+                        {[r.targetTable && `named ${r.targetTable} on the target`, r.note, r.reason, r.warning].filter(Boolean).join(' · ')}
                       </td>
                     </tr>
                   ))}
@@ -223,7 +229,8 @@ export default function DataSyncPage() {
   const [targetId, setTargetId] = useState('')
   const [tablesText, setTablesText] = useState('')
   const [parallel, setParallel] = useState(4)
-  const [confirm, setConfirm] = useState<{ source: Connection; target: Connection; tables: string[]; parallel: number } | null>(null)
+  const [method, setMethod] = useState<DataSyncMethod>('FULL')
+  const [confirm, setConfirm] = useState<{ source: Connection; target: Connection; tables: string[]; parallel: number; method: DataSyncMethod } | null>(null)
   const [confirmText, setConfirmText] = useState('')
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
@@ -241,8 +248,8 @@ export default function DataSyncPage() {
   const serverTime = runsData?.data.data.serverTime ?? null
 
   const start = useMutation({
-    mutationFn: (v: { mode: 'COMPARE' | 'APPLY'; source: Connection; target: Connection; tables: string[]; parallel: number; confirmTarget?: string }) =>
-      dataSyncApi.start({ sourceConnectionId: v.source.id, targetConnectionId: v.target.id, mode: v.mode, tables: v.tables, parallel: v.parallel, confirmTarget: v.confirmTarget }),
+    mutationFn: (v: { mode: 'COMPARE' | 'APPLY'; source: Connection; target: Connection; tables: string[]; parallel: number; method: DataSyncMethod; confirmTarget?: string }) =>
+      dataSyncApi.start({ sourceConnectionId: v.source.id, targetConnectionId: v.target.id, mode: v.mode, tables: v.tables, parallel: v.parallel, method: v.method, confirmTarget: v.confirmTarget }),
     onSuccess: (_r, v) => {
       qc.invalidateQueries({ queryKey: ['data-sync'] })
       toast.success(v.mode === 'APPLY' ? 'Sync started' : 'Comparison started')
@@ -283,12 +290,18 @@ export default function DataSyncPage() {
             <Select label="Source (copied from)" options={options(targetId)} value={sourceId} onChange={(e) => setSourceId(e.target.value)} />
             <Select label="Target (brought up to date)" options={options(sourceId)} value={targetId} onChange={(e) => setTargetId(e.target.value)} />
           </div>
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <Input
               label="Only these tables (optional)"
               placeholder="All tables — or e.g. members, orders"
               value={tablesText}
               onChange={(e) => setTablesText(e.target.value)}
+            />
+            <Select
+              label="Method"
+              options={METHOD_OPTIONS}
+              value={method}
+              onChange={(e) => setMethod(e.target.value as DataSyncMethod)}
             />
             <Select
               label="Speed"
@@ -303,18 +316,22 @@ export default function DataSyncPage() {
             </p>
           )}
           <p className="text-xs text-gray-500">
-            Each table is compared in chunks along its primary key; both databases checksum their own rows, so only
-            checksums and the rows that differ travel over the network. Every run still reads all rows on both sides;
-            checking several chunks at a time is faster but adds load on both servers.
+            {method === 'QUICK'
+              ? <>Quick: in big tables with an <code>updatedAt</code> column, only rows changed since the last completed
+                sync are compared, plus rows added or deleted (found from the keys). Changes that didn&apos;t touch
+                updatedAt are missed, so run a Full compare now and then. Other tables are compared in full.</>
+              : <>Full: every row of every table is compared in chunks along its primary key; both databases checksum
+                their own rows, so only checksums and the rows that differ travel over the network. Checking several
+                chunks at a time is faster but adds load on both servers.</>}
           </p>
           <div className="flex flex-wrap gap-2 justify-end">
             <Button variant="outline" disabled={!ready} loading={start.isPending}
-              onClick={() => source && target && start.mutate({ mode: 'COMPARE', source, target, tables, parallel })}>
+              onClick={() => source && target && start.mutate({ mode: 'COMPARE', source, target, tables, parallel, method })}>
               <Search className="h-4 w-4" />Compare (read-only)
             </Button>
             <Button variant="danger" disabled={!ready || !!target?.writeProtected}
               title={target?.writeProtected ? 'The target is write-protected: Compare only' : undefined}
-              onClick={() => source && target && (setConfirm({ source, target, tables, parallel }), setConfirmText(''))}>
+              onClick={() => source && target && (setConfirm({ source, target, tables, parallel, method }), setConfirmText(''))}>
               <GitCompareArrows className="h-4 w-4" />Sync differences…
             </Button>
           </div>
@@ -337,7 +354,7 @@ export default function DataSyncPage() {
                 if (!s || !t) { toast.error('The source or target connection no longer exists'); return }
                 // Only the tables that differed
                 const differing = (run.results ?? []).filter((x) => x.status === 'DIFFERENT' || x.status === 'ONLY_IN_SOURCE').map((x) => x.table)
-                setConfirm({ source: s, target: t, tables: differing, parallel })
+                setConfirm({ source: s, target: t, tables: differing, parallel, method: run.method ?? 'FULL' })
                 setConfirmText('')
               }}
             />
@@ -363,6 +380,12 @@ export default function DataSyncPage() {
               </ul>
             </div>
             <Select
+              label="Method"
+              options={METHOD_OPTIONS}
+              value={confirm.method}
+              onChange={(e) => setConfirm({ ...confirm, method: e.target.value as DataSyncMethod })}
+            />
+            <Select
               label="Speed"
               options={PARALLEL_OPTIONS}
               value={String(confirm.parallel)}
@@ -381,7 +404,7 @@ export default function DataSyncPage() {
                 variant="danger"
                 disabled={confirmText !== confirm.target.database}
                 loading={start.isPending}
-                onClick={() => start.mutate({ mode: 'APPLY', source: confirm.source, target: confirm.target, tables: confirm.tables, parallel: confirm.parallel, confirmTarget: confirmText })}
+                onClick={() => start.mutate({ mode: 'APPLY', source: confirm.source, target: confirm.target, tables: confirm.tables, parallel: confirm.parallel, method: confirm.method, confirmTarget: confirmText })}
               >
                 {start.isPending ? <Loader2 className="h-4 w-4 animate-spin" /> : <GitCompareArrows className="h-4 w-4" />}Sync now
               </Button>

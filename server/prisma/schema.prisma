@@ -388,6 +388,11 @@ model DataSyncRun {
   tables             String[]    @default([])
   /// Chunks checked at the same time, each over its own connections
   parallel           Int         @default(4)
+  /// FULL: every row; QUICK: rows changed since `since` (by updatedAt), plus new and deleted rows
+  method             String      @default("FULL")
+  /// The source server's clock (UTC) when the run started
+  sourceTime         DateTime?
+  since              DateTime?
   status             String      @default("PENDING") // PENDING | RUNNING | COMPLETED | FAILED | CANCELLED
   cancelRequested    Boolean     @default(false)
   currentTable       String?

@@ -118,6 +118,9 @@ export const restoreApi = {
     api.post<{ success: boolean; data: { jobId: string }; message: string }>('/restore', data),
   check: (params: { backupId: string; targetConnectionId: string }) =>
     api.get<{ success: boolean; data: RestoreCheck }>('/restore/check', { params }),
+  /** Whether restoring changes the case of table names (connects to both servers) */
+  caseCheck: (params: { backupId: string; targetConnectionId: string }) =>
+    api.get<{ success: boolean; data: { warning: string | null } }>('/restore/case-check', { params }),
   list: (limit = 10) =>
     api.get<{ success: boolean; data: { restores: RestoreRecord[]; serverTime: string } }>('/restore', { params: { limit } }),
 }
