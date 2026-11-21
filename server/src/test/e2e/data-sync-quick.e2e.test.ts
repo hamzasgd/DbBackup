@@ -21,12 +21,14 @@ describe.skipIf(!MARIADB)('MySQL quick sync (updatedAt)', () => {
           updatedAt DATETIME(3) NOT NULL, INDEX (updatedAt), INDEX (shop));
         CREATE TABLE \`${src}\`.pairs (a INT NOT NULL, b VARCHAR(10) NOT NULL, v TEXT, updated_at TIMESTAMP(3) NULL, PRIMARY KEY (a, b), INDEX (updated_at));
         CREATE TABLE \`${src}\`.plain (id INT PRIMARY KEY, v TEXT);
+        CREATE TABLE \`${src}\`.noidx (id INT PRIMARY KEY, v VARCHAR(20) NOT NULL, updatedAt DATETIME(3) NOT NULL, INDEX (v));
       `);
+      await c.query(`INSERT INTO \`${src}\`.noidx VALUES ?`, [Array.from({ length: 15000 }, (_, i) => [i + 1, `n${i + 1}`, '2026-01-01 00:00:00'])]);
       await c.query(`INSERT INTO \`${src}\`.orders (id, shop, v, updatedAt) VALUES ?`,
         [Array.from({ length: 3000 }, (_, i) => [i + 1, i % 7, `v${i + 1}`, '2026-01-01 00:00:00'])]);
       await c.query(`INSERT INTO \`${src}\`.pairs VALUES ?`, [Array.from({ length: 1000 }, (_, i) => [i % 50, `k${Math.floor(i / 50)}`, `p${i}`, '2026-01-01 00:00:00'])]);
       await c.query(`INSERT INTO \`${src}\`.plain VALUES ?`, [Array.from({ length: 500 }, (_, i) => [i + 1, `x${i}`])]);
-      for (const t of ['orders', 'pairs', 'plain']) {
+      for (const t of ['orders', 'pairs', 'plain', 'noidx']) {
         await c.query(`CREATE TABLE \`${dst}\`.\`${t}\` LIKE \`${src}\`.\`${t}\``);
         await c.query(`INSERT INTO \`${dst}\`.\`${t}\` SELECT * FROM \`${src}\`.\`${t}\``);
       }
@@ -41,6 +43,7 @@ describe.skipIf(!MARIADB)('MySQL quick sync (updatedAt)', () => {
         UPDATE \`${src}\`.pairs SET v = 'changed', updated_at = '2026-07-01 00:00:00' WHERE a = 1 AND b IN ('k1', 'k2', 'k3');
         DELETE FROM \`${src}\`.pairs WHERE a = 2 AND b IN ('k4', 'k5');
         UPDATE \`${src}\`.plain SET v = 'changed' WHERE id = 42;
+        UPDATE \`${src}\`.noidx SET v = CONCAT(v, '!'), updatedAt = '2026-07-01 00:00:00' WHERE id % 3 <> 0;
       `);
     });
   });
@@ -60,6 +63,9 @@ describe.skipIf(!MARIADB)('MySQL quick sync (updatedAt)', () => {
     expect(r.pairs).toMatchObject({ method: 'FULL', status: 'DIFFERENT', updated: 3, inserted: 0, deleted: 2 });
     expect(r.pairs.note).toMatch(/row counts differed/);
     expect(r.plain).toMatchObject({ method: 'FULL', status: 'DIFFERENT', updated: 1 });
+    // No index on updatedAt and 10,000 changed rows (two pages): read once in key order
+    expect(r.noidx).toMatchObject({ method: 'QUICK', status: 'DIFFERENT', rows: 10_000, updated: 10_000, inserted: 0, deleted: 0 });
+    expect(r.noidx.note).toMatch(/no index on updatedAt/);
   });
 
   it('quick sync copies those differences; a full compare then finds only the change that skipped updatedAt', async () => {
@@ -68,6 +74,7 @@ describe.skipIf(!MARIADB)('MySQL quick sync (updatedAt)', () => {
     expect(r.pairs).toMatchObject({ status: 'SYNCED' });
     expect(await checksum(dst, 'pairs')).toBe(await checksum(src, 'pairs'));
     expect(await checksum(dst, 'plain')).toBe(await checksum(src, 'plain'));
+    expect(await checksum(dst, 'noidx')).toBe(await checksum(src, 'noidx'));
 
     const again = byTable(await mysqlDataSync(cfg(src), cfg(dst), { apply: false, quick }));
     // Re-reads the 24 recently changed rows; all match now
