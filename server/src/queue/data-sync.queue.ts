@@ -29,6 +29,26 @@ export async function addDataSyncJob(data: DataSyncJobData): Promise<void> {
 }
 
 const PROGRESS_MS = 3000;
+/** How long a sync waits for a live sync into the same target to pause */
+const LIVE_PAUSE_WAIT_MS = 60_000;
+
+/**
+ * A live sync into this target pauses while a sync runs (it checks every few
+ * seconds); wait until it has, so the two never write at the same time.
+ */
+async function waitForLivePause(targetConnectionId: string | null, runId: string, stop: () => boolean): Promise<void> {
+  if (!targetConnectionId) return;
+  const end = Date.now() + LIVE_PAUSE_WAIT_MS;
+  while (Date.now() < end && !stop()) {
+    const live = await prisma.liveSync.findFirst({
+      where: { targetConnectionId, enabled: true, status: 'RUNNING' },
+      select: { id: true },
+    });
+    if (!live) return;
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  if (!stop()) logger.warn(`Data sync ${runId}: the live sync into the same target did not pause within a minute; going ahead`);
+}
 
 function summary(results: TableReport[]): string {
   const n = (s: TableReport['status']) => results.filter((r) => r.status === s).length;
@@ -82,7 +102,10 @@ export function createDataSyncWorker(): Worker<DataSyncJobData> {
           prisma.connection.findFirst({ where: { id: run.targetConnectionId ?? '', userId } }),
         ]);
         if (!source || !target) throw new Error('The source or target connection was deleted');
-        if (run.mode === 'APPLY') assertWritable(target, 'sync changes into it (Compare still works)');
+        if (run.mode === 'APPLY') {
+          assertWritable(target, 'sync changes into it (Compare still works)');
+          await waitForLivePause(target.id, runId, () => cancel);
+        }
 
         logger.info(`Data sync ${runId} (${run.mode} ${run.method}${run.since ? ` since ${run.since.toISOString()}` : ''}, ${run.parallel} at a time): ${run.sourceName} → ${run.targetName}`);
         const reports = await mysqlDataSync(toEngineConfig(source), toEngineConfig(target), {

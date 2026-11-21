@@ -1,8 +1,9 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { AlertTriangle, CheckCircle2, GitCompareArrows, Loader2, OctagonX, Search, Square, XCircle } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, GitCompareArrows, Loader2, OctagonX, Radio, Search, Square, XCircle } from 'lucide-react'
 import { connectionsApi, type Connection } from '../../services/connections.service'
-import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type SchemaReport, type TableReport, type TableStatus } from '../../services/data-sync.service'
+import { dataSyncApi, type DataSyncMethod, type DataSyncRun, type LiveSync, type SchemaReport, type TableReport, type TableStatus } from '../../services/data-sync.service'
+import { LiveSyncCard } from './LiveSyncCard'
 import { toast } from '../../store/toast.store'
 import { Button } from '../../components/ui/Button'
 import { Card, CardContent, CardHeader, CardTitle } from '../../components/ui/Card'
@@ -170,6 +171,7 @@ function RunCard({ run, serverTime, onSyncThese, onStop, targetProtected }: {
           <p className="text-xs text-gray-400 mt-1">
             {formatDate(run.startedAt ?? run.createdAt)}
             {elapsed !== null && <> · {isActive(run) ? 'running' : 'took'} {formatDuration(elapsed)}</>}
+            {run.liveSyncId && <> · catch-up for Live sync</>}
             {run.method === 'QUICK' && <> · quick: changes since {run.since ? formatDate(run.since) : 'the last sync'}</>}
             {run.parallel > 1 && <> · {run.parallel} chunks at a time</>}
             {run.tables.length > 0 && <> · tables: {run.tables.join(', ')}</>}
@@ -303,6 +305,8 @@ export default function DataSyncPage() {
   const [method, setMethod] = useState<DataSyncMethod>('FULL')
   const [confirm, setConfirm] = useState<{ source: Connection; target: Connection; tables: string[]; parallel: number; method: DataSyncMethod } | null>(null)
   const [confirmText, setConfirmText] = useState('')
+  const [liveConfirm, setLiveConfirm] = useState<{ source: Connection; target: Connection } | null>(null)
+  const [liveConfirmText, setLiveConfirmText] = useState('')
 
   const { data: connsData } = useQuery({ queryKey: ['connections'], queryFn: () => connectionsApi.getAll() })
   const connections = (connsData?.data.data ?? []).filter((c) => SUPPORTED.has(c.type))
@@ -310,10 +314,20 @@ export default function DataSyncPage() {
   const target = connections.find((c) => c.id === targetId)
   const tables = tablesText.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean)
 
+  const { data: liveData } = useQuery({
+    queryKey: ['live-sync'],
+    queryFn: () => dataSyncApi.listLive(),
+    refetchInterval: (q) => ((q.state.data?.data.data.liveSyncs ?? []).some((l) => l.enabled) ? 3000 : false),
+  })
+  const lives = liveData?.data.data.liveSyncs ?? []
+  const liveServerTime = liveData?.data.data.serverTime ?? null
+  // While a live sync starts or catches up, its catch-up run appears among the runs
+  const liveSettling = lives.some((l) => l.enabled && l.status !== 'RUNNING')
+
   const { data: runsData } = useQuery({
     queryKey: ['data-sync'],
     queryFn: () => dataSyncApi.list(10),
-    refetchInterval: (q) => ((q.state.data?.data.data.runs ?? []).some(isActive) ? 3000 : false),
+    refetchInterval: (q) => ((q.state.data?.data.data.runs ?? []).some(isActive) || liveSettling ? 3000 : false),
   })
   const runs = runsData?.data.data.runs ?? []
   const serverTime = runsData?.data.data.serverTime ?? null
@@ -334,6 +348,35 @@ export default function DataSyncPage() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['data-sync'] }),
     onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not stop')),
   })
+
+  const startLive = useMutation({
+    mutationFn: (v: { source: Connection; target: Connection; confirmTarget: string }) =>
+      dataSyncApi.startLive({ sourceConnectionId: v.source.id, targetConnectionId: v.target.id, confirmTarget: v.confirmTarget }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['live-sync'] })
+      qc.invalidateQueries({ queryKey: ['data-sync'] })
+      toast.success('Live sync started')
+      setLiveConfirm(null)
+      setLiveConfirmText('')
+    },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not start Live sync')),
+  })
+  const stopLive = useMutation({
+    mutationFn: (l: LiveSync) => dataSyncApi.stopLive(l.id),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['live-sync'] }); toast.success('Live sync stopped') },
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not stop')),
+  })
+  const removeLive = useMutation({
+    mutationFn: (l: LiveSync) => dataSyncApi.removeLive(l.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['live-sync'] }),
+    onError: (e: unknown) => toast.error(getApiErrorMessage(e, 'Could not remove')),
+  })
+  const openLiveConfirm = (s?: Connection, t?: Connection) => {
+    if (!s || !t) { toast.error('The source or target connection no longer exists'); return }
+    setLiveConfirm({ source: s, target: t })
+    setLiveConfirmText('')
+  }
+  const liveOnTarget = lives.find((l) => l.enabled && l.targetConnectionId === targetId)
 
   const ready = !!source && !!target && source.id !== target.id
   const options = (exclude?: string) => [
@@ -405,9 +448,34 @@ export default function DataSyncPage() {
               onClick={() => source && target && (setConfirm({ source, target, tables, parallel, method }), setConfirmText(''))}>
               <GitCompareArrows className="h-4 w-4" />Sync differences…
             </Button>
+            <Button variant="primary" disabled={!ready || !!target?.writeProtected || !!liveOnTarget}
+              title={liveOnTarget ? 'Live sync into this target is already on' : target?.writeProtected ? 'The target is write-protected' : 'Apply every change on the source to the target as it happens'}
+              onClick={() => openLiveConfirm(source, target)}>
+              <Radio className="h-4 w-4" />Start Live sync…
+            </Button>
           </div>
         </CardContent>
       </Card>
+
+      {lives.length > 0 && (
+        <div className="space-y-4">
+          <h2 className="text-sm font-semibold text-gray-700">Live sync</h2>
+          {lives.map((l) => (
+            <LiveSyncCard
+              key={l.id}
+              live={l}
+              serverTime={liveServerTime}
+              busy={stopLive.isPending || removeLive.isPending || startLive.isPending}
+              onStop={(x) => stopLive.mutate(x)}
+              onRemove={(x) => removeLive.mutate(x)}
+              onStart={(x) => openLiveConfirm(
+                connections.find((c) => c.id === x.sourceConnectionId),
+                connections.find((c) => c.id === x.targetConnectionId),
+              )}
+            />
+          ))}
+        </div>
+      )}
 
       {runs.length > 0 && (
         <div className="space-y-4">
@@ -432,6 +500,52 @@ export default function DataSyncPage() {
           ))}
         </div>
       )}
+
+      <Modal open={liveConfirm !== null} onClose={() => setLiveConfirm(null)} title="Start Live sync">
+        {liveConfirm && (
+          <div className="space-y-4 text-sm">
+            <p className="text-gray-700">
+              Keeps <b>{liveConfirm.target.name}</b> (database <b>{liveConfirm.target.database}</b>) in step with{' '}
+              <b>{liveConfirm.source.name}</b> ({liveConfirm.source.database}): every insert, change and delete on the source
+              is read from its binary log (its record of changes) and applied to the target within seconds. Nothing is
+              read from the source&apos;s tables, so it adds almost no load there.
+            </p>
+            <div className="bg-amber-50 border border-amber-200 rounded-lg p-3 text-amber-900 space-y-1">
+              <p className="font-medium">How it works:</p>
+              <ul className="list-disc pl-5 space-y-0.5">
+                <li>first a sync brings the target up to date (Quick when a full sync was done before, else Full)</li>
+                <li>then every change follows, in the same order; deletes and TRUNCATE on the source are applied too</li>
+                <li>new tables, columns and indexes on the source are added to the target; nothing is ever removed or altered, and tables dropped on the source stay on the target</li>
+                <li>it keeps running in the background, also after a restart of DbBackup, until you stop it</li>
+                <li>while you run a sync into the same target it pauses, and continues afterwards</li>
+              </ul>
+              <p className="pt-1">
+                The source needs <code>binlog_format=ROW</code> and <code>binlog_row_image=FULL</code> (AWS RDS&apos;s defaults), a user with
+                REPLICATION SLAVE and REPLICATION CLIENT, and on RDS kept binary logs:{' '}
+                <code>CALL mysql.rds_set_configuration(&apos;binlog retention hours&apos;, 24);</code>
+              </p>
+            </div>
+            <Input
+              label={`Type ${liveConfirm.target.database} to confirm`}
+              value={liveConfirmText}
+              onChange={(e) => setLiveConfirmText(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" onClick={() => setLiveConfirm(null)}>Cancel</Button>
+              <Button
+                variant="primary"
+                disabled={liveConfirmText !== liveConfirm.target.database}
+                loading={startLive.isPending}
+                onClick={() => startLive.mutate({ source: liveConfirm.source, target: liveConfirm.target, confirmTarget: liveConfirmText })}
+              >
+                <Radio className="h-4 w-4" />Start Live sync
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal open={confirm !== null} onClose={() => setConfirm(null)} title="Sync differences">
         {confirm && (

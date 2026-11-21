@@ -78,9 +78,47 @@ export interface DataSyncRun {
   results: TableReport[] | null
   schema: SchemaReport | null
   error: string | null
+  /** Started by a live sync to catch up */
+  liveSyncId: string | null
   progressAt: string | null
   startedAt: string | null
   completedAt: string | null
+  createdAt: string
+}
+
+export type LiveSyncStatus = 'STARTING' | 'CATCHING_UP' | 'RUNNING' | 'PAUSED' | 'RECONNECTING' | 'STOPPED' | 'ERROR'
+
+/** Follows the source's binary log and applies each change to the target as it happens */
+export interface LiveSync {
+  id: string
+  sourceConnectionId: string | null
+  targetConnectionId: string | null
+  sourceName: string
+  targetName: string
+  sourceDatabase: string
+  targetDatabase: string
+  enabled: boolean
+  status: LiveSyncStatus
+  /** Where it continues reading the source's log */
+  binlogFile: string | null
+  binlogPos: number | null
+  /** The sync bringing the target up to date before following the log */
+  catchUpRunId: string | null
+  /** Source time of the last change applied, and when it was applied */
+  lastEventAt: string | null
+  appliedAt: string | null
+  /** End of the source's log when last checked */
+  headFile: string | null
+  headPos: number | null
+  checkedAt: string | null
+  inserted: number
+  updated: number
+  deleted: number
+  transactions: number
+  warnings: string[]
+  error: string | null
+  startedAt: string | null
+  stoppedAt: string | null
   createdAt: string
 }
 
@@ -90,4 +128,9 @@ export const dataSyncApi = {
   start: (data: { sourceConnectionId: string; targetConnectionId: string; mode: DataSyncMode; tables?: string[]; confirmTarget?: string; parallel?: number; method?: DataSyncMethod }) =>
     api.post<{ success: boolean; data: { id: string } }>('/data-sync', data),
   cancel: (id: string) => api.post(`/data-sync/${id}/cancel`),
+  listLive: () => api.get<{ success: boolean; data: { liveSyncs: LiveSync[]; serverTime: string } }>('/data-sync/live'),
+  startLive: (data: { sourceConnectionId: string; targetConnectionId: string; confirmTarget: string }) =>
+    api.post<{ success: boolean; data: LiveSync }>('/data-sync/live', data),
+  stopLive: (id: string) => api.post(`/data-sync/live/${id}/stop`),
+  removeLive: (id: string) => api.delete(`/data-sync/live/${id}`),
 }

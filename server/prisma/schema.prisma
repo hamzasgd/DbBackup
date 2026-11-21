@@ -138,6 +138,7 @@ model User {
   restoreDrills        RestoreDrill[]
   restores             Restore[]
   dataSyncRuns         DataSyncRun[]
+  liveSyncs            LiveSync[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -229,6 +230,8 @@ model Connection {
   restoresAsTarget    Restore[]           @relation("RestoreTarget")
   dataSyncsAsSource   DataSyncRun[]       @relation("DataSyncSource")
   dataSyncsAsTarget   DataSyncRun[]       @relation("DataSyncTarget")
+  liveSyncsAsSource   LiveSync[]          @relation("LiveSyncSource")
+  liveSyncsAsTarget   LiveSync[]          @relation("LiveSyncTarget")
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -408,11 +411,60 @@ model DataSyncRun {
   progressAt         DateTime?
   startedAt          DateTime?
   completedAt        DateTime?
+  /// Started by a live sync to catch up (null: started by the user)
+  liveSyncId         String?
   createdAt          DateTime    @default(now())
 
   @@index([userId, createdAt])
   @@index([targetConnectionId, status])
   @@map("data_sync_runs")
+}
+
+/// Live sync: follows the source's binary log and applies each change to the target as it happens
+model LiveSync {
+  id                 String      @id @default(uuid())
+  userId             String
+  user               User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sourceConnectionId String?
+  sourceConnection   Connection? @relation("LiveSyncSource", fields: [sourceConnectionId], references: [id], onDelete: SetNull)
+  targetConnectionId String?
+  targetConnection   Connection? @relation("LiveSyncTarget", fields: [targetConnectionId], references: [id], onDelete: SetNull)
+  sourceName         String
+  targetName         String
+  sourceDatabase     String
+  targetDatabase     String
+  /// The user wants it running
+  enabled            Boolean     @default(true)
+  /// STARTING | CATCHING_UP | RUNNING | PAUSED | RECONNECTING | STOPPED | ERROR
+  status             String      @default("STARTING")
+  /// Replica id this follower uses on the source (unique per source server)
+  serverId           Int
+  /// Where to continue reading the source's binary log (after the last change applied)
+  binlogFile         String?
+  binlogPos          BigInt?
+  /// The sync run bringing the target up to date before following the log
+  catchUpRunId       String?
+  /// Source time of the last change applied, and when it was applied
+  lastEventAt        DateTime?
+  appliedAt          DateTime?
+  /// The end of the source's binary log when last checked
+  headFile           String?
+  headPos            BigInt?
+  checkedAt          DateTime?
+  inserted           BigInt      @default(0)
+  updated            BigInt      @default(0)
+  deleted            BigInt      @default(0)
+  transactions       BigInt      @default(0)
+  /// Things to know (e.g. tables not copied, schema changes seen)
+  warnings           String[]    @default([])
+  error              String?
+  startedAt          DateTime?
+  stoppedAt          DateTime?
+  createdAt          DateTime    @default(now())
+  updatedAt          DateTime    @updatedAt
+
+  @@unique([userId, targetConnectionId])
+  @@map("live_syncs")
 }
 
 model McpApproval {

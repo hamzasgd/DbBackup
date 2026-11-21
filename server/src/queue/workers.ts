@@ -8,6 +8,7 @@ import { createRetentionWorker, scheduleRetentionSweep } from './retention.queue
 import { createRestoreWorker, getRestoreQueue } from './restore.queue';
 import { createHeartbeatWorker, scheduleHeartbeatChecks } from './heartbeat.queue';
 import { logger } from '../config/logger';
+import { startLiveSyncManager, stopLiveSyncManager } from '../services/data-sync/live-sync.service';
 import { SyncEngineService } from '../services/sync/sync-engine.service';
 import { PrismaClient } from '@prisma/client';
 
@@ -75,6 +76,9 @@ export async function startWorkers(): Promise<void> {
     logger.error('Failed to schedule heartbeat checks:', error);
   }
 
+  // Follow the binary logs of enabled live syncs (and pick them up again after a restart)
+  startLiveSyncManager();
+
   // Recover active real-time sync configurations after restart
   try {
     const syncEngine = new SyncEngineService();
@@ -86,6 +90,7 @@ export async function startWorkers(): Promise<void> {
 
 export async function stopWorkers(): Promise<void> {
   if (backupReconcileTimer) clearInterval(backupReconcileTimer);
+  await stopLiveSyncManager();
   await backupWorker.close();
   await scheduleWorker.close();
   await migrationWorker.close();

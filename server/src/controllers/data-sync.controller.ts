@@ -13,6 +13,37 @@ const SUPPORTED = new Set(['MYSQL', 'MARIADB']);
 export const QUICK_MARGIN_MS = 15 * 60 * 1000;
 
 /**
+ * When the target last had every table brought up to date from the source:
+ * the source clock at the start of the last completed sync (or, when that
+ * sync covered only some tables, of the full-coverage run before it). Null
+ * when there is none.
+ */
+export async function quickBaseline(userId: string, sourceConnectionId: string, targetConnectionId: string): Promise<Date | null> {
+  const pair = { userId, sourceConnectionId, targetConnectionId, status: 'COMPLETED' };
+  const last = await prisma.dataSyncRun.findFirst({
+    where: { ...pair, mode: 'APPLY' },
+    orderBy: { createdAt: 'desc' },
+    select: { sourceTime: true, startedAt: true, tables: true, createdAt: true },
+  });
+  let base = last?.sourceTime ?? last?.startedAt ?? null;
+  if (last && base && last.tables.length > 0) {
+    // That sync covered only some tables (e.g. "Sync these differences"); the others were last
+    // checked by the compare of all tables before it, so look from there
+    const before = await prisma.dataSyncRun.findFirst({
+      where: {
+        ...pair, tables: { isEmpty: true }, createdAt: { lt: last.createdAt },
+        OR: [{ sourceTime: { not: null } }, { startedAt: { not: null } }],
+      },
+      orderBy: { createdAt: 'desc' },
+      select: { sourceTime: true, startedAt: true },
+    });
+    const other = before?.sourceTime ?? before?.startedAt ?? null;
+    base = other && other < base ? other : before ? base : null;
+  }
+  return base;
+}
+
+/**
  * Start a compare (read-only) or apply (copy the differences) run from a
  * source database to a target with the same schema. Applying needs the
  * target database name typed back; source and target can never be the same.
@@ -54,27 +85,7 @@ export async function startDataSync(req: AuthRequest, res: Response, next: NextF
     // for clocks that differ a little and transactions that committed late
     let since: Date | null = null;
     if (method === 'QUICK') {
-      const pair = { userId, sourceConnectionId: source.id, targetConnectionId: target.id, status: 'COMPLETED' };
-      const last = await prisma.dataSyncRun.findFirst({
-        where: { ...pair, mode: 'APPLY' },
-        orderBy: { createdAt: 'desc' },
-        select: { sourceTime: true, startedAt: true, tables: true, createdAt: true },
-      });
-      let base = last?.sourceTime ?? last?.startedAt ?? null;
-      if (last && base && last.tables.length > 0) {
-        // That sync covered only some tables (e.g. "Sync these differences"); the others were last
-        // checked by the compare of all tables before it, so look from there
-        const before = await prisma.dataSyncRun.findFirst({
-          where: {
-            ...pair, tables: { isEmpty: true }, createdAt: { lt: last.createdAt },
-            OR: [{ sourceTime: { not: null } }, { startedAt: { not: null } }],
-          },
-          orderBy: { createdAt: 'desc' },
-          select: { sourceTime: true, startedAt: true },
-        });
-        const other = before?.sourceTime ?? before?.startedAt ?? null;
-        base = other && other < base ? other : before ? base : null;
-      }
+      const base = await quickBaseline(userId, source.id, target.id);
       if (!base) {
         throw new AppError(
           `Quick sync needs one completed full sync from "${source.name}" to "${target.name}" first, to know where to start. Run "Sync differences" with Full once.`,

@@ -129,8 +129,10 @@ jobs:
           c="$RUNNER_TEMP/certs"
           docker run -d --name pg -p 5432:5432 -e POSTGRES_PASSWORD=pw -v "$c:/certs:ro" postgres:17 \
             -c ssl=on -c ssl_cert_file=/certs/server.crt -c ssl_key_file=/certs/pg-server.key
+          # Binary log on, for the live sync tests (it follows the log like a replica)
           docker run -d --name mariadb -p 3306:3306 -e MARIADB_ROOT_PASSWORD=pw -v "$c:/certs:ro" mariadb:11.4 \
-            --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key
+            --ssl-ca=/certs/ca.crt --ssl-cert=/certs/server.crt --ssl-key=/certs/server.key \
+            --log-bin=mysql-bin --binlog-format=ROW --server-id=1
           # Host network on 127.0.0.1, as the MongoDB suite expects: it creates its user
           # through the localhost exception, which a port-mapped container never sees.
           # 7.0, not 8.x: MongoDB 8 refuses to start on Linux kernels 6.19 to 7.0.13
