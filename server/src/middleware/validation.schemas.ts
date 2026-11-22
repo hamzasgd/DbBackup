@@ -95,6 +95,35 @@ export const liveSyncSchema = z.object({
   confirmTarget: z.string().max(255).optional(),
 });
 
+// Database access through the gateway
+const accessFields = {
+  name: z.string().trim().min(1, 'Name is required').max(100),
+  database: z.string().trim().min(1).max(64),
+  tables: z.array(z.string().min(1).max(64)).max(500),
+  privileges: z.array(z.string().min(1).max(40)).min(1, 'Choose at least one right').max(30),
+  maxConnections: z.number().int().min(1).max(50),
+  expiresAt: z.string().datetime().nullable(),
+};
+
+export const dbAccessCreateSchema = z.object({
+  connectionId: z.string().uuid('Invalid connection ID'),
+  username: z.string().regex(/^[a-z][a-z0-9_.-]{2,31}$/, 'Login name: 3-32 lowercase letters, digits, _ . or -, starting with a letter').optional(),
+  ...accessFields,
+  tables: accessFields.tables.optional(),
+  maxConnections: accessFields.maxConnections.optional(),
+  expiresAt: accessFields.expiresAt.optional(),
+  database: accessFields.database.optional(),
+});
+
+export const dbAccessUpdateSchema = z.object({
+  name: accessFields.name.optional(),
+  tables: accessFields.tables.optional(),
+  privileges: accessFields.privileges.optional(),
+  maxConnections: accessFields.maxConnections.optional(),
+  expiresAt: accessFields.expiresAt.optional(),
+  enabled: z.boolean().optional(),
+});
+
 // Schedule schemas
 export const scheduleSchema = z.object({
   connectionId: z.string().uuid('Invalid connection ID'),

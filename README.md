@@ -96,6 +96,7 @@
 - **KMS Kill Switch** — Optional AWS KMS-wrapped master key: the encryption key **never touches the server disk**; revoking IAM/KMS makes stolen ciphertext permanently undecryptable
 - **SSH Keys Out of the DB** — Reference a server-side key file instead of storing the PEM in the database
 - **SSH Tunnels** — Connect to private databases through bastion hosts
+- **Database access gateway** — Give developers their own MySQL/MariaDB login with only the rights you choose (read only, read and write, or picked rights; whole database or some tables; an end date). They connect DBeaver, DbGate or `mysql` to DbBackup over TLS — no SSH and no database password for them — and every query is logged. Turn it off or remove it in one click (see [Database access gateway](#database-access-gateway))
 - **JWT + refresh rotation**, **rate limiting**, **secret redaction in logs**, **Helmet/CORS**, **SSL/TLS enforcement**, **secure memory handling**
 
 ### Integrations
@@ -312,6 +313,9 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 | `DEFAULT_RETENTION_DAYS` / `DEFAULT_RETENTION_COUNT` | Fallback retention for schedule-less connections | `30` / off |
 | `RETENTION_SWEEP_CRON` | Daily global retention sweep | `30 3 * * *` |
 | `CLIENT_URL` | Frontend URL (CORS) | `http://localhost:5173` |
+| `DB_GATEWAY_PORT` | Port of the database access gateway (unset = off) | — |
+| `DB_GATEWAY_TLS_CERT` / `DB_GATEWAY_TLS_KEY` | Certificate (full chain) and key for the gateway | — |
+| `DB_GATEWAY_PUBLIC_HOST` | Host name shown to people for connecting | host of `FRONTEND_URL` |
 
 > Storage backends (S3 / Google Drive), notification channels, and the **backup encryption passphrase** are configured in the app's Settings UI — not env vars — and are stored encrypted in the database.
 
@@ -402,6 +406,40 @@ What the admin can and cannot see — deliberate guardrails:
 - ❌ No user deletion, no password resets, no role-granting UI (role changes only via migration/`ADMIN_EMAIL`)
 
 Every admin action is audit-logged (`ADMIN_VIEW_USER`, `ADMIN_SUSPEND`, `ADMIN_REACTIVATE`, `ADMIN_ACCESS_DENIED`, `ADMIN_PROMOTED`).
+
+### Database access gateway
+
+The **Database access** page gives a person their own login to a MySQL or MariaDB
+database, like a small [Teleport](https://goteleport.com/docs/enroll-resources/database-access/) or
+[Warpgate](https://github.com/warp-tech/warpgate) built into DbBackup:
+
+- They connect any MySQL client (DBeaver, DbGate, `mysql`) to DbBackup's gateway with the user and
+  password shown once when the access is created. TLS is required. They get no SSH access and never
+  see the database's own credentials.
+- DbBackup creates a database user for each access with exactly the chosen rights (e.g. `SELECT`
+  only, or only some tables) and logs in as it, through the connection's SSH tunnel when it has one.
+  The rights are enforced by the database itself; the gateway also refuses switching users,
+  replication and server commands, and does not allow `LOAD DATA LOCAL`.
+- Every query is logged with the session (who, from where, which client) and kept
+  `DB_GATEWAY_LOG_DAYS` days.
+- Turning an access off, changing its rights, a new password or its end date ends its open
+  sessions at once. Removing it also drops its database user.
+- Write rights cannot be given on a write-protected connection, nor on the target of a running live
+  sync (anything written there would be overwritten).
+- The connection's database user must be allowed to create users and to give the chosen rights
+  (`CREATE USER` and the rights `WITH GRANT OPTION`, e.g. `root`).
+
+To turn it on, set in `server/.env` and restart DbBackup:
+
+```
+DB_GATEWAY_PORT=3307
+DB_GATEWAY_TLS_CERT=/www/server/panel/vhost/cert/dbbackup.example.com/fullchain.pem
+DB_GATEWAY_TLS_KEY=/www/server/panel/vhost/cert/dbbackup.example.com/privkey.pem
+```
+
+(the paths above are where aaPanel keeps a site's Let's Encrypt certificate; renewals are picked up
+without a restart). Then allow the port in the server's firewall. Failed logins are limited per
+address (10 in 15 minutes).
 
 ### Storage quotas & connection limits
 

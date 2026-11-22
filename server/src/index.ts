@@ -33,6 +33,7 @@ function auditEnvFileSecurity(): void {
 import { ensureStorageDir, getStoragePath } from './services/storage.service';
 import { cleanupOrphanedDrills } from './services/restore-drill.service';
 import { logAudit } from './services/audit.service';
+import { startDbGateway, stopDbGateway } from './services/db-gateway/gateway.service';
 
 /**
  * Idempotent admin bootstrap: promote ADMIN_EMAIL to role ADMIN at startup.
@@ -103,6 +104,9 @@ async function bootstrap() {
       logger.info(`🚀 Server running on port ${PORT} [${process.env.NODE_ENV}]`);
     });
 
+    // Database access gateway (off unless DB_GATEWAY_PORT is set)
+    await startDbGateway().catch((err) => logger.error('DB gateway failed to start:', err));
+
     // Graceful shutdown
     const shutdown = async (signal: string) => {
       logger.info(`Received ${signal}, shutting down gracefully...`);
@@ -111,6 +115,7 @@ async function bootstrap() {
         logger.info('HTTP server closed');
       });
 
+      await stopDbGateway().catch(() => {});
       await stopWorkers();
       logger.info('Workers stopped');
 
