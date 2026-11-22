@@ -5,6 +5,7 @@ import { ConnectionFactory, type MySQLConnectionResult } from '../engines/connec
 import type { ConnectionConfig } from '../engines/base.engine';
 import { EXACT, qid, loadMeta, tableNames, matchTargetTable, type TableMeta } from './mysql-data-sync';
 import { compareMysqlSchema, applyMysqlSchema } from './mysql-schema';
+import { jsonCell } from './json-exact';
 
 /**
  * Live sync: follow the source's binary log (the record MySQL keeps of every
@@ -255,6 +256,8 @@ interface Plan {
   /** Source column names written, and the target's names for them */
   cols: string[];
   targetCols: string[];
+  /** Whether each written column is JSON on the target (its fractional numbers are written exactly) */
+  json?: boolean[];
   /** Source primary key columns */
   pk: string[];
   /** Not copied, and why */
@@ -482,17 +485,19 @@ function run(z: ZongJi, src: MySQLConnectionResult, dst: Target, db: string, opt
       const byName = new Map(d.columns.map((c) => [c.name.toLowerCase(), c]));
       const cols: string[] = [];
       const targetCols: string[] = [];
+      const json: boolean[] = [];
       for (const c of s.columns) {
         const tc = byName.get(c.name.toLowerCase());
         if (!tc) return `missing column ${c.name}`;
         if (tc.generated || c.generated) continue;
         cols.push(c.name);
         targetCols.push(tc.name);
+        json.push(tc.dataType === 'json');
       }
       if (s.pk.map((k) => k.toLowerCase()).join(',') !== d.pk.map((k) => k.toLowerCase()).join(',')) {
         throw new LiveSyncError(`${table}: the primary key differs between the source and the target`, 'APPLY');
       }
-      return { target: t, cols, targetCols, pk: s.pk };
+      return { target: t, cols, targetCols, json, pk: s.pk };
     };
     let p = await build();
     if (typeof p === 'string') {
@@ -521,11 +526,14 @@ function run(z: ZongJi, src: MySQLConnectionResult, dst: Target, db: string, opt
   });
 
   const write = async (p: Plan, list: RowData[]) => {
-    const one = `(${p.cols.map(() => '?').join(', ')})`;
     for (const b of batches(list, (r) => p.cols.reduce((n, c) => n + sizeOf(r[c]), 0))) {
+      const rowsSql = b.map((r) => {
+        const cells = p.cols.map((c, i) => (p.json?.[i] ? jsonCell(val(r[c])) : { sql: '?', params: [val(r[c])] }));
+        return { sql: `(${cells.map((x) => x.sql).join(', ')})`, params: cells.flatMap((x) => x.params) };
+      });
       await dst.c.query(
-        `REPLACE INTO ${qid(p.target)} (${p.targetCols.map(qid).join(', ')}) VALUES ${b.map(() => one).join(', ')}`,
-        b.flatMap((r) => p.cols.map((c) => val(r[c]))),
+        `REPLACE INTO ${qid(p.target)} (${p.targetCols.map(qid).join(', ')}) VALUES ${rowsSql.map((x) => x.sql).join(', ')}`,
+        rowsSql.flatMap((x) => x.params),
       );
     }
   };

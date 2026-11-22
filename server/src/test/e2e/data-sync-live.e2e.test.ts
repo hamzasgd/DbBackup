@@ -99,7 +99,7 @@ describe.skipIf(!MARIADB)('MySQL live sync (binary log)', () => {
       await c.query(`SET time_zone = '+05:00'; SET sql_mode = '';
         INSERT INTO \`${src}\`.types (id,d,dt,ts,dd,tm,j,b,bi,e,s,f,db,y,vc,u) VALUES
           (18446744073709551615, -12345678901234.123456, '2026-11-21 09:00:00.123456', '2026-11-21 14:00:00.123', '2026-02-03', '-12:34:56.789',
-           '{"a":[1,2,{"b":null}],"big":12345678901234567890}', X'00FF10', b'1010101010', 'b', 'p,r', 1.1, 3.141592653589793, 2026, 'café', 'ç日本🙂'),
+           '{"a":[1,2,{"b":null}],"big":12345678901234567890,"f":5.684341886080802e-14,"g":[0.1,{"h":1.0000000000000002}]}', X'00FF10', b'1010101010', 'b', 'p,r', 1.1, 3.141592653589793, 2026, 'café', 'ç日本🙂'),
           (2, NULL, '0000-00-00 00:00:00', NULL, NULL, NULL, NULL, NULL, NULL, NULL, '', NULL, NULL, NULL, '', '');
         UPDATE \`${src}\`.types SET u = 'changed' WHERE id = 2;
         UPDATE \`${src}\`.AppSettings SET v = 'uno' WHERE id = 1;
