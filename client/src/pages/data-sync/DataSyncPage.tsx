@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { Fragment, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { AlertTriangle, CheckCircle2, ChevronDown, GitCompareArrows, Loader2, OctagonX, Radio, Search, Square, XCircle } from 'lucide-react'
 import { connectionsApi, type Connection } from '../../services/connections.service'
@@ -272,7 +272,8 @@ function RunRow({ run, serverTime, onSyncThese, onStop, targetProtected, open, o
                 </thead>
                 <tbody className="divide-y divide-gray-50">
                   {shown.map((r) => (
-                    <tr key={r.table}>
+                    <Fragment key={r.table}>
+                    <tr>
                       <td className="py-1.5 pr-3 font-mono text-gray-800">{r.table}</td>
                       <td className={`py-1.5 pr-3 font-medium ${STATUS_COLOR[r.status]}`}>{STATUS_LABEL[r.status]}</td>
                       <td className="py-1.5 pr-3 text-right tabular-nums text-gray-600">{n(r.rows)}</td>
@@ -284,6 +285,33 @@ function RunRow({ run, serverTime, onSyncThese, onStop, targetProtected, open, o
                         {[r.targetTable && `named ${r.targetTable} on the target`, r.note, r.reason, r.warning].filter(Boolean).join(' · ')}
                       </td>
                     </tr>
+                    {r.examples && r.examples.length > 0 && (
+                      <tr>
+                        <td colSpan={8} className="pb-2 pt-0">
+                          <details className="text-[11px] text-gray-600">
+                            <summary className="cursor-pointer text-gray-500 hover:text-gray-800">Show {r.examples.length} example row{r.examples.length === 1 ? '' : 's'}</summary>
+                            <ul className="mt-1 space-y-1 pl-3">
+                              {r.examples.map((x) => (
+                                <li key={`${x.kind}:${x.key}`} className="break-words">
+                                  <span className="font-mono text-gray-800">{x.key}</span>{' '}
+                                  {x.kind === 'MISSING' && <span>missing on the target</span>}
+                                  {x.kind === 'ONLY_IN_TARGET' && <span>only on the target</span>}
+                                  {x.kind === 'CHANGED' && (x.columns?.length
+                                    ? x.columns.map((c) => (
+                                      <span key={c.name} className="block pl-3">
+                                        <span className="font-mono">{c.name}</span>: source <code className="bg-gray-100 rounded px-1">{c.source ?? 'NULL'}</code>{' '}
+                                        target <code className="bg-gray-100 rounded px-1">{c.target ?? 'NULL'}</code>
+                                      </span>
+                                    ))
+                                    : <span>changed again since (now the same, or no longer there)</span>)}
+                                </li>
+                              ))}
+                            </ul>
+                          </details>
+                        </td>
+                      </tr>
+                    )}
+                    </Fragment>
                   ))}
                   {shown.length === 0 && (
                     <tr><td colSpan={8} className="py-2 text-gray-500">All {results.length} tables are the same.</td></tr>

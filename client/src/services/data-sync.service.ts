@@ -25,6 +25,15 @@ export interface TableReport {
   method?: 'QUICK' | 'FULL'
   /** How the table was compared, when worth saying */
   note?: string
+  /** Compare only: a few rows that differ, with the columns whose values differ */
+  examples?: RowExample[]
+}
+
+export interface RowExample {
+  /** The primary key, e.g. "id=123" */
+  key: string
+  kind: 'MISSING' | 'CHANGED' | 'ONLY_IN_TARGET'
+  columns?: { name: string; source: string | null; target: string | null }[]
 }
 
 export interface SchemaChange {

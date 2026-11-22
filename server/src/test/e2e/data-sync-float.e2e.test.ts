@@ -50,6 +50,15 @@ describe.skipIf(!MARIADB)('MySQL data sync: floating point values', () => {
 
     const [cmp] = await mysqlDataSync(cfg(src), cfg(dst), { apply: false });
     expect(cmp).toMatchObject({ status: 'DIFFERENT', updated: before.f, inserted: 0, deleted: 0 });
+    // A few of them named, with the column that differs and both values
+    expect(cmp.examples).toHaveLength(5);
+    for (const ex of cmp.examples!) {
+      expect(ex.kind).toBe('CHANGED');
+      expect(ex.key).toMatch(/^id=\d+$/);
+      expect(ex.columns).toHaveLength(1);
+      expect(ex.columns![0].name).toBe('f');
+      expect(ex.columns![0].source).not.toBe(ex.columns![0].target);
+    }
 
     const [sync] = await mysqlDataSync(cfg(src), cfg(dst), { apply: true });
     expect(sync).toMatchObject({ status: 'SYNCED', updated: before.f });
