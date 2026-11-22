@@ -64,4 +64,33 @@ describe.skipIf(!MARIADB)('MySQL data sync: floating point values', () => {
     expect(sync).toMatchObject({ status: 'SYNCED', updated: before.f });
     expect(await unequal()).toEqual({ n: N, f: 0, d: 0 });
   }, 120_000);
+
+  it('writes numbers inside JSON exactly, and sees a JSON number off in the last bit', async () => {
+    const isMaria = await myAdmin(async (c) => /mariadb/i.test(String((await c.query<mysql2.RowDataPacket[]>('SELECT VERSION() v'))[0][0].v)));
+    if (isMaria) return; // MariaDB keeps JSON as text, exactly as written
+    await myAdmin(async (c) => {
+      await c.query(`CREATE TABLE \`${src}\`.j (id INT PRIMARY KEY, meta JSON)`);
+      await c.query(`INSERT INTO \`${src}\`.j VALUES
+        (1, JSON_OBJECT('a', CAST('5.684341886080802e-14' AS DOUBLE), 'n', 12345678901234567890, 'list', JSON_ARRAY(0.1, 2, JSON_OBJECT('k"q', CAST('1.0000000000000002' AS DOUBLE))))),
+        (2, '{"plain": "text", "i": 7}'), (3, NULL)`);
+    });
+    const [first] = (await mysqlDataSync(cfg(src), cfg(dst), { apply: true, tables: ['j'] }));
+    expect(first).toMatchObject({ inserted: 3 }); // the schema step creates the table first
+    const exactSame = () => myAdmin(async (c) => Number((await c.query<mysql2.RowDataPacket[]>(
+      `SELECT COUNT(*) n FROM \`${src}\`.j a JOIN \`${dst}\`.j b USING (id)
+        WHERE JSON_EXTRACT(a.meta, '$.a') <=> JSON_EXTRACT(b.meta, '$.a') AND a.meta <=> b.meta`))[0][0].n));
+    expect(await exactSame()).toBe(3);
+
+    // What a server whose JSON parser rounds wrong leaves behind: the last bit off
+    await myAdmin((c) => c.query(`UPDATE \`${dst}\`.j SET meta = JSON_SET(meta, '$.a', CAST('5.684341886080803e-14' AS DOUBLE)) WHERE id = 1`));
+    const [cmp] = await mysqlDataSync(cfg(src), cfg(dst), { apply: false, tables: ['j'] });
+    expect(cmp).toMatchObject({ status: 'DIFFERENT', updated: 1 });
+    expect(cmp.examples?.[0]).toMatchObject({ key: 'id=1', kind: 'CHANGED', columns: [{ name: 'meta' }] });
+
+    const [sync] = await mysqlDataSync(cfg(src), cfg(dst), { apply: true, tables: ['j'] });
+    expect(sync).toMatchObject({ status: 'SYNCED', updated: 1 });
+    expect(await exactSame()).toBe(3);
+    const [again] = await mysqlDataSync(cfg(src), cfg(dst), { apply: false, tables: ['j'] });
+    expect(again.status).toBe('SAME');
+  }, 120_000);
 });

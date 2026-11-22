@@ -2,6 +2,7 @@ import type * as mysql2 from 'mysql2/promise';
 import { ConnectionFactory, type MySQLConnectionResult } from '../engines/connection-factory';
 import type { ConnectionConfig } from '../engines/base.engine';
 import { compareMysqlSchema, applyMysqlSchema, type SchemaReport } from './mysql-schema';
+import { jsonCell, sameJson } from './json-exact';
 
 /**
  * Compare two MySQL/MariaDB databases with the same schema and copy only the
@@ -384,6 +385,8 @@ async function applyChunk(
   meta: TableMeta,
   toDelete: unknown[][],
   toCopy: unknown[][],
+  /** Target columns of type JSON: their fractional numbers are written exactly */
+  jsonCols: Set<string> = new Set(),
 ): Promise<void> {
   const copied = meta.columns.filter((c) => !c.generated);
   const insertCols = copied.map((c) => c.name);
@@ -398,18 +401,18 @@ async function applyChunk(
     for (let i = 0; i < toCopy.length; i += KEY_BATCH) {
       const w = keysIn(meta.pk, toCopy.slice(i, i + KEY_BATCH));
       const data = await rows(src, `SELECT ${selectList} FROM ${qid(srcTable)} WHERE ${w.sql}`, w.params);
-      let batch: unknown[][] = [];
+      let batch: { sql: string; params: unknown[] }[] = [];
       let bytes = 0;
       const flush = async () => {
         if (batch.length === 0) return;
-        const one = `(${insertCols.map(() => '?').join(', ')})`;
-        await dst.query(`INSERT INTO ${qid(dstTable)} (${colList}) VALUES ${batch.map(() => one).join(', ')}`, batch.flat());
+        await dst.query(`INSERT INTO ${qid(dstTable)} (${colList}) VALUES ${batch.map((b) => b.sql).join(', ')}`, batch.flatMap((b) => b.params));
         batch = [];
         bytes = 0;
       };
       for (const row of data) {
         const values = insertCols.map((c) => row[c]);
-        batch.push(values);
+        const cells = insertCols.map((c) => (jsonCols.has(c.toLowerCase()) ? jsonCell(row[c]) : { sql: '?', params: [row[c]] }));
+        batch.push({ sql: `(${cells.map((x) => x.sql).join(', ')})`, params: cells.flatMap((x) => x.params) });
         bytes += values.reduce<number>((n, v) => n + approxSize(v), 0);
         if (batch.length >= INSERT_BATCH || bytes >= INSERT_MAX_BYTES) await flush();
       }
@@ -537,6 +540,44 @@ interface TableJob {
   recent: boolean[];
   /** Compare only: keys of a few rows that differ */
   samples: { key: unknown[]; kind: RowExample['kind'] }[];
+  /** Columns (lowercase) that are JSON on the target */
+  jsonCols: Set<string>;
+}
+
+/**
+ * Of rows whose hashes differ, the ones that really do: a JSON column whose
+ * text differs only in how a number is printed (servers print the same double
+ * differently) is the same value.
+ */
+async function reallyChanged(src: mysql2.Connection, dst: mysql2.Connection, job: TableJob, keys: unknown[][]): Promise<Set<string>> {
+  const { meta } = job;
+  const all = new Set(keys.map((k) => keyOf(Object.fromEntries(meta.pk.map((p, i) => [p, k[i]])), meta.pk)));
+  const json = meta.columns.filter((c) => c.dataType === 'json');
+  if (json.length === 0 || keys.length === 0) return all;
+  const exprs = meta.columns.map((c, i) => `${BINARY_TYPES.has(c.dataType) ? `HEX(${qid(c.name)})` : `CONVERT(${exactColumn(c)} USING utf8mb4)`} AS \`c${i}\``);
+  const differ = new Set<string>();
+  const seen = new Set<string>();
+  for (let i = 0; i < keys.length; i += KEY_BATCH) {
+    const w = keysIn(meta.pk, keys.slice(i, i + KEY_BATCH));
+    const sql = (t: string) => `SELECT ${meta.pk.map(qid).join(', ')}, ${exprs.join(', ')} FROM ${qid(t)} WHERE ${w.sql}`;
+    const [a, b] = await Promise.all([rows(src, sql(job.table), w.params), rows(dst, sql(job.dstTable), w.params)]);
+    const other = new Map(b.map((r) => [keyOf(r, meta.pk), r]));
+    for (const r of a) {
+      const k = keyOf(r, meta.pk);
+      seen.add(k);
+      const t = other.get(k);
+      if (!t) { differ.add(k); continue; }
+      const same = meta.columns.every((c, ci) => {
+        const x = r[`c${ci}`] as string | null;
+        const y = t[`c${ci}`] as string | null;
+        return c.dataType === 'json' ? sameJson(x, y) : x === y;
+      });
+      if (!same) differ.add(k);
+    }
+  }
+  // Changed again since (gone from the source): still a difference
+  for (const k of all) if (!seen.has(k)) differ.add(k);
+  return differ;
 }
 
 const EXAMPLES = 5;
@@ -561,8 +602,9 @@ async function describeExamples(src: mysql2.Connection, dst: mysql2.Connection, 
       const t = other.get(keyOf(r, meta.pk));
       if (!t) continue;
       byKey.set(keyOf(r, meta.pk), meta.columns
-        .map((c, i) => ({ name: c.name, source: cut(r[`c${i}`]), target: cut(t[`c${i}`]) }))
-        .filter((x) => x.source !== x.target));
+        .map((c, i) => ({ name: c.name, json: c.dataType === 'json', a: r[`c${i}`] as string | null, b: t[`c${i}`] as string | null }))
+        .filter((x) => (x.json ? !sameJson(x.a, x.b) : x.a !== x.b))
+        .map((x) => ({ name: x.name, source: cut(x.a), target: cut(x.b) })));
     }
   }
   return job.samples.map((x) => {
@@ -598,16 +640,22 @@ async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Prom
   out.rows = sm.size;
   const toCopy: unknown[][] = [];
   const toDelete: unknown[][] = [];
+  const hashDiffers: unknown[][] = [];
   for (const [k, s] of sm) {
     const d = dm.get(k);
     if (!d) { out.inserted++; toCopy.push(s.key); sample(job, s.key, 'MISSING'); }
-    else if (d.h !== s.h) { out.updated++; toCopy.push(s.key); toDelete.push(s.key); sample(job, s.key, 'CHANGED'); }
+    else if (d.h !== s.h) hashDiffers.push(s.key);
+  }
+  const changed = await reallyChanged(pair.src.c, pair.dst.c, job, hashDiffers);
+  for (const key of hashDiffers) {
+    if (!changed.has(keyOf(Object.fromEntries(meta.pk.map((p, i) => [p, key[i]])), meta.pk))) continue;
+    out.updated++; toCopy.push(key); toDelete.push(key); sample(job, key, 'CHANGED');
   }
   for (const [k, d] of dm) if (!sm.has(k)) { out.deleted++; toDelete.push(d.key); sample(job, d.key, 'ONLY_IN_TARGET'); }
   out.different = toCopy.length > 0 || toDelete.length > 0;
   if (!job.apply || (toCopy.length === 0 && toDelete.length === 0)) return out;
   try {
-    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy);
+    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy, job.jsonCols);
   } catch (err) {
     // A unique value that moved to a row in another chunk: retried once the rest of the table is done
     if (!isDeferrable(err)) throw err;
@@ -657,7 +705,7 @@ async function quickTable(
   const apply = async (toDelete: unknown[][], toCopy: unknown[][]) => {
     if (!job.apply || (toDelete.length === 0 && toCopy.length === 0)) return;
     try {
-      await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy);
+      await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, toDelete, toCopy, job.jsonCols);
     } catch (err) {
       if (!isDeferrable(err)) throw err;
       deferred.push({ toDelete, toCopy });
@@ -687,11 +735,17 @@ async function quickTable(
     }
     const toCopy: unknown[][] = [];
     const toDelete: unknown[][] = [];
+    const hashDiffers: unknown[][] = [];
     for (const [i, r] of page.entries()) {
       const k = keyOf(r, pk);
       const d = dm.get(k);
       if (d === undefined) { out.inserted++; toCopy.push(keys[i]); missing.add(k); sample(job, keys[i], 'MISSING'); }
-      else if (d !== String(r.__h)) { out.updated++; toCopy.push(keys[i]); toDelete.push(keys[i]); sample(job, keys[i], 'CHANGED'); }
+      else if (d !== String(r.__h)) hashDiffers.push(keys[i]);
+    }
+    const changed = await reallyChanged(pair.src.c, pair.dst.c, job, hashDiffers);
+    for (const key of hashDiffers) {
+      if (!changed.has(keyOf(Object.fromEntries(pk.map((p, i) => [p, key[i]])), pk))) continue;
+      out.updated++; toCopy.push(key); toDelete.push(key); sample(job, key, 'CHANGED');
     }
     out.batches++;
     if (toCopy.length) out.batchesDifferent++;
@@ -743,7 +797,7 @@ async function quickTable(
   }
 
   if (deferred.length) {
-    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, deferred.flatMap((d) => d.toDelete), deferred.flatMap((d) => d.toCopy));
+    await applyChunk(pair.src.c, pair.dst.c, table, dstTable, meta, deferred.flatMap((d) => d.toDelete), deferred.flatMap((d) => d.toCopy), job.jsonCols);
   }
   return out;
 }
@@ -881,7 +935,8 @@ export async function mysqlDataSync(
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';
 
-        const job: TableJob = jobRef = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [], samples: [] };
+        const job: TableJob = jobRef = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [], samples: [],
+          jsonCols: new Set(dstMeta.columns.filter((c) => c.dataType === 'json').map((c) => c.name.toLowerCase())) };
         const upd = updatedAtColumn(srcMeta);
         if (quick && report.status !== 'CREATED' && quickable(srcMeta) && upd) {
           const pair = pairs[0];
@@ -953,6 +1008,7 @@ export async function mysqlDataSync(
             pair.src.c, pair.dst.c, table, job.dstTable, srcMeta,
             deferred.flatMap((d) => d.toDelete),
             deferred.flatMap((d) => d.toCopy),
+            job.jsonCols,
           ));
         }
 
