@@ -53,6 +53,16 @@ export interface TableReport {
   method?: 'QUICK' | 'FULL';
   /** How the table was compared, when that's worth saying */
   note?: string;
+  /** Compare only: a few of the rows that differ, with the columns whose values differ */
+  examples?: RowExample[];
+}
+
+export interface RowExample {
+  /** The primary key, e.g. "id=123" */
+  key: string;
+  kind: 'MISSING' | 'CHANGED' | 'ONLY_IN_TARGET';
+  /** CHANGED: the columns that differ (values cut to 200 characters) */
+  columns?: { name: string; source: string | null; target: string | null }[];
 }
 
 export interface DataSyncProgress {
@@ -525,6 +535,40 @@ interface TableJob {
   apply: boolean;
   /** Whether each recent chunk differed (newest last) */
   recent: boolean[];
+  /** Compare only: keys of a few rows that differ */
+  samples: { key: unknown[]; kind: RowExample['kind'] }[];
+}
+
+const EXAMPLES = 5;
+const sample = (job: TableJob, key: unknown[], kind: RowExample['kind']) => {
+  if (!job.apply && job.samples.length < EXAMPLES) job.samples.push({ key, kind });
+};
+
+/** Fetch the sampled rows from both sides and name the columns whose values differ. */
+async function describeExamples(src: mysql2.Connection, dst: mysql2.Connection, job: TableJob): Promise<RowExample[]> {
+  const { meta } = job;
+  const label = (key: unknown[]) => meta.pk.map((k, i) => `${k}=${Buffer.isBuffer(key[i]) ? `0x${(key[i] as Buffer).toString('hex')}` : String(key[i])}`).join(', ');
+  const changed = job.samples.filter((x) => x.kind === 'CHANGED').map((x) => x.key);
+  const byKey = new Map<string, RowExample['columns']>();
+  if (changed.length) {
+    const exprs = meta.columns.map((c, i) => `${BINARY_TYPES.has(c.dataType) ? `HEX(${qid(c.name)})` : `CONVERT(${exactColumn(c)} USING utf8mb4)`} AS \`c${i}\``);
+    const w = keysIn(meta.pk, changed);
+    const sql = (t: string) => `SELECT ${meta.pk.map(qid).join(', ')}, ${exprs.join(', ')} FROM ${qid(t)} WHERE ${w.sql}`;
+    const [a, b] = await Promise.all([rows(src, sql(job.table), w.params), rows(dst, sql(job.dstTable), w.params)]);
+    const other = new Map(b.map((r) => [keyOf(r, meta.pk), r]));
+    const cut = (v: unknown) => (v === null || v === undefined ? null : String(v).slice(0, 200));
+    for (const r of a) {
+      const t = other.get(keyOf(r, meta.pk));
+      if (!t) continue;
+      byKey.set(keyOf(r, meta.pk), meta.columns
+        .map((c, i) => ({ name: c.name, source: cut(r[`c${i}`]), target: cut(t[`c${i}`]) }))
+        .filter((x) => x.source !== x.target));
+    }
+  }
+  return job.samples.map((x) => {
+    const k = keyOf(Object.fromEntries(meta.pk.map((p, i) => [p, x.key[i]])), meta.pk);
+    return { key: label(x.key), kind: x.kind, ...(x.kind === 'CHANGED' ? { columns: byKey.get(k) ?? [] } : {}) };
+  });
 }
 
 const RECENT_CHUNKS = 20;
@@ -556,10 +600,10 @@ async function checkChunk(pair: Pair, job: TableJob, lo: Bound, hi: Bound): Prom
   const toDelete: unknown[][] = [];
   for (const [k, s] of sm) {
     const d = dm.get(k);
-    if (!d) { out.inserted++; toCopy.push(s.key); }
-    else if (d.h !== s.h) { out.updated++; toCopy.push(s.key); toDelete.push(s.key); }
+    if (!d) { out.inserted++; toCopy.push(s.key); sample(job, s.key, 'MISSING'); }
+    else if (d.h !== s.h) { out.updated++; toCopy.push(s.key); toDelete.push(s.key); sample(job, s.key, 'CHANGED'); }
   }
-  for (const [k, d] of dm) if (!sm.has(k)) { out.deleted++; toDelete.push(d.key); }
+  for (const [k, d] of dm) if (!sm.has(k)) { out.deleted++; toDelete.push(d.key); sample(job, d.key, 'ONLY_IN_TARGET'); }
   out.different = toCopy.length > 0 || toDelete.length > 0;
   if (!job.apply || (toCopy.length === 0 && toDelete.length === 0)) return out;
   try {
@@ -646,8 +690,8 @@ async function quickTable(
     for (const [i, r] of page.entries()) {
       const k = keyOf(r, pk);
       const d = dm.get(k);
-      if (d === undefined) { out.inserted++; toCopy.push(keys[i]); missing.add(k); }
-      else if (d !== String(r.__h)) { out.updated++; toCopy.push(keys[i]); toDelete.push(keys[i]); }
+      if (d === undefined) { out.inserted++; toCopy.push(keys[i]); missing.add(k); sample(job, keys[i], 'MISSING'); }
+      else if (d !== String(r.__h)) { out.updated++; toCopy.push(keys[i]); toDelete.push(keys[i]); sample(job, keys[i], 'CHANGED'); }
     }
     out.batches++;
     if (toCopy.length) out.batchesDifferent++;
@@ -684,8 +728,8 @@ async function quickTable(
         const [sk, dk] = await Promise.all([list(pair.src.c, table), list(pair.dst.c, dstTable)]);
         const toCopy: unknown[][] = [];
         const toDelete: unknown[][] = [];
-        for (const [k, v] of sk) if (!dk.has(k) && !missing.has(k)) { out.inserted++; toCopy.push(v); }
-        for (const [k, v] of dk) if (!sk.has(k)) { out.deleted++; toDelete.push(v); }
+        for (const [k, v] of sk) if (!dk.has(k) && !missing.has(k)) { out.inserted++; toCopy.push(v); sample(job, v, 'MISSING'); }
+        for (const [k, v] of dk) if (!sk.has(k)) { out.deleted++; toDelete.push(v); sample(job, v, 'ONLY_IN_TARGET'); }
         out.batches++;
         if (toCopy.length || toDelete.length) out.batchesDifferent++;
         await apply(toDelete, toCopy);
@@ -800,6 +844,7 @@ export async function mysqlDataSync(
       progress();
       const started = Date.now();
       const report: TableReport = { table, status: 'SAME', rows: 0, inserted: 0, updated: 0, deleted: 0, chunks: 0, chunksDifferent: 0 };
+      let jobRef: TableJob | null = null;
       try {
         let dstTable = matchTargetTable(table, dstTables);
         if (dstTable) {
@@ -836,7 +881,7 @@ export async function mysqlDataSync(
         if (srcMeta.pk.length === 0) throw Object.assign(new Error('no primary key, so rows cannot be matched'), { skip: true });
         if (opts.apply && dstMeta.hasTriggers) report.warning = 'the target table has triggers; they ran for every row written';
 
-        const job: TableJob = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [] };
+        const job: TableJob = jobRef = { table, dstTable, meta: srcMeta, hash: rowHashExpr(srcMeta.columns), apply: opts.apply, recent: [], samples: [] };
         const upd = updatedAtColumn(srcMeta);
         if (quick && report.status !== 'CREATED' && quickable(srcMeta) && upd) {
           const pair = pairs[0];
@@ -920,6 +965,10 @@ export async function mysqlDataSync(
           report.status = (err as { skip?: boolean }).skip ? 'SKIPPED' : 'ERROR';
           report.reason = err instanceof Error ? err.message.slice(0, 500) : String(err);
         }
+      }
+      if (jobRef?.samples.length) {
+        const pair = pairs[0];
+        report.examples = await withReconnect([pair.src, pair.dst], () => describeExamples(pair.src.c, pair.dst.c, jobRef!)).catch(() => undefined);
       }
       // Counted rows replace the estimate for this table
       current = { table, index, rows: 0, estimate: 0 };
