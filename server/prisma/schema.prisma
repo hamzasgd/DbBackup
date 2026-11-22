@@ -100,48 +100,48 @@ enum UserRole {
 }
 
 model User {
-  id                    String                @id @default(uuid())
-  email                 String                @unique
-  name                  String
-  passwordHash          String
-  isActive              Boolean               @default(true)
+  id                   String                @id @default(uuid())
+  email                String                @unique
+  name                 String
+  passwordHash         String
+  isActive             Boolean               @default(true)
   // Security cool-down: logins blocked until this time after a password change
-  loginLockedUntil      DateTime?
+  loginLockedUntil     DateTime?
   // Click-through acceptance of TERMS_OF_SERVICE.md at registration
-  termsAcceptedAt       DateTime?
+  termsAcceptedAt      DateTime?
   // When true, password sign-in is rejected — passkey only
-  passwordLoginDisabled Boolean               @default(false)
+  passwordLoginDisabled Boolean @default(false)
   // Bumped on password change and "revoke all sessions"; access tokens carrying
   // an older value are rejected immediately (no waiting for the 15-min expiry).
-  tokenVersion          Int                   @default(0)
+  tokenVersion         Int                   @default(0)
   // Platform role. ADMIN manages the SaaS (users, stats, support view) via
   // /api/admin/*; bootstrapped by migration (earliest user) or ADMIN_EMAIL env.
-  role                  UserRole              @default(USER)
+  role                 UserRole              @default(USER)
   // Per-user storage quota in bytes (sum of COMPLETED backups, all providers).
   // Default 1 GB free; null = unlimited (admin-settable via /api/admin).
-  storageQuotaBytes     BigInt?               @default(1073741824)
+  storageQuotaBytes    BigInt?               @default(1073741824)
   // Max connections a user may create. Default 5 free; null = unlimited.
-  connectionLimit       Int?                  @default(5)
+  connectionLimit      Int?                  @default(5)
   // Max backup retention a user may configure on schedules, in days.
   // Default 30 free; null = unlimited. Sweeps clamp to this too.
-  maxRetentionDays      Int?                  @default(30)
-  connections           Connection[]
-  auditLogs             AuditLog[]
-  refreshTokens         RefreshToken[]
-  notificationSettings  NotificationSettings?
-  storageSettings       StorageSettings?
-  syncConfigurations    SyncConfiguration[]
-  credentialAccessLogs  CredentialAccessLog[]
-  passkeys              PasskeyCredential[]
-  mcpApiKeys            McpApiKey[]
-  mcpApprovals          McpApproval[]
-  restoreDrills         RestoreDrill[]
-  restores              Restore[]
-  dataSyncRuns          DataSyncRun[]
-  liveSyncs             LiveSync[]
-  dbAccesses            DbAccess[]
-  createdAt             DateTime              @default(now())
-  updatedAt             DateTime              @updatedAt
+  maxRetentionDays     Int?                  @default(30)
+  connections          Connection[]
+  auditLogs            AuditLog[]
+  refreshTokens        RefreshToken[]
+  notificationSettings NotificationSettings?
+  storageSettings      StorageSettings?
+  syncConfigurations   SyncConfiguration[]
+  credentialAccessLogs CredentialAccessLog[]
+  passkeys             PasskeyCredential[]
+  mcpApiKeys           McpApiKey[]
+  mcpApprovals         McpApproval[]
+  restoreDrills        RestoreDrill[]
+  restores             Restore[]
+  dataSyncRuns         DataSyncRun[]
+  liveSyncs            LiveSync[]
+  dbAccesses           DbAccess[]
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
 
   @@map("users")
 }
@@ -165,14 +165,14 @@ model PasskeyCredential {
 }
 
 model RefreshToken {
-  id        String   @id @default(uuid())
-  token     String   @unique
-  userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  expiresAt DateTime
-  createdAt DateTime @default(now())
-  ipAddress String?
-  userAgent String?
+  id         String   @id @default(uuid())
+  token      String   @unique
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  ipAddress  String?
+  userAgent  String?
 
   @@map("refresh_tokens")
 }
@@ -192,145 +192,145 @@ model Connection {
   sslKey     String?
 
   // SSH Tunnel
-  sshEnabled        Boolean @default(false)
-  sshHost           String?
-  sshPort           Int?    @default(22)
-  sshUsername       String?
-  sshPrivateKey     String?
+  sshEnabled    Boolean @default(false)
+  sshHost       String?
+  sshPort       Int?    @default(22)
+  sshUsername   String?
+  sshPrivateKey String?
   // Path to a key file on the server filesystem — alternative to storing the
   // PEM in the DB (a stolen DB dump then contains no SSH key material).
   sshPrivateKeyPath String?
-  sshPassphrase     String?
+  sshPassphrase String?
   // Pinned SSH host key fingerprint ("SHA256:<base64>"), recorded on the first
   // successful connect and checked on every later one (trust on first use).
-  sshHostKey        String?
+  sshHostKey    String?
 
   connectionTimeout Int? @default(30000)
 
   // Heartbeat monitoring
-  heartbeatEnabled    Boolean               @default(false)
+  heartbeatEnabled Boolean @default(false)
   /// MySQL/MariaDB: compress client↔server traffic for dump/restore (slow or remote links)
-  compressTraffic     Boolean               @default(false)
+  compressTraffic Boolean @default(false)
   /// Like termination protection: DbBackup never writes to this database (no restore,
   /// sync or migration into it) and the connection can't be deleted while it is on
-  writeProtected      Boolean               @default(false)
-  heartbeats          ConnectionHeartbeat[]
+  writeProtected  Boolean @default(false)
+  heartbeats       ConnectionHeartbeat[]
   // Watchdog: alert when no completed backup within this many hours (null = off)
   expectedBackupHours Int?
 
   // Relations
-  userId               String
-  user                 User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
-  backups              Backup[]
-  schedules            Schedule[]
-  migrationsAsSource   Migration[]           @relation("MigrationSource")
-  migrationsAsTarget   Migration[]           @relation("MigrationTarget")
-  syncConfigsAsSource  SyncConfiguration[]   @relation("SyncSource")
-  syncConfigsAsTarget  SyncConfiguration[]   @relation("SyncTarget")
+  userId              String
+  user                User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backups             Backup[]
+  schedules           Schedule[]
+  migrationsAsSource  Migration[]         @relation("MigrationSource")
+  migrationsAsTarget  Migration[]         @relation("MigrationTarget")
+  syncConfigsAsSource SyncConfiguration[] @relation("SyncSource")
+  syncConfigsAsTarget SyncConfiguration[] @relation("SyncTarget")
   credentialAccessLogs CredentialAccessLog[]
-  restoresAsTarget     Restore[]             @relation("RestoreTarget")
-  dataSyncsAsSource    DataSyncRun[]         @relation("DataSyncSource")
-  dataSyncsAsTarget    DataSyncRun[]         @relation("DataSyncTarget")
-  liveSyncsAsSource    LiveSync[]            @relation("LiveSyncSource")
-  liveSyncsAsTarget    LiveSync[]            @relation("LiveSyncTarget")
-  dbAccesses           DbAccess[]
-  createdAt            DateTime              @default(now())
-  updatedAt            DateTime              @updatedAt
+  restoresAsTarget    Restore[]           @relation("RestoreTarget")
+  dataSyncsAsSource   DataSyncRun[]       @relation("DataSyncSource")
+  dataSyncsAsTarget   DataSyncRun[]       @relation("DataSyncTarget")
+  liveSyncsAsSource   LiveSync[]          @relation("LiveSyncSource")
+  liveSyncsAsTarget   LiveSync[]          @relation("LiveSyncTarget")
+  dbAccesses          DbAccess[]
+  createdAt           DateTime            @default(now())
+  updatedAt           DateTime            @updatedAt
 
   @@map("connections")
 }
 
 model Backup {
-  id             String          @id @default(uuid())
-  userId         String
-  connectionId   String?
-  connection     Connection?     @relation(fields: [connectionId], references: [id], onDelete: SetNull)
-  fileName       String
-  filePath       String
-  fileSize       BigInt          @default(0)
-  dbType         DatabaseType
-  dbName         String
-  status         BackupStatus    @default(PENDING)
-  format         BackupFormat    @default(COMPRESSED_SQL)
-  isCompressed   Boolean         @default(true)
-  snapshotName   String?
-  notes          String?
-  error          String?
-  progress       Int             @default(0)
+  id           String          @id @default(uuid())
+  userId       String
+  connectionId String?
+  connection   Connection?     @relation(fields: [connectionId], references: [id], onDelete: SetNull)
+  fileName     String
+  filePath     String
+  fileSize     BigInt          @default(0)
+  dbType       DatabaseType
+  dbName       String
+  status       BackupStatus    @default(PENDING)
+  format       BackupFormat    @default(COMPRESSED_SQL)
+  isCompressed Boolean         @default(true)
+  snapshotName String?
+  notes        String?
+  error        String?
+  progress     Int             @default(0)
   /// Live progress while RUNNING: bytes on disk so far, the size expected
   /// from the connection's last completed backup (null = no history), the
   /// current step (DUMPING | VERIFYING | ENCRYPTING | UPLOADING), when the
   /// worker last reported (heartbeat) and when the output last grew.
-  bytesWritten   BigInt          @default(0)
+  bytesWritten   BigInt    @default(0)
   expectedBytes  BigInt?
   stage          String?
   progressAt     DateTime?
   bytesChangedAt DateTime?
-  checksum       String?
-  verified       Boolean         @default(false)
-  verifiedAt     DateTime?
-  storageType    StorageProvider @default(LOCAL)
-  storageKey     String?
+  checksum     String?
+  verified     Boolean         @default(false)
+  verifiedAt   DateTime?
+  storageType  StorageProvider @default(LOCAL)
+  storageKey   String?
   /// Where the dump ran: TUNNEL | SSH_SERVER
-  strategy       String          @default("TUNNEL")
-  drills         RestoreDrill[]  @relation("DrillBackup")
-  restores       Restore[]       @relation("RestoreBackup")
-  startedAt      DateTime?
-  completedAt    DateTime?
-  createdAt      DateTime        @default(now())
+  strategy     String          @default("TUNNEL")
+  drills       RestoreDrill[]  @relation("DrillBackup")
+  restores     Restore[]       @relation("RestoreBackup")
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime        @default(now())
 
   @@index([userId])
   @@map("backups")
 }
 
 model ConnectionHeartbeat {
-  id           String     @id @default(uuid())
+  id           String   @id @default(uuid())
   connectionId String
   connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  status       String // UP | DOWN
+  status       String   // UP | DOWN
   latencyMs    Int?
   error        String?
-  checkedAt    DateTime   @default(now())
+  checkedAt    DateTime @default(now())
 
   @@index([connectionId, checkedAt])
   @@map("connection_heartbeats")
 }
 
 model McpApiKey {
-  id               String    @id @default(uuid())
-  userId           String
-  user             User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  name             String
-  keyHash          String    @unique
-  keyPrefix        String
-  scopes           String[]
+  id         String    @id @default(uuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  keyHash    String    @unique
+  keyPrefix  String
+  scopes     String[]
   // When true, write/admin tools pause for human approval before executing
-  approvalRequired Boolean   @default(false)
+  approvalRequired Boolean @default(false)
   // Per-key daily call quota (0/null = unlimited)
-  dailyCallLimit   Int? // e.g. 100
-  callsToday       Int       @default(0)
-  callsResetAt     DateTime? // UTC midnight counter reset
-  expiresAt        DateTime?
-  revokedAt        DateTime?
-  lastUsedAt       DateTime?
-  createdAt        DateTime  @default(now())
+  dailyCallLimit Int?     // e.g. 100
+  callsToday    Int       @default(0)
+  callsResetAt  DateTime? // UTC midnight counter reset
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  lastUsedAt DateTime?
+  createdAt  DateTime  @default(now())
 
   @@index([userId])
   @@map("mcp_api_keys")
 }
 
 model RestoreDrill {
-  id             String    @id @default(uuid())
-  userId         String
-  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  backupId       String
-  backup         Backup    @relation("DrillBackup", fields: [backupId], references: [id], onDelete: Cascade)
-  status         String    @default("RUNNING") // RUNNING | PASSED | FAILED
-  tablesRestored Int?
-  rowsRestored   BigInt?
-  error          String?
-  startedAt      DateTime  @default(now())
-  finishedAt     DateTime?
+  id              String    @id @default(uuid())
+  userId          String
+  user            User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  backupId        String
+  backup          Backup    @relation("DrillBackup", fields: [backupId], references: [id], onDelete: Cascade)
+  status          String    @default("RUNNING") // RUNNING | PASSED | FAILED
+  tablesRestored  Int?
+  rowsRestored    BigInt?
+  error           String?
+  startedAt       DateTime  @default(now())
+  finishedAt      DateTime?
 
   @@index([userId, startedAt])
   @@map("restore_drills")
@@ -388,7 +388,7 @@ model DataSyncRun {
   targetName         String
   sourceDatabase     String
   targetDatabase     String
-  mode               String // COMPARE | APPLY
+  mode               String      // COMPARE | APPLY
   /// Only these tables (empty = all)
   tables             String[]    @default([])
   /// Chunks checked at the same time, each over its own connections
@@ -470,17 +470,17 @@ model LiveSync {
 }
 
 model McpApproval {
-  id         String    @id @default(uuid())
-  userId     String
-  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  mcpKeyId   String
-  keyName    String
-  tool       String
-  args       Json?
-  status     String    @default("PENDING") // PENDING | APPROVED | DENIED
-  result     String?
-  createdAt  DateTime  @default(now())
-  resolvedAt DateTime?
+  id          String    @id @default(uuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  mcpKeyId    String
+  keyName     String
+  tool        String
+  args        Json?
+  status      String    @default("PENDING") // PENDING | APPROVED | DENIED
+  result      String?
+  createdAt   DateTime  @default(now())
+  resolvedAt  DateTime?
 
   @@index([userId, status])
   @@map("mcp_approvals")
@@ -522,16 +522,16 @@ model AuditLog {
 }
 
 model CredentialAccessLog {
-  id           String     @id @default(uuid())
-  connectionId String
-  connection   Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
-  userId       String
-  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
-  action       String // DECRYPT, TEST, BACKUP, RESTORE, SYNC, MIGRATION, VIEW
-  ipAddress    String?
-  success      Boolean    @default(true)
-  errorMessage String?
-  timestamp    DateTime   @default(now())
+  id            String   @id @default(uuid())
+  connectionId  String
+  connection    Connection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  userId        String
+  user          User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  action        String   // DECRYPT, TEST, BACKUP, RESTORE, SYNC, MIGRATION, VIEW
+  ipAddress     String?
+  success       Boolean  @default(true)
+  errorMessage  String?
+  timestamp     DateTime @default(now())
 
   @@index([connectionId, timestamp])
   @@index([userId, timestamp])
@@ -560,64 +560,64 @@ model Migration {
 }
 
 model NotificationSettings {
-  id                    String   @id @default(uuid())
-  userId                String   @unique
-  user                  User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  emailEnabled          Boolean  @default(false)
-  emailAddress          String?
-  smtpHost              String?
-  smtpPort              Int?     @default(587)
-  smtpUser              String?
-  smtpPass              String?
-  smtpSecure            Boolean  @default(false)
-  slackEnabled          Boolean  @default(false)
-  slackWebhookUrl       String?
-  ntfyEnabled           Boolean  @default(false)
-  ntfyServerUrl         String? // e.g. https://ntfy.sh (default) or self-hosted
-  ntfyTopic             String? // topic to publish to
-  telegramEnabled       Boolean  @default(false)
-  telegramBotToken      String?
-  telegramChatId        String?
-  discordEnabled        Boolean  @default(false)
-  discordWebhookUrl     String?
-  whatsappEnabled       Boolean  @default(false)
-  whatsappPhoneNumberId String? // Meta WhatsApp Business phone number ID
-  whatsappAccessToken   String? // permanent access token (encrypted)
-  whatsappRecipient     String? // your personal WhatsApp number (E.164, e.g. 15551234567)
-  notifyOnSuccess       Boolean  @default(false)
-  notifyOnFailure       Boolean  @default(true)
-  notifyOnRetention     Boolean  @default(false)
-  notifyOnLogin         Boolean  @default(true)
-  notifyOnStorage       Boolean  @default(true)
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id                String   @id @default(uuid())
+  userId            String   @unique
+  user              User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  emailEnabled      Boolean  @default(false)
+  emailAddress      String?
+  smtpHost          String?
+  smtpPort          Int?     @default(587)
+  smtpUser          String?
+  smtpPass          String?
+  smtpSecure        Boolean  @default(false)
+  slackEnabled      Boolean  @default(false)
+  slackWebhookUrl   String?
+  ntfyEnabled       Boolean  @default(false)
+  ntfyServerUrl     String?   // e.g. https://ntfy.sh (default) or self-hosted
+  ntfyTopic         String?   // topic to publish to
+  telegramEnabled   Boolean  @default(false)
+  telegramBotToken  String?
+  telegramChatId    String?
+  discordEnabled    Boolean  @default(false)
+  discordWebhookUrl String?
+  whatsappEnabled      Boolean @default(false)
+  whatsappPhoneNumberId String?   // Meta WhatsApp Business phone number ID
+  whatsappAccessToken   String?   // permanent access token (encrypted)
+  whatsappRecipient     String?   // your personal WhatsApp number (E.164, e.g. 15551234567)
+  notifyOnSuccess   Boolean  @default(false)
+  notifyOnFailure   Boolean  @default(true)
+  notifyOnRetention Boolean  @default(false)
+  notifyOnLogin     Boolean  @default(true)
+  notifyOnStorage   Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
 
   @@map("notification_settings")
 }
 
 model StorageSettings {
-  id                      String          @id @default(uuid())
-  userId                  String          @unique
-  user                    User            @relation(fields: [userId], references: [id], onDelete: Cascade)
-  provider                StorageProvider @default(LOCAL)
-  bucket                  String?
-  region                  String?
-  accessKeyId             String?
-  secretAccessKey         String?
-  endpoint                String?
-  prefix                  String?
-  gdriveClientId          String?
-  gdriveClientSecret      String?
-  gdriveRefreshToken      String?
-  gdriveFolderId          String?
+  id              String          @id @default(uuid())
+  userId          String          @unique
+  user            User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  provider        StorageProvider @default(LOCAL)
+  bucket          String?
+  region          String?
+  accessKeyId     String?
+  secretAccessKey String?
+  endpoint        String?
+  prefix          String?
+  gdriveClientId     String?
+  gdriveClientSecret String?
+  gdriveRefreshToken String?
+  gdriveFolderId     String?
   // At-rest encryption of backup files (AES-256-GCM, passphrase-based)
-  backupEncryptionEnabled Boolean         @default(false)
-  backupPassphrase        String?
+  backupEncryptionEnabled Boolean  @default(false)
+  backupPassphrase    String?
   // Old passphrases (encrypted) so backups encrypted before a rotation stay decryptable
   backupPassphraseHistory Json?
-  deleteLocal             Boolean         @default(false)
-  createdAt               DateTime        @default(now())
-  updatedAt               DateTime        @updatedAt
+  deleteLocal     Boolean         @default(false)
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
 
   @@map("storage_settings")
 }
