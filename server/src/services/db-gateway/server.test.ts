@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { execFileSync } from 'child_process';
+import crypto from 'crypto';
 import fs from 'fs';
 import net from 'net';
 import os from 'os';
@@ -9,7 +10,7 @@ import {
   CLIENT, COM, GATEWAY_CAPS, MAX_PAYLOAD, Packet, PacketSplitter, Reader, buildErr, buildGreeting, buildOk,
   encodePacket, lenencBytes, nativeToken, newScramble, passwordHashes,
 } from './protocol';
-import { GatewayAccount, GatewayOptions, GatewayServer, QueryKind } from './server';
+import { BackendTarget, GatewayAccount, GatewayOptions, GatewayServer, QueryKind, failureKey } from './server';
 
 /**
  * The gateway in front of a stand-in database, over real sockets. The stand-in
@@ -23,6 +24,16 @@ class StandInDatabase {
   private nextThread = 100;
   /** Every packet it took as the start of a command */
   readonly commands: { seq: number; cmd: number; sql: string }[] = [];
+  /** With `fullAuth`, what the gateway answered when the password itself was asked for (MySQL 8's caching_sha2_password) */
+  readonly authReplies: string[] = [];
+  private readonly publicKey: Buffer;
+
+  /** `fullAuth`: the first answer is not enough, as for a user MySQL 8 has not seen before */
+  constructor(readonly fullAuth = false) {
+    this.publicKey = fullAuth
+      ? Buffer.from(crypto.generateKeyPairSync('rsa', { modulusLength: 2048 }).publicKey.export({ type: 'spki', format: 'pem' }) as string)
+      : Buffer.alloc(0);
+  }
 
   async start(): Promise<number> {
     this.server.on('connection', (sock) => {
@@ -37,12 +48,29 @@ class StandInDatabase {
       sock.on('data', (d: Buffer) => {
         for (const p of splitter.push(d)) {
           if (!loggedIn) {
-            // The gateway's login (number 1): whoever it says it is
-            if (p.seq === 1) {
-              loggedIn = true;
-              expected = 0;
-              sock.write(encodePacket(2, buildOk()));
+            if (!this.fullAuth) {
+              // The gateway's login (number 1): whoever it says it is
+              if (p.seq === 1) {
+                loggedIn = true;
+                expected = 0;
+                sock.write(encodePacket(2, buildOk()));
+              }
+              continue;
             }
+            if (p.seq === 1) {
+              sock.write(encodePacket(2, Buffer.from([0x01, 0x04])));
+              continue;
+            }
+            const answer = p.payload[0] === 0x02 ? 'asked for the public key'
+              : p.payload.length === 256 ? 'the password RSA-encrypted' : 'the password as it is';
+            this.authReplies.push(answer);
+            if (p.payload[0] === 0x02) {
+              sock.write(encodePacket(p.seq + 1, Buffer.concat([Buffer.from([0x01]), this.publicKey])));
+              continue;
+            }
+            loggedIn = true;
+            expected = 0;
+            sock.write(encodePacket(p.seq + 1, buildOk()));
             continue;
           }
           if (p.seq !== expected) {
@@ -81,7 +109,7 @@ class StandInDatabase {
       });
       sock.write(encodePacket(0, buildGreeting({
         serverVersion: '8.0.40-stand-in', connectionId: this.nextThread++, scramble: newScramble(), caps: GATEWAY_CAPS,
-        charset: 45, status: 0x0002, authPlugin: 'mysql_native_password',
+        charset: 45, status: 0x0002, authPlugin: this.fullAuth ? 'caching_sha2_password' : 'mysql_native_password',
       })));
     });
     return new Promise((resolve) => this.server.listen(0, '127.0.0.1', () => {
@@ -187,12 +215,17 @@ const anAccount = (id: string, maxConnections = 5): GatewayAccount => {
   return { id, username: 'ali', hashNative: native, hashSha2: sha2, enabled: true, expiresAt: null, maxConnections, database: 'shop' };
 };
 
-async function startGateway(over: Partial<GatewayOptions> & { account?: GatewayAccount; beforeOpen?: () => Promise<void> } = {}) {
-  const db = new StandInDatabase();
+async function startGateway(over: Partial<GatewayOptions> & {
+  account?: GatewayAccount; beforeOpen?: () => Promise<void>; target?: Partial<BackendTarget>;
+  db?: StandInDatabase; onQuery?: (sql: string) => void;
+} = {}) {
+  const db = over.db ?? new StandInDatabase();
   const dbPort = await db.start();
   const account = over.account ?? anAccount('acc-1');
   const log: { kind: QueryKind; sql: string }[] = [];
   const ended: string[] = [];
+  /** What the gateway put in the operator's log */
+  const errors: { what: string; error: unknown }[] = [];
   let sessions = 0;
   const gw = new GatewayServer({
     port: 0, host: '127.0.0.1', requireTls: false, secureContext: () => null, ...over,
@@ -205,16 +238,20 @@ async function startGateway(over: Partial<GatewayOptions> & { account?: GatewayA
           socket.once('connect', () => resolve());
           socket.once('error', reject);
         });
-        return { socket, user: 'dbb_stand_in', password: 'backend-password', release: () => {} };
+        return { socket, user: 'dbb_stand_in', password: 'backend-password', release: () => {}, ...over.target };
       },
       sessionStarted: async () => `session-${++sessions}`,
-      query: (_s, _a, kind, sql) => { log.push({ kind, sql }); },
+      query: (_s, _a, kind, sql) => {
+        over.onQuery?.(sql);
+        log.push({ kind, sql });
+      },
       sessionEnded: (id) => { ended.push(id); },
+      internalError: (what, error) => { errors.push({ what, error }); },
     },
   });
   await gw.start();
   return {
-    gw, db, log, ended, account, port: gw.port,
+    gw, db, log, ended, errors, account, port: gw.port,
     close: async () => { await gw.stop(); await db.stop(); },
   };
 }
@@ -386,5 +423,117 @@ describe('the gateway in front of a database', () => {
     await c.closed;
     expect(Date.now() - started).toBeLessThan(3000);
     await h.close();
+  });
+
+  it('does not ask an unprotected database for its public key, unless the operator allowed it or the way is a tunnel', async () => {
+    const loginThrough = async (target: Partial<BackendTarget>) => {
+      const h = await startGateway({ db: new StandInDatabase(true), target });
+      const c = await Client.connect(h.port);
+      const reply = await c.login('ali', PASSWORD);
+      const out = { reply, answers: [...h.db.authReplies], errors: [...h.errors] };
+      c.destroy();
+      await h.close();
+      return out;
+    };
+    // Over a plain connection nothing is asked of the database: whatever key came back could be anybody's
+    const refused = await loginThrough({});
+    expect(refused.answers).toEqual([]);
+    expect(refused.reply?.payload[0]).toBe(0xff);
+    expect(refused.reply?.payload.subarray(9).toString()).toMatch(/^The gateway could not log in to the database \(reference [0-9a-f]{6}\)\./);
+    expect(String((refused.errors[0]?.error as Error)?.message)).toMatch(/full password check over an unencrypted connection/);
+    // On a network the operator called private, or inside an SSH tunnel
+    for (const target of [{ allowServerPublicKey: true }, { tunnelled: true }]) {
+      const allowed = await loginThrough(target);
+      expect(allowed.reply?.payload[0]).toBe(0x00);
+      expect(allowed.answers).toEqual(['asked for the public key', 'the password RSA-encrypted']);
+    }
+  });
+
+  it('keeps the database out of its answers: the operator gets the reason in the log, the person a reference', async () => {
+    const h = await startGateway({ beforeOpen: async () => { throw new Error('connect ECONNREFUSED 10.0.0.5:3306'); } });
+    const c = await Client.connect(h.port);
+    const reply = await c.login('ali', PASSWORD);
+    const message = reply?.payload.subarray(9).toString() ?? '';
+    expect(reply?.payload[0]).toBe(0xff);
+    expect(message).toMatch(/^The gateway could not reach the database \(reference [0-9a-f]{6}\)\./);
+    expect(message).not.toContain('10.0.0.5');
+    expect(h.errors).toHaveLength(1);
+    expect(h.errors[0].what).toMatch(/^Could not reach the database \(reference [0-9a-f]{6}\)$/);
+    expect(String((h.errors[0].error as Error).message)).toContain('10.0.0.5:3306');
+    c.destroy();
+    await h.close();
+  });
+
+  it('ends only the session whose packet it could not handle', async () => {
+    const h = await startGateway({ onQuery: (sql) => { if (sql === 'BOOM') throw new Error('the log is full'); } });
+    const a = await loggedIn(h.port);
+    const b = await loggedIn(h.port);
+    a.send(0, query('BOOM'));
+    const answer = await a.next();
+    expect(answer?.payload[0]).toBe(0xff);
+    expect(answer?.payload.subarray(9).toString()).toMatch(/^The gateway could not handle a packet \(reference [0-9a-f]{6}\)/);
+    await until(() => h.ended.length === 1);
+    expect(h.errors.map((e) => e.what)).toEqual([expect.stringMatching(/^Packet from the client \(reference [0-9a-f]{6}\)$/)]);
+    b.send(0, query('SELECT 1'));
+    expect((await b.next())?.payload[0]).toBe(0x00);
+    a.destroy();
+    b.destroy();
+    await h.close();
+  });
+
+  it("puts a failing listener in the log instead of the event loop's", async () => {
+    const h = await startGateway();
+    (h.gw as unknown as { server: net.Server }).server.emit('error', new Error('accept EMFILE'));
+    expect(h.errors.map((e) => e.what)).toEqual(['Listener error']);
+    await h.close();
+  });
+
+  it('greets every client with the version it was given, not with the database\'s', async () => {
+    const fixed = await startGateway({ advertisedVersion: '8.0.40' });
+    (await loggedIn(fixed.port)).destroy();
+    const greeted = await Client.connect(fixed.port);
+    expect((await greeted.next())?.payload.includes('stand-in')).toBe(false);
+    greeted.destroy();
+    await fixed.close();
+    // Without the setting, as before: the version the last database reported
+    const own = await startGateway();
+    (await loggedIn(own.port)).destroy();
+    const again = await Client.connect(own.port);
+    expect((await again.next())?.payload.includes('stand-in')).toBe(true);
+    again.destroy();
+    await own.close();
+  });
+
+  it('does not let a person change the password of the database user behind their access', async () => {
+    const h = await startGateway();
+    const c = await loggedIn(h.port);
+    for (const sql of ["SET PASSWORD = 'x'", 'ALTER USER USER() IDENTIFIED BY \'x\'', 'rename user CURRENT_USER to \'a\'@\'%\'']) {
+      c.send(0, query(sql));
+      expect((await c.next())?.payload[0]).toBe(0xff);
+    }
+    expect(h.db.commands).toEqual([]);
+    expect(h.log.map((l) => l.kind)).toEqual(['BLOCKED', 'BLOCKED', 'BLOCKED']);
+    // A statement that only talks about it goes through
+    c.send(0, query("SELECT 'SET PASSWORD' AS s"));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    c.destroy();
+    await h.close();
+  });
+
+  it('logs the values sent with a prepared statement', async () => {
+    const h = await startGateway();
+    const c = await loggedIn(h.port);
+    // COM_STMT_EXECUTE for statement 5, with three bytes of parameters
+    c.send(0, Buffer.concat([Buffer.from([COM.STMT_EXECUTE, 5, 0, 0, 0, 0, 1, 0, 0, 0]), Buffer.from('abc')]));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    expect(h.log).toEqual([{ kind: 'EXECUTE', sql: 'EXECUTE #5, 3 bytes of parameters: 616263' }]);
+    c.destroy();
+    await h.close();
+  });
+
+  it('counts failed logins per IPv6 block, and per address for IPv4', () => {
+    expect(failureKey('203.0.113.7')).toBe('203.0.113.7');
+    expect(failureKey('2001:db8:1:2:3:4:5:6')).toBe('2001:db8:1:2');
+    expect(failureKey('2001:DB8:1:2::7')).toBe(failureKey('2001:db8:1:2:ffff::1'));
   });
 });

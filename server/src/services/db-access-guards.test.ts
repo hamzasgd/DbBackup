@@ -9,7 +9,7 @@ process.env.ENCRYPTION_KEY_PRIMARY = process.env.ENCRYPTION_KEY_PRIMARY ?? '3'.r
 import { encrypt } from './crypto.service';
 import { deleteConnection } from '../controllers/connection.controller';
 import { setUserStatus } from '../controllers/admin.controller';
-import { findAccess } from './db-gateway/gateway.service';
+import { findAccess, usableAccesses } from './db-gateway/gateway.service';
 
 /** Integration: what the gateway relies on next to its own checks, since each access keeps a database user. */
 describe('database access guards', () => {
@@ -34,14 +34,14 @@ describe('database access guards', () => {
       username: encrypt('u'), password: encrypt('p'),
     },
   });
-  const access = (connectionId: string) => {
+  const access = (connectionId: string, privileges = ['SELECT']) => {
     const username = `ali-${tag().slice(-8)}`;
     return prisma.dbAccess.create({
       data: {
         userId: owner.id, connectionId, name: 'Ali', username, hashNative: '00'.repeat(20), hashSha2: '00'.repeat(32), database: 'shop',
-        tables: [], privileges: ['SELECT'], maxConnections: 5, backendUser: 'dbb_stand_in', backendHost: '%', backendPassword: encrypt('p'),
+        tables: [], privileges, maxConnections: 5, backendUser: 'dbb_stand_in', backendHost: '%', backendPassword: encrypt('p'),
       },
-      select: { username: true },
+      select: { id: true, username: true },
     });
   };
   const req = (user: Who, body: object = {}, params: object = {}) =>
@@ -77,6 +77,35 @@ describe('database access guards', () => {
     await prisma.user.update({ where: { id: owner.id }, data: { isActive: false } });
     expect(await findAccess(username)).toBeNull();
     expect(await findAccess('nobody')).toBeNull();
+  });
+
+  it('keeps sessions off accesses that are off, expired, suspended, or that write where nobody may write', async () => {
+    const c = await connection();
+    const read = (await access(c.id)).id;
+    const write = (await access(c.id, ['SELECT', 'UPDATE'])).id;
+    expect(await usableAccesses([read, write])).toEqual(new Set([read, write]));
+
+    // Write protection turned on after the accesses were made
+    await prisma.connection.update({ where: { id: c.id }, data: { writeProtected: true } });
+    expect(await usableAccesses([read, write])).toEqual(new Set([read]));
+    await prisma.connection.update({ where: { id: c.id }, data: { writeProtected: false } });
+
+    // A live sync started later, into the same connection
+    await prisma.liveSync.create({
+      data: { userId: owner.id, targetConnectionId: c.id, sourceName: 'Copy', targetName: 'Shop', sourceDatabase: 'shop', targetDatabase: 'shop', serverId: 1 },
+    });
+    expect(await usableAccesses([read, write])).toEqual(new Set([read]));
+    await prisma.liveSync.updateMany({ where: { targetConnectionId: c.id }, data: { enabled: false } });
+    expect(await usableAccesses([read, write])).toEqual(new Set([read, write]));
+
+    // Off, in the past, or removed
+    await prisma.dbAccess.update({ where: { id: read }, data: { enabled: false } });
+    expect(await usableAccesses([read, write])).toEqual(new Set([write]));
+    await prisma.dbAccess.update({ where: { id: write }, data: { expiresAt: new Date(Date.now() - 1000) } });
+    expect(await usableAccesses([read, write])).toEqual(new Set());
+    await prisma.user.update({ where: { id: owner.id }, data: { isActive: false } });
+    await prisma.dbAccess.updateMany({ where: { connectionId: c.id }, data: { enabled: true, expiresAt: null } });
+    expect(await usableAccesses([read, write])).toEqual(new Set());
   });
 
   it('suspends an account that gave database access without failing', async () => {

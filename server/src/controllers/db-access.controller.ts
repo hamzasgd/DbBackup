@@ -94,9 +94,17 @@ function provisionFailed(e: unknown): never {
   throw new AppError(`Could not reach the database: ${(e as Error).message}`, 502);
 }
 
-export async function gatewayStatus(_req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
+/** What everyone but the administrator is told when the certificate could not be read: the reason names a file on the server */
+const TLS_PROBLEM_HIDDEN = 'The TLS certificate or key could not be read. The DbBackup administrator finds the reason in the server log.';
+
+export async function gatewayStatus(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
-    res.json({ success: true, data: { ...getGatewayStatus(), presets: PRESETS, databasePrivileges: DATABASE_PRIVILEGES, tablePrivileges: TABLE_PRIVILEGES } });
+    const s = getGatewayStatus();
+    // The reason (which file, why it could not be read) is for the administrator, who can do something about it
+    const data = s.tls.error && req.user!.role !== 'ADMIN'
+      ? { ...s, problem: s.problem === s.tls.error ? TLS_PROBLEM_HIDDEN : s.problem, tls: { ...s.tls, error: TLS_PROBLEM_HIDDEN } }
+      : s;
+    res.json({ success: true, data: { ...data, presets: PRESETS, databasePrivileges: DATABASE_PRIVILEGES, tablePrivileges: TABLE_PRIVILEGES } });
   } catch (err) { next(err); }
 }
 
@@ -250,8 +258,13 @@ export async function listSessionQueries(req: AuthRequest, res: Response, next: 
   try {
     const s = await prisma.dbAccessSession.findFirst({ where: { id: req.params.sessionId, access: { userId: req.user!.userId } } });
     if (!s) throw new AppError('Session not found', 404);
-    const queries = await prisma.dbAccessQuery.findMany({ where: { sessionId: s.id }, orderBy: { at: 'asc' }, take: 1000 });
-    res.json({ success: true, data: { queries } });
+    // The first `limit` statements (the page can ask for more); `total` says how many there are
+    const limit = Math.min(10_000, Math.max(1, parseInt(String(req.query.limit ?? '1000'), 10) || 1000));
+    const [queries, total] = await prisma.$transaction([
+      prisma.dbAccessQuery.findMany({ where: { sessionId: s.id }, orderBy: { at: 'asc' }, take: limit }),
+      prisma.dbAccessQuery.count({ where: { sessionId: s.id } }),
+    ]);
+    res.json({ success: true, data: { queries, total } });
   } catch (err) { next(err); }
 }
 

@@ -62,7 +62,8 @@ describe.skipIf(!MARIADB)('Database gateway (MySQL protocol)', () => {
         openBackend: async () => {
           const socket = net.connect(Number(MARIADB!.port), MARIADB!.hostname);
           await new Promise((r, j) => { socket.once('connect', r); socket.once('error', j); });
-          return { socket, user: backendUser, password: backendPassword, release: () => {} };
+          // As the service does when told the network is private: this database is reached without TLS or a tunnel
+          return { socket, user: backendUser, password: backendPassword, allowServerPublicKey: true, release: () => {} };
         },
         sessionStarted: async () => uniq('s'),
         query: (_s, _a, kind, sql) => { log.push({ kind, sql }); },
@@ -212,5 +213,24 @@ describe.skipIf(!MARIADB)('Database gateway: the database users behind accesses'
 
     await dropBackendUser(config(), u.user, u.host);
     await expect(login(u.user, u.password)).rejects.toMatchObject({ errno: 1045 });
+  });
+
+  it('keeps a whole-database grant to that database', async () => {
+    // In `db.*` the database reads _ as a wildcard unless it is escaped, so `e2e_gwp_x` would also cover `e2eXgwpXx`
+    const twin = db.replace(/_/g, 'X');
+    await myAdmin(async (c) => {
+      await c.query(`CREATE DATABASE \`${twin}\``);
+      await c.query(`CREATE TABLE \`${twin}\`.a (id INT PRIMARY KEY)`);
+    });
+    try {
+      const u = await createBackendUser(config(), { database: db, tables: [], privileges: ['SELECT'], maxConnections: 2 });
+      const c = await login(u.user, u.password);
+      expect((await c.query<mysql2.RowDataPacket[]>('SELECT id FROM a'))[0]).toEqual([{ id: 1 }]);
+      await expect(c.query(`SELECT id FROM \`${twin}\`.a`)).rejects.toThrow(/denied/i);
+      c.destroy();
+      await dropBackendUser(config(), u.user, u.host);
+    } finally {
+      await myAdmin((c) => c.query(`DROP DATABASE IF EXISTS \`${twin}\``));
+    }
   });
 });

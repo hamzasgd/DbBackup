@@ -832,7 +832,7 @@ model DbAccessQuery {
   sessionId String
   session   DbAccessSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
   at        DateTime        @default(now())
-  /// QUERY, PREPARE, USE or BLOCKED
+  /// QUERY, PREPARE, EXECUTE, USE or BLOCKED
   kind      String
   sql       String
 

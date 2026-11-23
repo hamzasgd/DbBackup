@@ -11,6 +11,8 @@ import type { ConnectionConfig } from '../engines/base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { sanitizeForLog } from '../../utils/sanitize';
 import { AccessUnavailable, BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './server';
+import { logText } from './protocol';
+import { onlyReads, WRITE_PRIVILEGES } from './provision';
 
 /**
  * Settings (server/.env):
@@ -22,6 +24,10 @@ import { AccessUnavailable, BackendTarget, GatewayAccount, GatewayServer, QueryK
  *   DB_GATEWAY_REQUIRE_TLS   "false" allows unencrypted clients (only for a private network)
  *   DB_GATEWAY_LOG_DAYS      days to keep the query log (default 30)
  *   DB_GATEWAY_MAX_CONNECTIONS  the most connections at once, logged in or not (default 500)
+ *   DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY  "true": let the gateway ask a database it reaches unencrypted (no SSL,
+ *                                       no SSH tunnel) for its public key, as the mysql client does with
+ *                                       --get-server-public-key. Only for a private network.
+ *   DB_GATEWAY_ADVERTISED_VERSION       version every client is greeted with, instead of the database's own
  */
 export interface GatewayConfig {
   port: number | null;
@@ -32,6 +38,8 @@ export interface GatewayConfig {
   requireTls: boolean;
   logDays: number;
   maxConnections: number;
+  allowServerPublicKey: boolean;
+  advertisedVersion: string | null;
 }
 
 export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
@@ -50,6 +58,8 @@ export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConf
     logDays: Math.max(1, Number(env.DB_GATEWAY_LOG_DAYS) || 30),
     // The gateway shares its process with the rest of DbBackup, so this stays well below a usual file descriptor limit
     maxConnections: Math.min(5000, Math.max(1, Math.floor(Number(env.DB_GATEWAY_MAX_CONNECTIONS)) || 500)),
+    allowServerPublicKey: env.DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY === 'true',
+    advertisedVersion: env.DB_GATEWAY_ADVERTISED_VERSION?.trim().slice(0, 64) || null,
   };
 }
 
@@ -90,7 +100,10 @@ function loadTls(cfg: GatewayConfig): tls.SecureContext | null {
     logger.info(`DB gateway: TLS certificate loaded (${sanitizeForLog(tlsState.subject)}, valid until ${tlsState.validTo})`);
     return tlsState.context;
   } catch (e) {
-    tlsError = `Could not read the TLS certificate or key: ${(e as Error).message}`;
+    const next = `Could not read the TLS certificate or key: ${(e as Error).message}`;
+    // Once per reason, not once per connection
+    if (next !== tlsError) logger.warn(`DB gateway: ${next}`);
+    tlsError = next;
     // Keep using the last good certificate while a renewal is half written
     return tlsState?.context ?? null;
   }
@@ -156,7 +169,6 @@ function connectTcp(host: string, port: number): Promise<net.Socket> {
 
 let pendingQueries: { sessionId: string; kind: string; sql: string; at: Date }[] = [];
 let flushTimer: NodeJS.Timeout | null = null;
-const MAX_SQL = 4000;
 
 async function flushQueries(): Promise<void> {
   flushTimer = null;
@@ -173,6 +185,8 @@ async function flushQueries(): Promise<void> {
 // ── The gateway
 
 let gateway: GatewayServer | null = null;
+/** The settings the running gateway was started with */
+let settings: GatewayConfig = gatewayConfig({});
 let status: GatewayStatus = {
   running: false, port: null, publicHost: null, requireTls: true,
   tls: { configured: false, subject: null, validTo: null, error: null }, problem: 'not started',
@@ -205,9 +219,16 @@ async function openBackend(account: GatewayAccount): Promise<BackendTarget> {
   if (!access.enabled) throw new AccessUnavailable(`Access for '${access.username}' is turned off`);
   if (access.expiresAt && access.expiresAt.getTime() <= Date.now()) throw new AccessUnavailable(`Access for '${access.username}' has expired`);
   if (access.hashNative !== account.hashNative || access.hashSha2 !== account.hashSha2) throw new AccessUnavailable('The password was changed');
+  // Write rights hold only where nothing else writes. Protection or a live sync turned on since pauses them
+  if (!onlyReads(access.privileges)) {
+    if (access.connection.writeProtected) throw new AccessUnavailable('Write access is paused: the connection is write-protected now');
+    const live = await prisma.liveSync.findFirst({ where: { targetConnectionId: access.connection.id, enabled: true }, select: { id: true } });
+    if (live) throw new AccessUnavailable('Write access is paused: the connection receives a live sync now');
+  }
   const config = toEngineConfig(access.connection);
   const password = decrypt(access.backendPassword);
   const tlsOptions = config.sslEnabled ? (nodeTlsOptions(config, 'pg') as tls.ConnectionOptions) : undefined;
+  const extra = { user: access.backendUser, password, tls: tlsOptions, allowServerPublicKey: settings.allowServerPublicKey };
   if (config.sshEnabled) {
     const key = `${access.connection.id}:${access.connection.updatedAt.getTime()}`;
     const entry = await acquireTunnel(key, config);
@@ -215,14 +236,14 @@ async function openBackend(account: GatewayAccount): Promise<BackendTarget> {
     const release = () => { if (!released) { released = true; releaseTunnel(key, entry); } };
     try {
       const socket = await connectTcp('127.0.0.1', entry.port);
-      return { socket, user: access.backendUser, password, tls: tlsOptions, release };
+      return { ...extra, socket, tunnelled: true, release };
     } catch (e) {
       release();
       throw e;
     }
   }
   const socket = await connectTcp(config.host, config.port);
-  return { socket, user: access.backendUser, password, tls: tlsOptions, release: () => {} };
+  return { ...extra, socket, release: () => {} };
 }
 
 export async function startDbGateway(): Promise<void> {
@@ -249,11 +270,13 @@ export async function startDbGateway(): Promise<void> {
   // Sessions left open by a stop or crash
   await prisma.dbAccessSession.updateMany({ where: { endedAt: null }, data: { endedAt: new Date(), error: 'DbBackup restarted' } }).catch(() => {});
 
+  settings = cfg;
   gateway = new GatewayServer({
     port: cfg.port,
     host: cfg.bind,
     requireTls: cfg.requireTls,
     maxConnections: cfg.maxConnections,
+    advertisedVersion: cfg.advertisedVersion ?? undefined,
     secureContext: () => loadTls(cfg),
     hooks: {
       findAccount: findAccess,
@@ -266,7 +289,7 @@ export async function startDbGateway(): Promise<void> {
         return s.id;
       },
       query: (sessionId, _accountId, kind: QueryKind, sql) => {
-        pendingQueries.push({ sessionId, kind, sql: sql.length > MAX_SQL ? `${sql.slice(0, MAX_SQL)}…` : sql, at: new Date() });
+        pendingQueries.push({ sessionId, kind, sql: logText(sql), at: new Date() });
         if (pendingQueries.length >= 500) void flushQueries();
         else if (!flushTimer) flushTimer = setTimeout(() => void flushQueries(), 2000);
       },
@@ -279,6 +302,8 @@ export async function startDbGateway(): Promise<void> {
       loginFailed: (username, ip, reason) => {
         logger.warn(`DB gateway: login refused for ${sanitizeForLog(username).slice(0, 64)} from ${ip} (${reason})`);
       },
+      // For the operator: the client was given the reference only
+      internalError: (what, error) => logger.error(`DB gateway: ${what}`, error),
     },
   });
   try {
@@ -302,20 +327,33 @@ export async function startDbGateway(): Promise<void> {
 }
 
 /**
- * Ends the sessions of accesses that can no longer be used: expired, turned off or removed without the page
- * (for example with their connection), or whose owner was suspended.
+ * Of these accesses, the ones a session may still run on. Not: turned off, expired, removed, owned by a
+ * suspended account, or holding write rights while the connection is write-protected or receives a live sync.
  */
-async function sweepSessions(): Promise<void> {
-  const open = gateway?.openAccounts() ?? [];
-  if (!open.length) return;
-  const usable = new Set((await prisma.dbAccess.findMany({
+export async function usableAccesses(ids: string[]): Promise<Set<string>> {
+  return new Set((await prisma.dbAccess.findMany({
     where: {
-      id: { in: open }, enabled: true, user: { isActive: true },
+      id: { in: ids }, enabled: true, user: { isActive: true },
       OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+      AND: [{
+        OR: [
+          { NOT: { privileges: { hasSome: WRITE_PRIVILEGES } } },
+          { connection: { writeProtected: false, liveSyncsAsTarget: { none: { enabled: true } } } },
+        ],
+      }],
     },
     select: { id: true },
   })).map((a) => a.id));
-  for (const id of open) if (!usable.has(id)) gateway?.closeAccount(id, 'The access was turned off, expired or removed');
+}
+
+/** Ends the sessions of accesses that can no longer be used, also when that did not go through the page */
+async function sweepSessions(): Promise<void> {
+  const open = gateway?.openAccounts() ?? [];
+  if (!open.length) return;
+  const usable = await usableAccesses(open);
+  for (const id of open) {
+    if (!usable.has(id)) gateway?.closeAccount(id, 'The access was turned off, expired or removed, or its write rights are paused');
+  }
 }
 
 async function pruneLog(days: number): Promise<void> {

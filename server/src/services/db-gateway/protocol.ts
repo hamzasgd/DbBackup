@@ -443,3 +443,49 @@ export function randomPassword(length = 32): string {
   }
   return out.length === length ? out : randomPassword(length);
 }
+
+// ── The log
+
+/** The most that is kept of one logged statement */
+export const MAX_LOGGED_SQL = 64 * 1024;
+/** Leading comments longer than this are left out of the log */
+const MAX_LEADING_COMMENTS = 2000;
+
+/** Where the statement itself starts: past whitespace and comments (`/*!` and `/*+` belong to the statement) */
+function statementStart(sql: string): number {
+  const n = sql.length;
+  let i = 0;
+  for (;;) {
+    while (i < n && /\s/.test(sql[i])) i++;
+    let end = -1;
+    if (sql.startsWith('--', i) || sql[i] === '#') end = sql.indexOf('\n', i);
+    else if (sql.startsWith('/*', i) && sql[i + 2] !== '!' && sql[i + 2] !== '+') end = sql.indexOf('*/', i + 2) < 0 ? -1 : sql.indexOf('*/', i + 2) + 1;
+    else return i;
+    if (end < 0) return n;
+    i = end + 1;
+  }
+}
+
+/**
+ * A statement as it goes into the log. Long leading comments are replaced by a note of their length:
+ * cut off at a fixed length, a statement behind a long comment left nothing of itself in the log.
+ */
+export function logText(sql: string): string {
+  const start = statementStart(sql);
+  // Only comments are left out, and only when there is a lot of them (whitespace in front is not hiding anything)
+  const text = start > MAX_LEADING_COMMENTS && start > sql.length - sql.trimStart().length
+    ? `/* ${start} characters of comments left out */ ${sql.slice(start)}`
+    : sql;
+  return text.length > MAX_LOGGED_SQL ? `${text.slice(0, MAX_LOGGED_SQL)}… (${text.length} characters)` : text;
+}
+
+/** The most that is kept of a prepared statement's parameters */
+const MAX_LOGGED_PARAMETERS = 1024;
+
+/** A prepared statement's execution for the log: which statement, and the parameters sent with it, as bytes */
+export function executeText(payload: Buffer): string {
+  if (payload.length < 10) return 'EXECUTE (a packet too short to read)';
+  const values = payload.subarray(10);
+  const shown = values.subarray(0, MAX_LOGGED_PARAMETERS).toString('hex');
+  return `EXECUTE #${payload.readUInt32LE(1)}, ${values.length} bytes of parameters${values.length > MAX_LOGGED_PARAMETERS ? ` (first ${MAX_LOGGED_PARAMETERS})` : ''}: ${shown}`;
+}

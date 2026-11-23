@@ -1,11 +1,13 @@
 import net from 'net';
 import tls from 'tls';
+import crypto from 'crypto';
 import type { Duplex } from 'stream';
+import type { Packet } from './protocol';
 import { PacketChannel } from './channel';
 import { BackendError, loginBackend } from './backend';
 import {
   BLOCKED_COMMANDS, CLIENT, COM, GATEWAY_CAPS, MAX_PAYLOAD, PacketSplitter, buildAuthSwitch, buildErr,
-  buildGreeting, checkNative, checkSha2, encodePacket, newScramble, parseHandshakeResponse,
+  buildGreeting, checkNative, checkSha2, encodePacket, executeText, newScramble, parseHandshakeResponse,
 } from './protocol';
 
 /** A person's access, as the gateway needs it to let them in */
@@ -27,11 +29,15 @@ export interface BackendTarget {
   user: string;
   password: string;
   tls?: tls.ConnectionOptions;
+  /** The socket runs inside an SSH tunnel, which protects the way to the database without TLS */
+  tunnelled?: boolean;
+  /** Ask an unprotected database for its public key (DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY) */
+  allowServerPublicKey?: boolean;
   /** Called once the session ends (e.g. to give back an SSH tunnel) */
   release(): void;
 }
 
-export type QueryKind = 'QUERY' | 'PREPARE' | 'USE' | 'BLOCKED';
+export type QueryKind = 'QUERY' | 'PREPARE' | 'EXECUTE' | 'USE' | 'BLOCKED';
 
 export interface SessionInfo {
   accountId: string;
@@ -48,6 +54,8 @@ export interface GatewayHooks {
   sessionEnded(sessionId: string, stats: { bytesIn: number; bytesOut: number; queries: number; error: string | null }): void;
   /** Login failures, so they can be shown and rate limited */
   loginFailed?(username: string, clientIp: string, reason: string): void;
+  /** Something that went wrong inside the gateway, for the server log. Clients get a reference to it instead */
+  internalError?(what: string, error: unknown): void;
 }
 
 export interface GatewayOptions {
@@ -60,6 +68,8 @@ export interface GatewayOptions {
   maxConnections?: number;
   /** How long a client may take over its TLS handshake (default 10 seconds) */
   tlsHandshakeTimeoutMs?: number;
+  /** The version to greet clients with, always (DB_GATEWAY_ADVERTISED_VERSION). Unset: the database's own */
+  advertisedVersion?: string;
   hooks: GatewayHooks;
 }
 
@@ -86,6 +96,18 @@ const DEFAULT_MAX_CONNECTIONS = 500;
 const DEFAULT_TLS_HANDSHAKE_MS = 10_000;
 /** Login names are at most 32 characters when made; a longer one is refused without a lookup */
 const MAX_USERNAME = 64;
+/** The most addresses kept track of for failed logins (the oldest go first) */
+const MAX_TRACKED_ADDRESSES = 10_000;
+/** What a database behind the gateway would let a person do to the database user behind their own access */
+const OWN_PASSWORD_RE = /^\s*(SET\s+PASSWORD\b|ALTER\s+USER\s+(USER\s*\(\s*\)|CURRENT_USER\b)|RENAME\s+USER\s+(USER\s*\(\s*\)|CURRENT_USER\b))/i;
+
+/**
+ * The address failed logins are counted for. For IPv6 that is the /64: one machine can otherwise use
+ * every address of its block and never reach the limit.
+ */
+export function failureKey(ip: string): string {
+  return ip.includes(':') ? ip.toLowerCase().split(':').slice(0, 4).join(':') : ip;
+}
 
 /**
  * Thrown by openBackend when the access stopped being usable since the login
@@ -101,7 +123,7 @@ export class GatewayServer {
   private sessions = new Map<number, Session>();
   private nextId = 1000 + Math.floor(Math.random() * 1000);
   private failures = new Map<string, number[]>();
-  /** The version clients are greeted with: the last one a database reported */
+  /** The version clients are greeted with: the database's own (the last one reported), or the one set */
   private serverVersion = '8.0.40';
   /** Connections not logged in yet: they hold no session, so stop() ends them itself */
   private pending = new Set<net.Socket>();
@@ -113,15 +135,33 @@ export class GatewayServer {
   private epochs = new Map<string, number>();
   private closeReasons = new Map<string, string>();
 
-  constructor(private readonly o: GatewayOptions) {}
+  constructor(private readonly o: GatewayOptions) {
+    if (o.advertisedVersion) this.serverVersion = o.advertisedVersion;
+  }
+
+  /**
+   * Puts an internal failure in the server log and returns a short reference to it. The client is told
+   * that reference only: why the database could not be reached is for the operator, not for them.
+   */
+  private report(what: string, error: unknown): string {
+    const reference = crypto.randomBytes(3).toString('hex');
+    this.o.hooks.internalError?.(`${what} (reference ${reference})`, error);
+    return reference;
+  }
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
       const server = net.createServer((sock) => {
-        this.handle(sock).catch(() => sock.destroy());
+        this.handle(sock).catch((e) => {
+          this.report('Connection handling failed', e);
+          sock.destroy();
+        });
       });
       // Beyond this the connection is closed at once: enough are left for the rest of DbBackup
       server.maxConnections = this.o.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
+      // Past start-up an error on the listener (a failed accept) belongs in the log, not in the event loop.
+      // No client is involved, so there is no reference to give
+      server.on('error', (e) => this.o.hooks.internalError?.('Listener error', e));
       server.once('error', reject);
       server.listen(this.o.port, this.o.host, () => {
         server.off('error', reject);
@@ -185,25 +225,29 @@ export class GatewayServer {
     return false;
   }
 
-  private shutOut(ip: string): boolean {
+  private shutOut(key: string): boolean {
     const now = Date.now();
-    const recent = (this.failures.get(ip) ?? []).filter((t) => now - t < FAILURE_WINDOW_MS);
-    this.failures.set(ip, recent);
+    const recent = (this.failures.get(key) ?? []).filter((t) => now - t < FAILURE_WINDOW_MS);
+    this.failures.set(key, recent);
     return recent.length >= MAX_FAILURES;
   }
 
-  private failed(ip: string): void {
-    const list = this.failures.get(ip) ?? [];
+  private failed(key: string): void {
+    const list = this.failures.get(key) ?? [];
     list.push(Date.now());
-    this.failures.set(ip, list);
-    if (this.failures.size > 10_000) this.failures.clear();
+    // Last place is the address that failed most recently
+    this.failures.delete(key);
+    this.failures.set(key, list);
+    // Kept to a size: the addresses that failed longest ago go first, not everybody at once
+    while (this.failures.size > MAX_TRACKED_ADDRESSES) this.failures.delete(this.failures.keys().next().value as string);
   }
 
   private async handle(sock: net.Socket): Promise<void> {
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 60_000);
     const ip = (sock.remoteAddress ?? '').replace(/^::ffff:/, '');
-    if ((this.logins.get(ip) ?? 0) >= MAX_LOGINS_PER_ADDRESS) {
+    const key = failureKey(ip);
+    if ((this.logins.get(key) ?? 0) >= MAX_LOGINS_PER_ADDRESS) {
       // Before any greeting, as a full database answers. Nobody reads this socket, so an error must not go uncaught
       sock.on('error', () => sock.destroy());
       sock.write(encodePacket(0, buildErr(ER_CON_COUNT, '08004',
@@ -213,20 +257,21 @@ export class GatewayServer {
       setTimeout(() => sock.destroy(), 1000).unref();
       return;
     }
-    this.logins.set(ip, (this.logins.get(ip) ?? 0) + 1);
+    this.logins.set(key, (this.logins.get(key) ?? 0) + 1);
     this.pending.add(sock);
     sock.once('close', () => this.pending.delete(sock));
     try {
       await this.login(sock, ip);
     } finally {
       // Over once login() returns: the connection is a session now, or it is being closed
-      const n = (this.logins.get(ip) ?? 1) - 1;
-      if (n > 0) this.logins.set(ip, n);
-      else this.logins.delete(ip);
+      const n = (this.logins.get(key) ?? 1) - 1;
+      if (n > 0) this.logins.set(key, n);
+      else this.logins.delete(key);
     }
   }
 
   private async login(sock: net.Socket, ip: string): Promise<void> {
+    const key = failureKey(ip);
     const gatewayId = this.nextId++;
     const scramble = newScramble();
     const secureContext = this.o.secureContext();
@@ -289,7 +334,7 @@ export class GatewayServer {
         return refuse(ER_SECURE_TRANSPORT, 'HY000', 'Connections to the DbBackup gateway must use SSL/TLS: turn on SSL (mode REQUIRED) in your client');
       }
 
-      if (this.shutOut(ip)) {
+      if (this.shutOut(key)) {
         return refuse(ER_ACCESS_DENIED, '28000', 'Too many failed logins from your address. Try again in 15 minutes.');
       }
 
@@ -312,7 +357,7 @@ export class GatewayServer {
         ? checkNative(token, scramble, account?.hashNative ?? '00'.repeat(20))
         : checkSha2(token, scramble, account?.hashSha2 ?? '00'.repeat(32));
       if (!account || !ok) {
-        this.failed(ip);
+        this.failed(key);
         this.o.hooks.loginFailed?.(hello.user, ip, account ? 'wrong password' : 'unknown user');
         await new Promise((r) => setTimeout(r, 300));
         return refuse(ER_ACCESS_DENIED, '28000', `Access denied for user '${hello.user}'`);
@@ -344,7 +389,8 @@ export class GatewayServer {
           target = await this.o.hooks.openBackend(account);
         } catch (e) {
           if (e instanceof AccessUnavailable) return refuse(ER_ACCESS_DENIED, '28000', `${(e as Error).message}: connect again`);
-          return refuse(2003, 'HY000', `The gateway could not reach the database: ${(e as Error).message}`);
+          return refuse(2003, 'HY000',
+            `The gateway could not reach the database (reference ${this.report('Could not reach the database', e)}). Try again in a moment.`);
         }
         const clientProgram = hello.attrs.program_name ?? hello.attrs._client_name ?? null;
         let backend;
@@ -357,6 +403,8 @@ export class GatewayServer {
             charset: hello.charset,
             maxPacket: hello.maxPacket,
             tls: target.tls,
+            tunnelled: target.tunnelled,
+            allowServerPublicKey: target.allowServerPublicKey,
             attrs: {
               _client_name: 'DbBackup gateway',
               program_name: `dbbackup-gateway (${account.username})`,
@@ -366,9 +414,14 @@ export class GatewayServer {
         } catch (e) {
           target.release();
           const be = e as BackendError;
-          return refuse(be.code ?? 2013, be.sqlState ?? 'HY000', be.message);
+          // What went wrong at the database (the user it refused, the host, the reason) goes to the operator's
+          // log. The person gets the reference to it, unless it is their own client the database cannot handle
+          const reference = this.report('Could not log in to the database', be);
+          return refuse(be.code ?? 2013, be.sqlState ?? 'HY000', be.forClient
+            ? be.message
+            : `The gateway could not log in to the database (reference ${reference}). Tell whoever gave you this access.`);
         }
-        this.serverVersion = backend.serverVersion;
+        if (!this.o.advertisedVersion) this.serverVersion = backend.serverVersion.slice(0, 64);
 
         // The access may have been turned off, changed or removed while the database was logging in: then there is no session
         let sessionId = '';
@@ -454,53 +507,69 @@ export class GatewayServer {
     };
     const fromClient = (d: Buffer) => {
       stats.bytesIn += d.length;
-      for (const p of splitter.push(d)) {
-        // Only what follows a 16 MiB part that was passed on is "the rest of a packet". A refused command never
-        // reaches the database, so there is nothing of it to continue: the next packet is checked like any other
-        const rest = continuing && p.seq === ((lastSeq + 1) & 0xff);
-        continuing = false;
-        if (rest) {
-          toBackend(encodePacket(p.seq, p.payload));
-          continuing = p.payload.length === MAX_PAYLOAD;
-          lastSeq = p.seq;
-          continue;
-        }
-        if (p.payload.length === 0) {
-          toBackend(encodePacket(p.seq, p.payload));
-          continue;
-        }
-        // Every other packet may start a command at the database, whatever its number (after long data the
-        // database answers nothing, so the next command does not start at 0): it gets the same checks
-        const cmd = p.payload[0];
-        if (BLOCKED_COMMANDS.has(cmd)) {
-          this.o.hooks.query(sessionId, account.id, 'BLOCKED', `(protocol command 0x${cmd.toString(16)})`);
-          client.write(encodePacket(1, buildErr(1227, '42000', 'The DbBackup gateway does not allow this command')));
-          continue;
-        }
-        let payload = p.payload;
-        if (cmd === COM.QUERY) {
-          const sql = payload.subarray(1).toString('utf8');
-          stats.queries++;
-          const killed = this.rewriteKill(sql, account.id);
-          if (killed) payload = Buffer.concat([Buffer.from([COM.QUERY]), Buffer.from(killed, 'utf8')]);
-          this.o.hooks.query(sessionId, account.id, 'QUERY', sql);
-        } else if (cmd === COM.STMT_PREPARE) {
-          stats.queries++;
-          this.o.hooks.query(sessionId, account.id, 'PREPARE', payload.subarray(1).toString('utf8'));
-        } else if (cmd === COM.INIT_DB) {
-          this.o.hooks.query(sessionId, account.id, 'USE', `USE ${payload.subarray(1).toString('utf8')}`);
-        } else if (cmd === COM.PROCESS_KILL && payload.length >= 5) {
-          const target = this.backendThread(payload.readUInt32LE(1), account.id);
-          if (target !== null) {
-            payload = Buffer.from(payload);
-            payload.writeUInt32LE(target, 1);
-          }
-        }
-        toBackend(encodePacket(p.seq, payload));
+      try {
+        for (const p of splitter.push(d)) packet(p);
+      } catch (e) {
+        // A packet the gateway cannot handle ends this session, not the process
+        close(`The gateway could not handle a packet (reference ${this.report('Packet from the client', e)})`);
+      }
+    };
+    const packet = (p: Packet): void => {
+      // Only what follows a 16 MiB part that was passed on is "the rest of a packet". A refused command never
+      // reaches the database, so there is nothing of it to continue: the next packet is checked like any other
+      const rest = continuing && p.seq === ((lastSeq + 1) & 0xff);
+      continuing = false;
+      if (rest) {
+        toBackend(encodePacket(p.seq, p.payload));
         continuing = p.payload.length === MAX_PAYLOAD;
         lastSeq = p.seq;
-        if (cmd === COM.QUIT) close();
+        return;
       }
+      if (p.payload.length === 0) {
+        toBackend(encodePacket(p.seq, p.payload));
+        return;
+      }
+      // Every other packet may start a command at the database, whatever its number (after long data the
+      // database answers nothing, so the next command does not start at 0): it gets the same checks
+      const cmd = p.payload[0];
+      if (BLOCKED_COMMANDS.has(cmd)) {
+        this.o.hooks.query(sessionId, account.id, 'BLOCKED', `(protocol command 0x${cmd.toString(16)})`);
+        client.write(encodePacket(1, buildErr(1227, '42000', 'The DbBackup gateway does not allow this command')));
+        return;
+      }
+      let payload = p.payload;
+      if (cmd === COM.QUERY) {
+        const sql = payload.subarray(1).toString('utf8');
+        stats.queries++;
+        // A new password for the database user behind the access would lock the person out until it is made again
+        if (OWN_PASSWORD_RE.test(sql)) {
+          this.o.hooks.query(sessionId, account.id, 'BLOCKED', sql);
+          client.write(encodePacket(1, buildErr(1227, '42000', 'The DbBackup gateway does not allow changing the password of this access')));
+          return;
+        }
+        const killed = this.rewriteKill(sql, account.id);
+        if (killed) payload = Buffer.concat([Buffer.from([COM.QUERY]), Buffer.from(killed, 'utf8')]);
+        this.o.hooks.query(sessionId, account.id, 'QUERY', sql);
+      } else if (cmd === COM.STMT_PREPARE) {
+        stats.queries++;
+        this.o.hooks.query(sessionId, account.id, 'PREPARE', payload.subarray(1).toString('utf8'));
+      } else if (cmd === COM.STMT_EXECUTE) {
+        // With the values sent, so that what was written can be seen as well as what was prepared
+        stats.queries++;
+        this.o.hooks.query(sessionId, account.id, 'EXECUTE', executeText(payload));
+      } else if (cmd === COM.INIT_DB) {
+        this.o.hooks.query(sessionId, account.id, 'USE', `USE ${payload.subarray(1).toString('utf8')}`);
+      } else if (cmd === COM.PROCESS_KILL && payload.length >= 5) {
+        const target = this.backendThread(payload.readUInt32LE(1), account.id);
+        if (target !== null) {
+          payload = Buffer.from(payload);
+          payload.writeUInt32LE(target, 1);
+        }
+      }
+      toBackend(encodePacket(p.seq, payload));
+      continuing = p.payload.length === MAX_PAYLOAD;
+      lastSeq = p.seq;
+      if (cmd === COM.QUIT) close();
     };
     if (r.clientLeft.length) fromClient(r.clientLeft);
     client.on('data', fromClient);

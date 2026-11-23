@@ -54,11 +54,22 @@ export function normalizePrivileges(privileges: string[], tablesChosen: boolean)
 
 export const onlyReads = (privileges: string[]) => privileges.every((p) => READ_PRIVILEGES.has(p));
 
+/** Rights that change anything. An access with them is paused while its connection is protected or synced into */
+export const WRITE_PRIVILEGES = DATABASE_PRIVILEGES.filter((p) => !READ_PRIVILEGES.has(p));
+
 const qid = (name: string) => `\`${name.replace(/`/g, '``')}\``;
 
-function grantStatements(g: Grant): string[] {
+/**
+ * In `db.*` the database reads `_` and `%` as wildcards, backticks or not, so `shop_db` would also cover
+ * `shop-db`. There they are escaped: `` `shop\_db`.* ``. As the database of a table-level grant the name
+ * is taken literally, as are table names.
+ */
+const qidForAll = (name: string) => qid(name.replace(/[_%]/g, (c) => `\\${c}`));
+
+/** The statements that give these rights to a user (its name and host are the parameters) */
+export function grantStatements(g: Grant): string[] {
   const privs = g.privileges.join(', ');
-  if (!g.tables.length) return [`GRANT ${privs} ON ${qid(g.database)}.* TO ?@?`];
+  if (!g.tables.length) return [`GRANT ${privs} ON ${qidForAll(g.database)}.* TO ?@?`];
   return g.tables.map((t) => `GRANT ${privs} ON ${qid(g.database)}.${qid(t)} TO ?@?`);
 }
 

@@ -317,6 +317,8 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 | `DB_GATEWAY_TLS_CERT` / `DB_GATEWAY_TLS_KEY` | Certificate (full chain) and key for the gateway | — |
 | `DB_GATEWAY_PUBLIC_HOST` | Host name shown to people for connecting | host of `FRONTEND_URL` |
 | `DB_GATEWAY_MAX_CONNECTIONS` | The most gateway connections at once (logged in or not) | `500` |
+| `DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY` | Ask an unencrypted MySQL 8 database for its public key (private network only) | `false` |
+| `DB_GATEWAY_ADVERTISED_VERSION` | Version every client is greeted with, instead of the database's own | database's own |
 
 > Storage backends (S3 / Google Drive), notification channels, and the **backup encryption passphrase** are configured in the app's Settings UI — not env vars — and are stored encrypted in the database.
 
@@ -422,14 +424,21 @@ database, like a small [Teleport](https://goteleport.com/docs/enroll-resources/d
   The rights are enforced by the database itself; the gateway also refuses switching users,
   replication and server commands, and does not allow `LOAD DATA LOCAL`.
 - The text of every query and prepared statement they send is logged with the session (who, from
-  where, which client) and kept `DB_GATEWAY_LOG_DAYS` days. The values bound to a prepared
-  statement are not logged.
+  where, which client) and kept `DB_GATEWAY_LOG_DAYS` days. The values sent with a prepared statement
+  are logged as bytes. Long leading comments are left out of the log, so that they cannot hide the
+  statement.
 - Turning an access off, changing its rights, a new password or its end date ends its open
   sessions at once, also for a login still in progress. Removing it also drops its database user,
   so a connection with accesses on it cannot be deleted until they are removed. Suspending an
   account ends the access it gave.
 - Write rights cannot be given on a write-protected connection, nor on the target of a running live
-  sync (anything written there would be overwritten).
+  sync (anything written there would be overwritten). When protection or a live sync is turned on
+  later, accesses with write rights pause (within 30 seconds) until it is off again.
+- A whole-database grant covers that database only. In MySQL's `GRANT ... ON db.*`, `_` and `%` are
+  wildcards, so DbBackup escapes them: `shop_db` does not also cover `shop-db`.
+- With the "Everything in this database" preset, views, triggers, routines and events a person creates
+  keep their database user as their definer. After the access is removed these stop working
+  ("definer does not exist") until they are changed or removed on the database.
 - The connection's database user must be allowed to create users and to give the chosen rights
   (`CREATE USER` and the rights `WITH GRANT OPTION`, e.g. `root`).
 
@@ -443,8 +452,15 @@ DB_GATEWAY_TLS_KEY=/www/server/panel/vhost/cert/dbbackup.example.com/privkey.pem
 
 (the paths above are where aaPanel keeps a site's Let's Encrypt certificate; renewals are picked up
 without a restart). Then allow the port in the server's firewall. Failed logins are limited per
-address (10 in 15 minutes), and at most `DB_GATEWAY_MAX_CONNECTIONS` connections (500 by default)
-are open at once, logged in or not.
+address (10 in 15 minutes; per IPv6 block), and at most `DB_GATEWAY_MAX_CONNECTIONS` connections
+(500 by default) are open at once, logged in or not.
+
+When the gateway cannot reach or log in to the database, the person gets a reference number and the
+reason is in the server log. One case to know about: MySQL 8 asks for the full password check the
+first time it sees a user. Over a connection without SSL or an SSH tunnel the gateway does not go
+through with that, because the password would go to whatever key is answered on the way. Turn on
+SSL or the tunnel for such a connection, or set `DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY=true` on a
+network you know is private.
 
 ### Storage quotas & connection limits
 

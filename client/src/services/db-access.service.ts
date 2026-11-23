@@ -58,7 +58,7 @@ export interface AccessSession {
 export interface AccessQuery {
   id: string
   at: string
-  kind: 'QUERY' | 'PREPARE' | 'USE' | 'BLOCKED'
+  kind: 'QUERY' | 'PREPARE' | 'EXECUTE' | 'USE' | 'BLOCKED'
   sql: string
 }
 
@@ -86,6 +86,8 @@ export const dbAccessApi = {
   remove: (id: string, force = false) =>
     api.delete<{ success: boolean; data: { warning: string | null } }>(`/db-access/${id}`, { params: force ? { force: 'true' } : {} }),
   sessions: (id: string) => api.get<{ success: boolean; data: { sessions: AccessSession[] } }>(`/db-access/${id}/sessions`),
-  queries: (sessionId: string) => api.get<{ success: boolean; data: { queries: AccessQuery[] } }>(`/db-access/sessions/${sessionId}/queries`),
+  // The first `limit` statements of a session, and how many it has
+  queries: (sessionId: string, limit?: number) => api.get<{ success: boolean; data: { queries: AccessQuery[]; total: number } }>(
+    `/db-access/sessions/${sessionId}/queries`, { params: limit ? { limit } : undefined }),
   closeSession: (sessionId: string) => api.post(`/db-access/sessions/${sessionId}/close`),
 }

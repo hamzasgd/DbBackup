@@ -1,9 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CLIENT, Packet, PacketSplitter, buildGreeting, checkNative, checkSha2, encodePacket, nativeToken, newScramble,
-  parseHandshakeResponse, passwordHashes, randomPassword, sha2Token, lenencBytes,
+  CLIENT, COM, MAX_LOGGED_SQL, Packet, PacketSplitter, buildGreeting, checkNative, checkSha2, encodePacket, executeText,
+  logText, nativeToken, newScramble, parseHandshakeResponse, passwordHashes, randomPassword, sha2Token, lenencBytes,
 } from './protocol';
-import { normalizePrivileges, onlyReads, PRESETS } from './provision';
+import { grantStatements, normalizePrivileges, onlyReads, PRESETS, WRITE_PRIVILEGES } from './provision';
 import { gatewayConfig } from './gateway.service';
 
 describe('gateway protocol', () => {
@@ -109,5 +109,47 @@ describe('gateway settings', () => {
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '1200.7' }).maxConnections).toBe(1200);
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '0' }).maxConnections).toBe(500);
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '99999999' }).maxConnections).toBe(5000);
+    // The database's public key is not asked for over an unprotected line unless said so; the version is the database's own
+    const off = gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY: 'yes' });
+    expect(off.allowServerPublicKey).toBe(false);
+    expect(off.advertisedVersion).toBeNull();
+    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY: 'true', DB_GATEWAY_ADVERTISED_VERSION: ' 8.0.40 ' }))
+      .toMatchObject({ allowServerPublicKey: true, advertisedVersion: '8.0.40' });
+  });
+});
+
+describe('the log and the grants', () => {
+  it('keeps a statement visible behind long comments, and keeps long statements short', () => {
+    expect(logText('-- for ticket 1234\nDELETE FROM t')).toBe('-- for ticket 1234\nDELETE FROM t');
+    expect(logText(`-- ${'x'.repeat(5000)}\nDELETE FROM t`)).toMatch(/^\/\* \d+ characters of comments left out \*\/ DELETE FROM t$/);
+    expect(logText(`/*${'y'.repeat(3000)}*/ UPDATE t SET a = 1`)).toMatch(/^\/\* \d+ characters of comments left out \*\/ UPDATE t SET a = 1$/);
+    // `/*!` and `/*+` are part of the statement, and whitespace is not a comment
+    expect(logText(`/*!${'y'.repeat(3000)}*/ SELECT 1`)).toBe(`/*!${'y'.repeat(3000)}*/ SELECT 1`);
+    expect(logText(` ${' '.repeat(3000)}SELECT 1`)).toMatch(/^ +SELECT 1$/);
+    // Only comments are left out: text that is the statement itself is cut off, and it says so
+    const long = logText(`SELECT '${'a'.repeat(70_000)}'`);
+    expect(long.length).toBeLessThan(MAX_LOGGED_SQL + 30);
+    expect(long).toMatch(/… \(\d+ characters\)$/);
+  });
+
+  it('names the statement and shows the parameters of a prepared statement execution', () => {
+    expect(executeText(Buffer.alloc(9))).toMatch(/too short/);
+    expect(executeText(Buffer.concat([Buffer.from([COM.STMT_EXECUTE, 5, 0, 0, 0, 0, 1, 0, 0, 0]), Buffer.from('abc')]))).toBe('EXECUTE #5, 3 bytes of parameters: 616263');
+  });
+
+  it('escapes _ and % in the database of a whole-database grant, nowhere else', () => {
+    const g = (database: string, tables: string[]) => grantStatements({ database, tables, privileges: ['SELECT'], maxConnections: 1 });
+    // In `db.*` the database would otherwise match `shop-db` and `shopXdb` too
+    expect(g('shop_db', [])).toEqual(['GRANT SELECT ON `shop\\_db`.* TO ?@?']);
+    expect(g('a%b`c', [])).toEqual(['GRANT SELECT ON `a\\%b``c`.* TO ?@?']);
+    // As the database of a table-level grant the name is literal, and so is the table's
+    expect(g('shop_db', ['a_b', 'c%'])).toEqual(['GRANT SELECT ON `shop_db`.`a_b` TO ?@?', 'GRANT SELECT ON `shop_db`.`c%` TO ?@?']);
+  });
+
+  it('tells the rights that change something apart', () => {
+    expect(WRITE_PRIVILEGES).not.toContain('SELECT');
+    expect(WRITE_PRIVILEGES).not.toContain('SHOW VIEW');
+    expect(WRITE_PRIVILEGES).toEqual(expect.arrayContaining(['INSERT', 'UPDATE', 'DELETE', 'DROP', 'TRIGGER', 'EVENT']));
+    expect(onlyReads(WRITE_PRIVILEGES)).toBe(false);
   });
 });

@@ -17,6 +17,10 @@ export interface BackendLogin {
   /** TLS to the database, or undefined for a plain connection */
   tls?: tls.ConnectionOptions;
   attrs?: Record<string, string>;
+  /** The socket runs inside an SSH tunnel, so the way to the database is protected by its host key, not by TLS */
+  tunnelled?: boolean;
+  /** Ask an unprotected database for its public key anyway (DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY, a private network only) */
+  allowServerPublicKey?: boolean;
 }
 
 export interface BackendSession {
@@ -31,7 +35,8 @@ export interface BackendSession {
 }
 
 export class BackendError extends Error {
-  constructor(message: string, readonly code = 2013, readonly sqlState = 'HY000') {
+  /** `forClient`: the reason is the client's to act on (its driver asked for something the database lacks), so it may be shown to them */
+  constructor(message: string, readonly code = 2013, readonly sqlState = 'HY000', readonly forClient = false) {
     super(message);
   }
 }
@@ -92,7 +97,10 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
     const hello = parseServerHello((await ch.next()).payload);
     const missing = o.clientCaps & SESSION_CAPS & ~hello.caps;
     if (missing) {
-      throw new BackendError(`The database (${hello.version}) does not support what the client asked for (flags 0x${missing.toString(16)}). Try another client or driver version.`);
+      throw new BackendError(
+        `The database does not support what the client asked for (flags 0x${missing.toString(16)}). Try another client or driver version.`,
+        2013, 'HY000', true,
+      );
     }
 
     let caps = (o.clientCaps & SESSION_CAPS) |
@@ -120,9 +128,22 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
       const raw = ch.pauseForTls();
       const secure = tls.connect({ ...o.tls, socket: raw });
       stream = secure;
+      // A database that takes the start of TLS and then falls silent must not hold this login for good
       await new Promise<void>((resolve, reject) => {
-        secure.once('secureConnect', () => resolve());
-        secure.once('error', reject);
+        const timer = setTimeout(() => reject(new BackendError('The database did not finish its side of the TLS handshake')), 15_000);
+        const up = () => {
+          clearTimeout(timer);
+          secure.off('error', down);
+          secure.off('close', down);
+          resolve();
+        };
+        const down = (e?: Error) => {
+          clearTimeout(timer);
+          reject(e ?? new BackendError('The TLS connection to the database was closed'));
+        };
+        secure.once('secureConnect', up);
+        secure.once('error', down);
+        secure.once('close', down);
       });
       ch.use(secure);
     }
@@ -166,14 +187,23 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
       if (kind === 0x01 && plugin === 'caching_sha2_password') {
         if (p.payload[1] === 0x03) continue; // fast login worked; the OK follows
         if (p.payload[1] === 0x04) {
-          // The full check: the password itself, protected by TLS or the server's RSA key
-          if (secureLink) {
-            ch.write(seq, Buffer.from(`${o.password}\0`, 'utf8'));
-          } else {
-            ch.write(seq, Buffer.from([0x02]));
-            const key = await ch.next();
-            ch.write(key.seq + 1, rsaPassword(o.password, scramble, key.payload.subarray(1)));
+          // The full check: the password itself. Inside TLS it goes as it is
+          if (o.tls) {
+            ch.write(seq, Buffer.from(`${o.password}\0`));
+            continue;
           }
+          // Without TLS it could only go RSA-encrypted to whatever key the database sends, and nobody checks
+          // that key: a machine on the way gives its own and reads the password. So only inside an SSH tunnel
+          // (the database is vouched for by the host key), or when the operator said the network is private
+          if (!o.tunnelled && !o.allowServerPublicKey) {
+            throw new BackendError(
+              'The database asked for the full password check over an unencrypted connection. '
+              + 'Turn on SSL for this connection, or reach the database through its SSH tunnel.',
+            );
+          }
+          ch.write(seq, Buffer.from([0x02]));
+          const key = await ch.next();
+          ch.write(key.seq + 1, rsaPassword(o.password, scramble, key.payload.subarray(1)));
           continue;
         }
       }

@@ -284,21 +284,24 @@ function AccessForm({ status, existing, onClose, onCreated }: {
 function Sessions({ access }: { access: DbAccess }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState<string | null>(null)
+  // How many statements of the open session are shown; the server keeps them all
+  const [limit, setLimit] = useState(1000)
   const { data } = useQuery({ queryKey: ['db-access', access.id, 'sessions'], queryFn: () => dbAccessApi.sessions(access.id), refetchInterval: 10_000 })
   const sessions = data?.data.data.sessions ?? []
-  const queries = useQuery({ queryKey: ['db-access-queries', open], queryFn: () => dbAccessApi.queries(open!), enabled: !!open })
+  const queries = useQuery({ queryKey: ['db-access-queries', open, limit], queryFn: () => dbAccessApi.queries(open!, limit), enabled: !!open })
   const end = useMutation({
     mutationFn: (id: string) => dbAccessApi.closeSession(id),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['db-access'] }); toast.success('Session ended') },
   })
+  const toggle = (id: string) => { setOpen(open === id ? null : id); setLimit(1000) }
   if (!sessions.length) return <p className="text-sm text-gray-500">No sessions yet.</p>
   return (
     <div className="divide-y divide-gray-100 border border-gray-100 rounded-lg">
       {sessions.map((s) => (
         <div key={s.id}>
           <div role="button" tabIndex={0} className="flex items-center gap-3 px-3 py-2 text-sm cursor-pointer hover:bg-gray-50"
-            onClick={() => setOpen(open === s.id ? null : s.id)}
-            onKeyDown={(e) => { if (e.key === 'Enter') setOpen(open === s.id ? null : s.id) }}>
+            onClick={() => toggle(s.id)}
+            onKeyDown={(e) => { if (e.key === 'Enter') toggle(s.id) }}>
             {open === s.id ? <ChevronDown className="h-4 w-4 text-gray-400" /> : <ChevronRight className="h-4 w-4 text-gray-400" />}
             <span className="text-gray-900">{formatDate(s.startedAt)}</span>
             <span className="text-gray-500 truncate">{s.clientProgram ?? 'client'} · {s.clientIp}</span>
@@ -318,6 +321,11 @@ function Sessions({ access }: { access: DbAccess }) {
                 </div>
               ))}
               {queries.data && !queries.data.data.data.queries.length && <p className="text-xs text-gray-500">No queries in this session.</p>}
+              {queries.data && queries.data.data.data.queries.length < queries.data.data.data.total && (
+                <Button variant="outline" size="sm" onClick={() => setLimit((n) => n + 1000)}>
+                  Show more statements ({queries.data.data.data.queries.length} of {queries.data.data.data.total})
+                </Button>
+              )}
             </div>
           )}
         </div>
