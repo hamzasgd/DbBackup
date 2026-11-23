@@ -238,7 +238,7 @@ export async function setUserStatus(req: AuthRequest, res: Response, next: NextF
       // Database access given by this account must not outlive its login: end those sessions now (the gateway
       // also refuses new ones, and its sweep ends any left within half a minute)
       await closeUserAccessSessions(targetId, 'The account that gave this access was suspended')
-        .catch((err) => logger.warn(`Could not end database access sessions of suspended user ${targetId}:`, err));
+        .catch((err) => logger.warn(`Could not end database access sessions of suspended user ${target.id}:`, err));
     }
 
     await logAuditReq(req, req.user!.userId, isActive ? 'ADMIN_REACTIVATE' : 'ADMIN_SUSPEND', 'user', {
