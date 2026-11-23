@@ -273,10 +273,10 @@ const nul = (s: string) => Buffer.concat([Buffer.from(s, 'utf8'), Buffer.from([0
 
 // ── Server side (the gateway towards a client)
 
-/** 20 random printable bytes, as servers send them */
+/** 20 random printable bytes, as servers send them (each of the 94 as likely as the next) */
 export function newScramble(): Buffer {
-  const b = crypto.randomBytes(20);
-  for (let i = 0; i < b.length; i++) b[i] = 0x21 + (b[i] % 94);
+  const b = Buffer.alloc(20);
+  for (let i = 0; i < b.length; i++) b[i] = crypto.randomInt(0x21, 0x7f);
   return b;
 }
 

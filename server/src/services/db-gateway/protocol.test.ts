@@ -25,6 +25,18 @@ describe('gateway protocol', () => {
     for (let i = 0; i < 50; i++) expect(randomPassword(32)).toMatch(/^[A-Za-z2-9]{32}$/);
   });
 
+  it('makes a scramble of 20 printable bytes, never the same twice', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 200; i++) {
+      const s = newScramble();
+      expect(s).toHaveLength(20);
+      // No NUL (the greeting ends the scramble with one), nothing above 0x7e
+      expect([...s].every((byte) => byte >= 0x21 && byte <= 0x7e)).toBe(true);
+      seen.add(s.toString('latin1'));
+    }
+    expect(seen.size).toBe(200);
+  });
+
   it('splits a stream into packets, across reads', () => {
     const a = encodePacket(0, Buffer.from('hello'));
     const b = encodePacket(1, Buffer.alloc(300, 7));
