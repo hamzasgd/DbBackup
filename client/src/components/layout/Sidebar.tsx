@@ -1,7 +1,7 @@
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import {
   Database, HardDrive, Clock, LayoutDashboard,
-  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, History, ShieldCheck, GitCompareArrows,
+  LogOut, Settings, ChevronRight, ArrowLeftRight, Menu, X, History, ShieldCheck, GitCompareArrows, KeyRound,
 } from 'lucide-react'
 import { useState, useEffect } from 'react'
 import { useAuthStore } from '../../store/auth.store'
@@ -23,6 +23,7 @@ const navGroups: { title: string; items: { to: string; icon: React.ElementType; 
     items: [
       { to: '/connections', icon: Database, label: 'Connections' },
       { to: '/backups', icon: HardDrive, label: 'Backups' },
+      { to: '/db-access', icon: KeyRound, label: 'Database access' },
     ],
   },
   {

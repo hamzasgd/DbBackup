@@ -188,6 +188,17 @@ export async function deleteConnection(req: AuthRequest, res: Response, next: Ne
     if (!existing) throw new AppError('Connection not found', 404);
     assertWritable(existing, 'delete this connection (its schedules would stop)');
 
+    // Each access keeps a database user with rights on the database. Removing it on the Database access page drops
+    // that user; deleting the connection underneath it would leave the user there, with no page left showing it
+    const accesses = await prisma.dbAccess.count({ where: { connectionId: existing.id } });
+    if (accesses > 0) {
+      throw new AppError(
+        `"${existing.name}" has ${accesses} database access${accesses === 1 ? '' : 'es'}. Remove ${accesses === 1 ? 'it' : 'them'} on the Database access page first: that also drops the database user behind.`,
+        409,
+        'HAS_DB_ACCESS',
+      );
+    }
+
     // ?deleteBackups=true → also delete backup files (local + S3) and rows.
     // Otherwise backup rows survive (connectionId set to NULL by the schema)
     // and stay downloadable/restoreable.

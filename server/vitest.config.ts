@@ -13,6 +13,7 @@ const integrationTests = [
   'src/services/restore-progress.service.test.ts',
   'src/controllers/data-sync.controller.test.ts',
   'src/services/write-protection.test.ts',
+  'src/services/db-access-guards.test.ts',
   'src/controllers/connection-limit.test.ts',
   'src/controllers/retention-limit.test.ts',
   'src/services/sync/sync-engine.service.test.ts',

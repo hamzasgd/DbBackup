@@ -139,6 +139,7 @@ model User {
   restores             Restore[]
   dataSyncRuns         DataSyncRun[]
   liveSyncs            LiveSync[]
+  dbAccesses           DbAccess[]
   createdAt            DateTime        @default(now())
   updatedAt            DateTime        @updatedAt
 
@@ -232,6 +233,7 @@ model Connection {
   dataSyncsAsTarget   DataSyncRun[]       @relation("DataSyncTarget")
   liveSyncsAsSource   LiveSync[]          @relation("LiveSyncSource")
   liveSyncsAsTarget   LiveSync[]          @relation("LiveSyncTarget")
+  dbAccesses          DbAccess[]
   createdAt           DateTime            @default(now())
   updatedAt           DateTime            @updatedAt
 
@@ -765,4 +767,76 @@ model SyncHistory {
 
   @@index([syncConfigId, startedAt])
   @@map("sync_history")
+}
+
+/// A person's login to a database through DbBackup's gateway. They connect to
+/// the gateway with their own user and password; the gateway logs in to the
+/// database as a user DbBackup created with only the chosen rights.
+model DbAccess {
+  id              String            @id @default(uuid())
+  userId          String
+  user            User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connectionId    String
+  connection      Connection        @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+  /// Who it is for, e.g. "Ali (backend)"
+  name            String
+  /// Login name at the gateway
+  username        String            @unique
+  /// SHA1(SHA1(password)) and SHA256(SHA256(password)): what the MySQL login methods check against
+  hashNative      String
+  hashSha2        String
+  database        String
+  /// Empty: the whole database
+  tables          String[]
+  privileges      String[]
+  maxConnections  Int               @default(5)
+  enabled         Boolean           @default(true)
+  expiresAt       DateTime?
+  /// The database user behind it (created by DbBackup)
+  backendUser     String
+  backendHost     String
+  /// Encrypted
+  backendPassword String
+  lastUsedAt      DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  sessions        DbAccessSession[]
+
+  @@index([userId])
+  @@map("db_access")
+}
+
+model DbAccessSession {
+  id            String          @id @default(uuid())
+  accessId      String
+  access        DbAccess        @relation(fields: [accessId], references: [id], onDelete: Cascade)
+  clientIp      String
+  /// What the client said it is (DBeaver, DbGate, mysql, ...)
+  clientProgram String?
+  serverVersion String?
+  startedAt     DateTime        @default(now())
+  endedAt       DateTime?
+  queries       Int             @default(0)
+  bytesIn       BigInt          @default(0)
+  bytesOut      BigInt          @default(0)
+  /// Why it ended, when not by the client
+  error         String?
+  log           DbAccessQuery[]
+
+  @@index([accessId, startedAt])
+  @@map("db_access_sessions")
+}
+
+model DbAccessQuery {
+  id        String          @id @default(uuid())
+  sessionId String
+  session   DbAccessSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  at        DateTime        @default(now())
+  /// QUERY, PREPARE, EXECUTE, USE or BLOCKED
+  kind      String
+  sql       String
+
+  @@index([sessionId, at])
+  @@index([at])
+  @@map("db_access_queries")
 }

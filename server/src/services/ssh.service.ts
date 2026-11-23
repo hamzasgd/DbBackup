@@ -180,6 +180,11 @@ export class SSHTunnel {
     return this.localPort;
   }
 
+  /** Called when the SSH connection ends, e.g. so a shared tunnel is not handed out again */
+  onClose(cb: () => void): void {
+    this.client.on('close', cb);
+  }
+
   close(): void {
     // server.close() alone waits for open sockets; destroy them so
     // repeated test/info calls don't leak connections

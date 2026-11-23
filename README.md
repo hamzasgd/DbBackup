@@ -96,6 +96,7 @@
 - **KMS Kill Switch** — Optional AWS KMS-wrapped master key: the encryption key **never touches the server disk**; revoking IAM/KMS makes stolen ciphertext permanently undecryptable
 - **SSH Keys Out of the DB** — Reference a server-side key file instead of storing the PEM in the database
 - **SSH Tunnels** — Connect to private databases through bastion hosts
+- **Database access gateway** — Give developers their own MySQL/MariaDB login with only the rights you choose (read only, read and write, or picked rights; whole database or some tables; an end date). They connect DBeaver, DbGate or `mysql` to DbBackup over TLS — no SSH and no database password for them — and every query is logged. Turn it off or remove it in one click (see [Database access gateway](#database-access-gateway))
 - **JWT + refresh rotation**, **rate limiting**, **secret redaction in logs**, **Helmet/CORS**, **SSL/TLS enforcement**, **secure memory handling**
 
 ### Integrations
@@ -312,6 +313,13 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 | `DEFAULT_RETENTION_DAYS` / `DEFAULT_RETENTION_COUNT` | Fallback retention for schedule-less connections | `30` / off |
 | `RETENTION_SWEEP_CRON` | Daily global retention sweep | `30 3 * * *` |
 | `CLIENT_URL` | Frontend URL (CORS) | `http://localhost:5173` |
+| `DB_GATEWAY_PORT` | Port of the database access gateway (unset = off) | — |
+| `DB_GATEWAY_TLS_CERT` / `DB_GATEWAY_TLS_KEY` | Certificate (full chain) and key for the gateway | — |
+| `DB_GATEWAY_PUBLIC_HOST` | Host name shown to people for connecting | host of `FRONTEND_URL` |
+| `DB_GATEWAY_LOG_MAX_MB` | The most the query log takes up; past it the oldest statements go (0 = no limit) | `1000` |
+| `DB_GATEWAY_MAX_CONNECTIONS` | The most gateway connections at once (logged in or not) | `500` |
+| `DB_GATEWAY_TRUST_PRIVATE_NETWORK` | Let the gateway give a database the password when it is not vouched for (no SSL CA, no SSH tunnel) | `false` |
+| `DB_GATEWAY_ADVERTISED_VERSION` | The version every client is greeted with | `8.0.40` |
 
 > Storage backends (S3 / Google Drive), notification channels, and the **backup encryption passphrase** are configured in the app's Settings UI — not env vars — and are stored encrypted in the database.
 
@@ -402,6 +410,66 @@ What the admin can and cannot see — deliberate guardrails:
 - ❌ No user deletion, no password resets, no role-granting UI (role changes only via migration/`ADMIN_EMAIL`)
 
 Every admin action is audit-logged (`ADMIN_VIEW_USER`, `ADMIN_SUSPEND`, `ADMIN_REACTIVATE`, `ADMIN_ACCESS_DENIED`, `ADMIN_PROMOTED`).
+
+### Database access gateway
+
+The **Database access** page gives a person their own login to a MySQL or MariaDB
+database, like a small [Teleport](https://goteleport.com/docs/enroll-resources/database-access/) or
+[Warpgate](https://github.com/warp-tech/warpgate) built into DbBackup:
+
+- They connect any MySQL client (DBeaver, DbGate, `mysql`) to DbBackup's gateway with the user and
+  password shown once when the access is created. TLS is required. They get no SSH access and never
+  see the database's own credentials.
+- Clients are greeted with a fixed version (`DB_GATEWAY_ADVERTISED_VERSION`), never the database's
+  own: they get it before they log in.
+- DbBackup creates a database user for each access with exactly the chosen rights (e.g. `SELECT`
+  only, or only some tables) and logs in as it, through the connection's SSH tunnel when it has one.
+  The rights are enforced by the database itself; the gateway also refuses switching users,
+  replication and server commands, and does not allow `LOAD DATA LOCAL`.
+- The text of every query and prepared statement they send is logged with the session (who, from
+  where, which client), read in the character set the session uses, with the values sent for a
+  prepared statement (as bytes), the commands that change the session, and the database a login
+  picks. Long leading comments are left out, so that they cannot hide the statement. The log is
+  kept `DB_GATEWAY_LOG_DAYS` days and up to `DB_GATEWAY_LOG_MAX_MB` (1000 MB): past that, its
+  oldest statements go.
+- Turning an access off, changing its rights, a new password or its end date ends its open
+  sessions at once, also for a login still in progress. Removing it also drops its database user,
+  so a connection with accesses on it cannot be deleted until they are removed. Suspending an
+  account ends the access it gave.
+- Write rights cannot be given on a write-protected connection, nor on the target of a running live
+  sync (anything written there would be overwritten). When protection or a live sync is turned on
+  later, accesses with write rights pause (within 30 seconds) until it is off again.
+- A whole-database grant covers that database only. In MySQL's `GRANT ... ON db.*`, `_` and `%` are
+  wildcards, so DbBackup escapes them: `shop_db` does not also cover `shop-db`.
+- With the "Everything in this database" preset, views, triggers, routines and events a person creates
+  keep their database user as their definer. After the access is removed these stop working
+  ("definer does not exist") until they are changed or removed on the database.
+- The connection's database user must be allowed to create users and to give the chosen rights
+  (`CREATE USER` and the rights `WITH GRANT OPTION`, e.g. `root`).
+
+To turn it on, set in `server/.env` and restart DbBackup:
+
+```
+DB_GATEWAY_PORT=3307
+DB_GATEWAY_TLS_CERT=/www/server/panel/vhost/cert/dbbackup.example.com/fullchain.pem
+DB_GATEWAY_TLS_KEY=/www/server/panel/vhost/cert/dbbackup.example.com/privkey.pem
+```
+
+(the paths above are where aaPanel keeps a site's Let's Encrypt certificate; renewals are picked up
+without a restart). Then allow the port in the server's firewall. Failed logins are limited per
+address (10 in 15 minutes; per IPv6 block; 20 at the most per window, parallel attempts included),
+and at most `DB_GATEWAY_MAX_CONNECTIONS` connections (500 by default) are open at once, logged in or
+not. A session is ended after 100 commands the gateway refuses. These limits go by the address of
+each client's own connection: do not put the gateway behind a TCP proxy that hides client addresses,
+or every client counts as one.
+
+When the gateway cannot reach or log in to the database, the person gets a reference number and the
+reason is in the server log. One case to know about: MySQL 8 asks for the password itself the first
+time it sees a user. The gateway gives it only to a database that is vouched for: reached through
+the connection's SSH tunnel, or over SSL with the connection's CA set. Over a plain connection, or
+over SSL without a CA, anyone on the way could answer in the database's place and read the
+password, so there the login is refused. Set the CA or use the tunnel, or, on a network you know is
+private, set `DB_GATEWAY_TRUST_PRIVATE_NETWORK=true`.
 
 ### Storage quotas & connection limits
 
