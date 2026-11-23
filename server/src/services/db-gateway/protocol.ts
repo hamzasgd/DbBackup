@@ -136,8 +136,8 @@ export class PacketSplitter {
       const have = this.size + data.length - at;
       if (have < 4) break;
       const len = this.byteAt(0, data, at) | (this.byteAt(1, data, at) << 8) | (this.byteAt(2, data, at) << 16);
-      if (len > this.maxLength) throw new Error(`a packet of ${len} bytes is longer than the ${this.maxLength} allowed`);
       if (have < 4 + len) break;
+      if (len > this.maxLength) throw new Error(`a packet of ${len} bytes is longer than the ${this.maxLength} allowed`);
       // The pieces kept aside are already the first `size` bytes of this packet
       const end = at + 4 + len - this.size;
       const whole = this.size ? Buffer.concat([...this.pieces, data.subarray(at, end)]) : data.subarray(at, end);
@@ -149,6 +149,9 @@ export class PacketSplitter {
     if (at < data.length) {
       this.pieces.push(data.subarray(at));
       this.size += data.length - at;
+      // What is kept aside is bounded by what arrived, not by what a header claims. The start of TLS can
+      // arrive in the same read as the request for it, and it is no packet header: as one it says 66,326 bytes
+      if (this.size > this.maxLength) throw new Error(`more than ${this.maxLength} bytes arrived for one packet`);
     }
     return out;
   }

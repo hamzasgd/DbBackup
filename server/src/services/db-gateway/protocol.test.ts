@@ -63,6 +63,15 @@ describe('gateway protocol', () => {
     const small = new PacketSplitter(1000);
     expect(() => small.push(encodePacket(0, Buffer.alloc(1001)))).toThrow(/longer than the 1000 allowed/);
     expect(small.push(encodePacket(0, Buffer.alloc(1000)))).toHaveLength(1);
+    // The start of TLS (0x16 0x03 0x01) can arrive behind the request for it. As a packet header that
+    // says 66,326 bytes, which is no reason to refuse: what arrived is 9, and it is kept as it is
+    const tls = Buffer.from([0x16, 0x03, 0x01, 0x02, 0x00, 0x01, 0x00, 0x01, 0xfc]);
+    const mixed = new PacketSplitter(1000);
+    expect(mixed.push(Buffer.concat([encodePacket(1, Buffer.alloc(32)), tls]))).toEqual([{ seq: 1, payload: expect.any(Buffer) }]);
+    expect(mixed.rest().equals(tls)).toBe(true);
+    // What did arrive is bounded
+    const flooded = new PacketSplitter(1000);
+    expect(() => flooded.push(Buffer.concat([Buffer.from([0xff, 0xff, 0x00]), Buffer.alloc(1001)]))).toThrow(/more than 1000 bytes arrived/);
   });
 
   it('reads a client login packet', () => {

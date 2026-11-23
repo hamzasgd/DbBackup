@@ -225,6 +225,8 @@ class Client {
   private queue: Packet[] = [];
   private waiter: ((p: Packet | null) => void) | null = null;
   private gone = false;
+  /** Where packets are written: the socket, or the TLS connection over it */
+  private stream: net.Socket;
   readonly closed: Promise<void>;
 
   private constructor(readonly socket: net.Socket) {
@@ -234,11 +236,14 @@ class Client {
       this.hand();
     }));
     socket.on('error', () => {});
-    socket.on('data', (d: Buffer) => {
-      for (const p of this.splitter.push(d)) this.queue.push(p);
-      this.hand();
-    });
+    socket.on('data', this.onData);
+    this.stream = socket;
   }
+
+  private readonly onData = (d: Buffer) => {
+    for (const p of this.splitter.push(d)) this.queue.push(p);
+    this.hand();
+  };
 
   static connect(port: number): Promise<Client> {
     return new Promise((resolve, reject) => {
@@ -263,11 +268,30 @@ class Client {
   }
 
   send(seq: number, payload: Buffer): void {
-    this.socket.write(encodePacket(seq, payload));
+    this.stream.write(encodePacket(seq, payload));
   }
 
-  /** Answers the greeting with a login for `user` (the native login method, so nothing has to be switched), `database` and `charset` if given */
-  async login(user: string, password: string, database?: string, charset = 45): Promise<Packet> {
+  /**
+   * TLS on the connection, as MySQL clients ask for it right after the greeting. The request for it
+   * is packet number `seq`; the TLS start follows it at once, in the next write.
+   */
+  private async startTls(seq: number): Promise<void> {
+    const request = Buffer.alloc(32);
+    request.writeUInt32LE((CLIENT.SSL | CLIENT.LONG_PASSWORD | CLIENT.PROTOCOL_41 | CLIENT.TRANSACTIONS) >>> 0, 0);
+    this.send(seq, request);
+    const secure = tls.connect({ socket: this.socket, rejectUnauthorized: false });
+    this.socket.off('data', this.onData);
+    secure.on('error', () => {});
+    secure.on('data', this.onData);
+    await new Promise<void>((resolve, reject) => {
+      secure.once('secureConnect', () => resolve());
+      secure.once('error', reject);
+    });
+    this.stream = secure;
+  }
+
+  /** The gateway's greeting: its number and its scramble, so the login can be answered */
+  private async takeGreeting(): Promise<{ seq: number; scramble: Buffer } | Packet> {
     const greeting = await this.next();
     if (!greeting) throw new Error('the gateway closed the connection before greeting');
     // Refused at the door: an error where the greeting would be
@@ -279,17 +303,37 @@ class Client {
     const first = r.bytes(8);
     // Filler, capabilities, charset, status, capabilities, length of the login data, reserved
     r.bytes(19);
-    const scramble = Buffer.concat([first, r.bytes(12)]);
+    return { seq: greeting.seq, scramble: Buffer.concat([first, r.bytes(12)]) };
+  }
+
+  /** The login packet number `seq`, for `user` (the native login method, so nothing has to be switched), `database` and `charset` if given */
+  private answer(seq: number, user: string, password: string, scramble: Buffer, database: string | undefined, charset: number): void {
     const head = Buffer.alloc(32);
     head.writeUInt32LE(
       (CLIENT.LONG_PASSWORD | CLIENT.PROTOCOL_41 | CLIENT.SECURE_CONNECTION | CLIENT.PLUGIN_AUTH | CLIENT.PLUGIN_AUTH_LENENC
         | (database ? CLIENT.CONNECT_WITH_DB : 0)) >>> 0, 0);
     head.writeUInt32LE(1 << 24, 4);
     head[8] = charset;
-    this.send(greeting.seq + 1, Buffer.concat([
+    this.send(seq, Buffer.concat([
       head, Buffer.from(`${user}\0`), lenencBytes(nativeToken(password, scramble)),
       ...(database ? [Buffer.from(`${database}\0`)] : []), Buffer.from('mysql_native_password\0'),
     ]));
+  }
+
+  /** Answers the greeting with a login for `user` (the native login method, so nothing has to be switched), `database` and `charset` if given */
+  async login(user: string, password: string, database?: string, charset = 45): Promise<Packet> {
+    const greeting = await this.takeGreeting();
+    if ('payload' in greeting) return greeting;
+    this.answer(greeting.seq + 1, user, password, greeting.scramble, database, charset);
+    return (await this.next())!;
+  }
+
+  /** The same over TLS: it is asked for with number 1, so the login is number 2 */
+  async loginOverTls(user: string, password: string, database?: string, charset = 45): Promise<Packet> {
+    const greeting = await this.takeGreeting();
+    if ('payload' in greeting) return greeting;
+    await this.startTls(greeting.seq + 1);
+    this.answer(greeting.seq + 2, user, password, greeting.scramble, database, charset);
     return (await this.next())!;
   }
 
@@ -519,6 +563,21 @@ describe('the gateway in front of a database', () => {
     const started = Date.now();
     await c.closed;
     expect(Date.now() - started).toBeLessThan(3000);
+    await h.close();
+  });
+
+  it('takes a login over TLS from a real client, whose TLS start follows the request for it back to back', async () => {
+    const secureContext = selfSigned();
+    const h = await startGateway({ requireTls: true, secureContext: () => secureContext });
+    const wrong = await Client.connect(h.port);
+    expect((await wrong.loginOverTls('ali', 'wrong')).payload[0]).toBe(0xff);
+    wrong.destroy();
+    const c = await Client.connect(h.port);
+    expect((await c.loginOverTls('ali', PASSWORD)).payload[0]).toBe(0x00);
+    c.send(0, query('SELECT 1'));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    expect(h.db.commands.map((x) => x.sql)).toEqual(['SELECT 1']);
+    c.destroy();
     await h.close();
   });
 
