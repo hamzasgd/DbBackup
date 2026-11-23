@@ -17,10 +17,10 @@ export interface BackendLogin {
   /** TLS to the database, or undefined for a plain connection */
   tls?: tls.ConnectionOptions;
   attrs?: Record<string, string>;
-  /** The socket runs inside an SSH tunnel, so the way to the database is protected by its host key, not by TLS */
-  tunnelled?: boolean;
-  /** Ask an unprotected database for its public key anyway (DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY, a private network only) */
-  allowServerPublicKey?: boolean;
+  /** The database is vouched for: its TLS certificate is checked against a CA, or the socket runs inside an SSH tunnel */
+  protected?: boolean;
+  /** The operator says the network between DbBackup and its databases is private (DB_GATEWAY_TRUST_PRIVATE_NETWORK) */
+  trustNetwork?: boolean;
 }
 
 export interface BackendSession {
@@ -72,19 +72,23 @@ function parseServerHello(payload: Buffer): ServerHello {
   return { version, threadId, scramble, caps: caps >>> 0, plugin };
 }
 
-function authAnswer(plugin: string, password: string, scramble: Buffer, secure: boolean): Buffer {
+/** The password an auth method would give away unless the database is vouched for */
+function authAnswer(plugin: string, password: string, scramble: Buffer, trusted: boolean): Buffer {
   switch (plugin) {
     case 'mysql_native_password':
       return nativeToken(password, scramble);
     case 'caching_sha2_password':
       return sha2Token(password, scramble);
     case 'mysql_clear_password':
-      if (!secure) throw new BackendError('The database asked for the password in clear text over an unencrypted connection');
+      if (!trusted) throw new BackendError(NOT_VOUCHED_FOR);
       return Buffer.from(`${password}\0`, 'utf8');
     default:
       throw new BackendError(`The database uses the ${plugin} login method, which the gateway does not support`);
   }
 }
+
+const NOT_VOUCHED_FOR = 'The database asked for the password itself, and it is not vouched for. Set the connection\'s SSL CA, '
+  + 'reach the database through its SSH tunnel, or, on a network that is known to be private, set DB_GATEWAY_TRUST_PRIVATE_NETWORK=true';
 
 /**
  * Log in to the database on an open socket, with the capability flags the
@@ -147,7 +151,9 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
       });
       ch.use(secure);
     }
-    const secureLink = !!o.tls;
+    // Who is on the other end is known only with a checked certificate or an SSH tunnel, unless the operator
+    // says the network is private. Fast answers give nothing away; the password itself goes only to a vouched-for database
+    const trusted = !!o.protected || !!o.trustNetwork;
 
     let plugin = hello.plugin;
     let scramble = hello.scramble;
@@ -156,7 +162,7 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
     const parts = [
       fixed(caps),
       Buffer.from(`${o.user}\0`, 'utf8'),
-      lenencBytes(authAnswer(plugin, o.password, scramble, secureLink)),
+      lenencBytes(authAnswer(plugin, o.password, scramble, trusted)),
     ];
     if (caps & CLIENT.CONNECT_WITH_DB) parts.push(Buffer.from(`${o.database}\0`, 'utf8'));
     parts.push(Buffer.from(`${plugin}\0`, 'utf8'));
@@ -181,26 +187,22 @@ export async function loginBackend(socket: net.Socket, o: BackendLogin): Promise
         plugin = r.nulString();
         const data = r.restBytes();
         scramble = data[data.length - 1] === 0 ? data.subarray(0, data.length - 1) : data;
-        ch.write(seq, authAnswer(plugin, o.password, scramble, secureLink));
+        ch.write(seq, authAnswer(plugin, o.password, scramble, trusted));
         continue;
       }
       if (kind === 0x01 && plugin === 'caching_sha2_password') {
         if (p.payload[1] === 0x03) continue; // fast login worked; the OK follows
         if (p.payload[1] === 0x04) {
-          // The full check: the password itself. Inside TLS it goes as it is
+          // The full check: the password itself
           if (o.tls) {
+            // Inside TLS it goes as it is, to a database whose certificate was checked
+            if (!trusted) throw new BackendError('The database asked for the full password check inside TLS whose certificate is not checked. ' + NOT_VOUCHED_FOR);
             ch.write(seq, Buffer.from(`${o.password}\0`));
             continue;
           }
-          // Without TLS it could only go RSA-encrypted to whatever key the database sends, and nobody checks
-          // that key: a machine on the way gives its own and reads the password. So only inside an SSH tunnel
-          // (the database is vouched for by the host key), or when the operator said the network is private
-          if (!o.tunnelled && !o.allowServerPublicKey) {
-            throw new BackendError(
-              'The database asked for the full password check over an unencrypted connection. '
-              + 'Turn on SSL for this connection, or reach the database through its SSH tunnel.',
-            );
-          }
+          // Without TLS it could only go RSA-encrypted to whatever key the database sends: a machine on the way
+          // gives its own and reads it. So only inside an SSH tunnel (the host key vouches for the database)
+          if (!trusted) throw new BackendError('The database asked for the full password check over an unencrypted connection. ' + NOT_VOUCHED_FOR);
           ch.write(seq, Buffer.from([0x02]));
           const key = await ch.next();
           ch.write(key.seq + 1, rsaPassword(o.password, scramble, key.payload.subarray(1)));

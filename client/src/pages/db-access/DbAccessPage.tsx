@@ -284,10 +284,12 @@ function AccessForm({ status, existing, onClose, onCreated }: {
 function Sessions({ access }: { access: DbAccess }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState<string | null>(null)
-  // How many statements of the open session are shown; the server keeps them all
+  // How many sessions, and how many statements of the open one, are shown; the server keeps them all
+  const [shown, setShown] = useState(50)
   const [limit, setLimit] = useState(1000)
-  const { data } = useQuery({ queryKey: ['db-access', access.id, 'sessions'], queryFn: () => dbAccessApi.sessions(access.id), refetchInterval: 10_000 })
+  const { data } = useQuery({ queryKey: ['db-access', access.id, 'sessions', shown], queryFn: () => dbAccessApi.sessions(access.id, shown), refetchInterval: 10_000 })
   const sessions = data?.data.data.sessions ?? []
+  const total = data?.data.data.total ?? 0
   const queries = useQuery({ queryKey: ['db-access-queries', open, limit], queryFn: () => dbAccessApi.queries(open!, limit), enabled: !!open })
   const end = useMutation({
     mutationFn: (id: string) => dbAccessApi.closeSession(id),
@@ -330,6 +332,11 @@ function Sessions({ access }: { access: DbAccess }) {
           )}
         </div>
       ))}
+      {sessions.length < total && (
+        <div className="px-3 py-2">
+          <Button variant="outline" size="sm" onClick={() => setShown((n) => n + 50)}>Show more sessions ({sessions.length} of {total})</Button>
+        </div>
+      )}
     </div>
   )
 }

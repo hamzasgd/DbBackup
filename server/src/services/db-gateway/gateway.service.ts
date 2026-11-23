@@ -10,7 +10,7 @@ import { nodeTlsOptions } from '../engines/tls';
 import type { ConnectionConfig } from '../engines/base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { sanitizeForLog } from '../../utils/sanitize';
-import { AccessUnavailable, BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './server';
+import { AccessUnavailable, DEFAULT_ADVERTISED_VERSION, BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './server';
 import { logText } from './protocol';
 import { onlyReads, WRITE_PRIVILEGES } from './provision';
 
@@ -23,11 +23,13 @@ import { onlyReads, WRITE_PRIVILEGES } from './provision';
  *   DB_GATEWAY_TLS_KEY       its private key
  *   DB_GATEWAY_REQUIRE_TLS   "false" allows unencrypted clients (only for a private network)
  *   DB_GATEWAY_LOG_DAYS      days to keep the query log (default 30)
+ *   DB_GATEWAY_LOG_MAX_MB    the most the query log takes up (default 1000); past it the oldest statements go. 0: no limit
  *   DB_GATEWAY_MAX_CONNECTIONS  the most connections at once, logged in or not (default 500)
- *   DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY  "true": let the gateway ask a database it reaches unencrypted (no SSL,
- *                                       no SSH tunnel) for its public key, as the mysql client does with
- *                                       --get-server-public-key. Only for a private network.
- *   DB_GATEWAY_ADVERTISED_VERSION       version every client is greeted with, instead of the database's own
+ *   DB_GATEWAY_TRUST_PRIVATE_NETWORK  "true": the network between DbBackup and its databases is private, so the
+ *                                       password may go to a database that is not vouched for (no SSL CA, no SSH
+ *                                       tunnel). Off, such logins are refused.
+ *   DB_GATEWAY_ADVERTISED_VERSION       the version every client is greeted with (default 8.0.40). Never the
+ *                                       database's own: clients would get it before they log in
  */
 export interface GatewayConfig {
   port: number | null;
@@ -37,9 +39,20 @@ export interface GatewayConfig {
   keyFile: string | null;
   requireTls: boolean;
   logDays: number;
+  logMaxBytes: number;
   maxConnections: number;
-  allowServerPublicKey: boolean;
-  advertisedVersion: string | null;
+  trustNetwork: boolean;
+  advertisedVersion: string;
+}
+
+/** The query log's size limit unless set (DB_GATEWAY_LOG_MAX_MB) */
+const DEFAULT_LOG_MAX_MB = 1000;
+
+function logMaxBytes(env: NodeJS.ProcessEnv): number {
+  const raw = env.DB_GATEWAY_LOG_MAX_MB?.trim();
+  if (raw === '0') return 0;
+  const mb = Math.floor(Number(raw));
+  return Number.isFinite(mb) && mb > 0 ? Math.min(mb, 1_048_576) * 1024 * 1024 : DEFAULT_LOG_MAX_MB * 1024 * 1024;
 }
 
 export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
@@ -56,10 +69,11 @@ export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConf
     keyFile: env.DB_GATEWAY_TLS_KEY?.trim() || null,
     requireTls: env.DB_GATEWAY_REQUIRE_TLS !== 'false',
     logDays: Math.max(1, Number(env.DB_GATEWAY_LOG_DAYS) || 30),
+    logMaxBytes: logMaxBytes(env),
     // The gateway shares its process with the rest of DbBackup, so this stays well below a usual file descriptor limit
     maxConnections: Math.min(5000, Math.max(1, Math.floor(Number(env.DB_GATEWAY_MAX_CONNECTIONS)) || 500)),
-    allowServerPublicKey: env.DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY === 'true',
-    advertisedVersion: env.DB_GATEWAY_ADVERTISED_VERSION?.trim().slice(0, 64) || null,
+    trustNetwork: env.DB_GATEWAY_TRUST_PRIVATE_NETWORK === 'true',
+    advertisedVersion: env.DB_GATEWAY_ADVERTISED_VERSION?.trim().slice(0, 64) || DEFAULT_ADVERTISED_VERSION,
   };
 }
 
@@ -228,7 +242,11 @@ async function openBackend(account: GatewayAccount): Promise<BackendTarget> {
   const config = toEngineConfig(access.connection);
   const password = decrypt(access.backendPassword);
   const tlsOptions = config.sslEnabled ? (nodeTlsOptions(config, 'pg') as tls.ConnectionOptions) : undefined;
-  const extra = { user: access.backendUser, password, tls: tlsOptions, allowServerPublicKey: settings.allowServerPublicKey };
+  const extra = {
+    user: access.backendUser, password, tls: tlsOptions, trustNetwork: settings.trustNetwork,
+    // Vouched for by the tunnel's host key, or by a certificate checked against the connection's CA
+    protected: !!config.sshEnabled || (config.sslEnabled && !!config.sslCa),
+  };
   if (config.sshEnabled) {
     const key = `${access.connection.id}:${access.connection.updatedAt.getTime()}`;
     const entry = await acquireTunnel(key, config);
@@ -236,7 +254,7 @@ async function openBackend(account: GatewayAccount): Promise<BackendTarget> {
     const release = () => { if (!released) { released = true; releaseTunnel(key, entry); } };
     try {
       const socket = await connectTcp('127.0.0.1', entry.port);
-      return { ...extra, socket, tunnelled: true, release };
+      return { ...extra, socket, release };
     } catch (e) {
       release();
       throw e;
@@ -276,7 +294,7 @@ export async function startDbGateway(): Promise<void> {
     host: cfg.bind,
     requireTls: cfg.requireTls,
     maxConnections: cfg.maxConnections,
-    advertisedVersion: cfg.advertisedVersion ?? undefined,
+    advertisedVersion: cfg.advertisedVersion,
     secureContext: () => loadTls(cfg),
     hooks: {
       findAccount: findAccess,
@@ -317,13 +335,13 @@ export async function startDbGateway(): Promise<void> {
   status.running = true;
   logger.info(`🔌 DB gateway listening on ${cfg.bind}:${cfg.port}${cfg.requireTls ? ' (TLS required)' : ''}`);
 
-  // End sessions whose access ran out; keep the log to its length
+  // End sessions whose access ran out; keep the log to its length and to its size
   const sweep = setInterval(() => { void sweepSessions().catch(() => {}); }, 30_000);
-  const prune = setInterval(() => void pruneLog(cfg.logDays), 6 * 3600_000);
+  const prune = setInterval(() => void pruneLog(cfg.logDays, cfg.logMaxBytes), 3600_000);
   sweep.unref();
   prune.unref();
   timers = [sweep, prune];
-  void pruneLog(cfg.logDays);
+  void pruneLog(cfg.logDays, cfg.logMaxBytes);
 }
 
 /**
@@ -356,11 +374,39 @@ async function sweepSessions(): Promise<void> {
   }
 }
 
-async function pruneLog(days: number): Promise<void> {
+/** About what the query log takes up: each statement's text and the rest of its row */
+async function logBytes(): Promise<number> {
+  const rows = await prisma.$queryRaw<{ bytes: bigint | null }[]>`
+    SELECT COALESCE(SUM(octet_length(sql) + 200), 0)::bigint AS bytes FROM db_access_queries`;
+  return Number(rows[0]?.bytes ?? 0);
+}
+
+/**
+ * Past its size, the oldest statements of the query log go: a tenth of the rows at a time (at least 1, at most
+ * 20,000). The newest stay, so that filling the log does not push what comes after out of it.
+ */
+async function shrinkLog(maxBytes: number): Promise<void> {
+  for (let round = 0; round < 25; round++) {
+    if (await logBytes() <= maxBytes) return;
+    const count = await prisma.dbAccessQuery.count();
+    if (!count) return;
+    const batch = Math.min(20_000, Math.max(1, Math.floor(count / 10)));
+    // The last row of the oldest `batch`
+    const edge = await prisma.dbAccessQuery.findMany({ orderBy: [{ at: 'asc' }, { id: 'asc' }], skip: batch - 1, take: 1, select: { at: true, id: true } });
+    if (!edge.length) return;
+    const removed = await prisma.$executeRaw`
+      DELETE FROM db_access_queries WHERE (at, id) <= (${edge[0].at}, ${edge[0].id})`;
+    logger.warn(`DB gateway: the query log is over its limit of ${Math.round(maxBytes / 1024 / 1024)} MB; removed its oldest ${removed} statements`);
+  }
+}
+
+/** Past `days`, the query log goes; past `maxBytes`, its oldest statements go */
+export async function pruneLog(days: number, maxBytes: number): Promise<void> {
   try {
     const before = new Date(Date.now() - days * 86_400_000);
     await prisma.dbAccessQuery.deleteMany({ where: { at: { lt: before } } });
     await prisma.dbAccessSession.deleteMany({ where: { endedAt: { lt: new Date(Date.now() - Math.max(days, 90) * 86_400_000) } } });
+    if (maxBytes > 0) await shrinkLog(maxBytes);
   } catch (e) {
     logger.warn(`DB gateway: could not prune the query log: ${(e as Error).message}`);
   }

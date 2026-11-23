@@ -7,6 +7,7 @@
  * (https://dev.mysql.com/doc/dev/mysql-server/latest/PAGE_PROTOCOL.html).
  */
 import crypto from 'crypto';
+import { TextDecoder } from 'util';
 
 export const CLIENT = {
   LONG_PASSWORD: 0x1,
@@ -488,4 +489,79 @@ export function executeText(payload: Buffer): string {
   const values = payload.subarray(10);
   const shown = values.subarray(0, MAX_LOGGED_PARAMETERS).toString('hex');
   return `EXECUTE #${payload.readUInt32LE(1)}, ${values.length} bytes of parameters${values.length > MAX_LOGGED_PARAMETERS ? ` (first ${MAX_LOGGED_PARAMETERS})` : ''}: ${shown}`;
+}
+
+/** Commands that are not queries but leave a line in the log: they end a connection, change the session, or feed a prepared statement */
+export const LOGGED_COMMANDS = new Set<number>([
+  COM.PROCESS_KILL, COM.SET_OPTION, COM.RESET_CONNECTION, COM.STMT_SEND_LONG_DATA, COM.STMT_FETCH, COM.STMT_RESET,
+]);
+
+/** One of LOGGED_COMMANDS for the log: its name and what it carries */
+export function commandText(cmd: number, payload: Buffer): string {
+  switch (cmd) {
+    case COM.PROCESS_KILL:
+      return `KILL CONNECTION ${payload.length >= 5 ? payload.readUInt32LE(1) : ''}`.trimEnd();
+    case COM.SET_OPTION:
+      return `SET OPTION ${payload.length >= 3 ? (payload.readUInt16LE(1) ? 'multi statements on' : 'multi statements off') : ''}`.trimEnd();
+    case COM.RESET_CONNECTION:
+      return 'RESET CONNECTION';
+    case COM.STMT_SEND_LONG_DATA:
+      // After the command, the statement's number and the parameter's number
+      return `SEND LONG DATA (${Math.max(0, payload.length - 7)} bytes)`;
+    case COM.STMT_FETCH:
+      return 'FETCH';
+    default:
+      return 'RESET STATEMENT';
+  }
+}
+
+// ── Character sets
+
+/** How to read statement text, by the collation the client chose. Not listed: UTF-8, as MySQL tools use */
+const COLLATION_ENCODINGS: Record<number, string> = {
+  // latin1 (and "binary": the bytes as they are)
+  5: 'windows-1252', 8: 'windows-1252', 9: 'windows-1252', 15: 'windows-1252', 47: 'windows-1252', 48: 'windows-1252',
+  49: 'windows-1252', 63: 'windows-1252',
+  1: 'big5', 13: 'shift_jis', 19: 'euc-jp', 24: 'gb2312', 28: 'gbk', 35: 'euc-kr',
+};
+
+const CHARSET_ENCODINGS: Record<string, string> = {
+  latin1: 'windows-1252', binary: 'windows-1252', big5: 'big5', sjis: 'shift_jis', ujis: 'euc-jp', eucjpms: 'euc-jp',
+  gb2312: 'gb2312', gbk: 'gbk', euckr: 'euc-kr', utf8: 'utf-8', utf8mb3: 'utf-8', utf8mb4: 'utf-8',
+};
+
+/** `SET NAMES x`, `SET CHARACTER SET x`, `SET character_set_client = x` */
+const SET_CHARSET_RE = /^\s*SET\s+(?:(?:GLOBAL|SESSION|LOCAL)\s+|@@(?:global|session|local)\.)?(?:NAMES|CHARSET|CHARACTER\s+SET|character_set_client)\s*(?:=|TO)?\s*["'`]?([a-z0-9_]+)/i;
+
+function decoderFor(encoding: string | undefined): TextDecoder {
+  try {
+    return new TextDecoder(encoding ?? 'utf-8');
+  } catch {
+    // Not one this Node knows: as UTF-8, as before
+    return new TextDecoder('utf-8');
+  }
+}
+
+/** Reads the statements of a session that logged in with this collation */
+export function statementDecoder(charset: number): TextDecoder {
+  return decoderFor(COLLATION_ENCODINGS[charset]);
+}
+
+/**
+ * A statement's text as the client wrote it, in the session's character set, and the character set to
+ * read what follows it with when the statement changes it. Read as UTF-8 whatever the client chose,
+ * all but its ASCII was garbled in the log.
+ */
+export function readStatement(text: Buffer, decoder: TextDecoder): { sql: string; next?: TextDecoder } {
+  const sql = decoder.decode(text);
+  const named = SET_CHARSET_RE.exec(sql)?.[1].toLowerCase();
+  const encoding = named ? CHARSET_ENCODINGS[named] : undefined;
+  // Unknown to this list (or `SET NAMES DEFAULT`): kept as it is, whatever the database makes of it
+  if (!named || !encoding || decoder.encoding === encoding) return { sql };
+  return { sql, next: decoderFor(encoding) };
+}
+
+/** A value for a shell command line, so that it is taken as it is whatever it contains */
+export function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\\''`)}'`;
 }

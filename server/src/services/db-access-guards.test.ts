@@ -9,7 +9,7 @@ process.env.ENCRYPTION_KEY_PRIMARY = process.env.ENCRYPTION_KEY_PRIMARY ?? '3'.r
 import { encrypt } from './crypto.service';
 import { deleteConnection } from '../controllers/connection.controller';
 import { setUserStatus } from '../controllers/admin.controller';
-import { findAccess, usableAccesses } from './db-gateway/gateway.service';
+import { findAccess, pruneLog, usableAccesses } from './db-gateway/gateway.service';
 
 /** Integration: what the gateway relies on next to its own checks, since each access keeps a database user. */
 describe('database access guards', () => {
@@ -106,6 +106,33 @@ describe('database access guards', () => {
     await prisma.user.update({ where: { id: owner.id }, data: { isActive: false } });
     await prisma.dbAccess.updateMany({ where: { connectionId: c.id }, data: { enabled: true, expiresAt: null } });
     expect(await usableAccesses([read, write])).toEqual(new Set());
+  });
+
+  it('keeps the query log to its size by dropping its oldest statements first, and to its age', async () => {
+    const c = await connection();
+    const { id: accessId } = await access(c.id);
+    const s = await prisma.dbAccessSession.create({ data: { accessId, clientIp: '127.0.0.1' } });
+    // 30 statements of about 1.2 KB each: about 36 KB, numbered from old to new
+    const base = Date.now() - 60_000;
+    await prisma.dbAccessQuery.createMany({
+      data: Array.from({ length: 30 }, (_, n) => ({
+        sessionId: s.id, kind: 'QUERY', sql: `${String(n).padStart(4, '0')}:${'x'.repeat(1000)}`, at: new Date(base + n * 1000),
+      })),
+    });
+    await pruneLog(30, 20 * 1024);
+    const left = await prisma.dbAccessQuery.findMany({ where: { sessionId: s.id }, orderBy: { at: 'asc' } });
+    expect(left.length).toBeGreaterThan(0);
+    expect(left.length).toBeLessThan(20);
+    // The newest stayed, in order
+    expect(left.map((q) => q.sql.slice(0, 4))).toEqual(left.map((_, i) => String(30 - left.length + i).padStart(4, '0')));
+
+    // Statements past their days go whatever their size
+    await prisma.dbAccessQuery.create({
+      data: { sessionId: s.id, kind: 'QUERY', sql: 'old', at: new Date(Date.now() - 40 * 86_400_000) },
+    });
+    await pruneLog(30, 0);
+    expect(await prisma.dbAccessQuery.count({ where: { sessionId: s.id, sql: 'old' } })).toBe(0);
+    expect(await prisma.dbAccessQuery.count({ where: { sessionId: s.id } })).toBe(left.length);
   });
 
   it('suspends an account that gave database access without failing', async () => {

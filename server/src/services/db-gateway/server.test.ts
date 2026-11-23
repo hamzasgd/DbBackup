@@ -6,11 +6,48 @@ import net from 'net';
 import os from 'os';
 import path from 'path';
 import tls from 'tls';
+import { Duplex } from 'stream';
 import {
   CLIENT, COM, GATEWAY_CAPS, MAX_PAYLOAD, Packet, PacketSplitter, Reader, buildErr, buildGreeting, buildOk,
   encodePacket, lenencBytes, nativeToken, newScramble, passwordHashes,
 } from './protocol';
 import { BackendTarget, GatewayAccount, GatewayOptions, GatewayServer, QueryKind, failureKey } from './server';
+
+/** A stand-in database: enough of MySQL for the gateway to log in, and a note of what it was asked */
+interface StandIn {
+  start(): Promise<number>;
+  stop(): Promise<void>;
+  readonly commands: { seq: number; cmd: number; sql: string }[];
+  readonly authReplies: string[];
+}
+
+/** A one-day self-signed certificate for TLS tests */
+function selfSigned(): tls.SecureContext {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbk-gateway-test-'));
+  execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
+    '-keyout', path.join(dir, 'key.pem'), '-out', path.join(dir, 'cert.pem')], { stdio: 'ignore' });
+  const context = tls.createSecureContext({
+    cert: fs.readFileSync(path.join(dir, 'cert.pem')), key: fs.readFileSync(path.join(dir, 'key.pem')),
+  });
+  fs.rmSync(dir, { recursive: true, force: true });
+  return context;
+}
+
+/** The socket with bytes already read from it put back in front (TLS may start in the same read as the request for it) */
+function withLeftover(socket: net.Socket, left: Buffer): Duplex {
+  const joined = new Duplex({
+    read() { socket.resume(); },
+    write(chunk, _enc, cb) { socket.write(chunk, cb); },
+    final(cb) { socket.end(); cb(); },
+    destroy(err, cb) { socket.destroy(err ?? undefined); cb(err); },
+  });
+  joined.push(left);
+  socket.on('data', (d: Buffer) => { if (!joined.push(d)) socket.pause(); });
+  socket.on('end', () => joined.push(null));
+  socket.on('error', (e) => joined.destroy(e));
+  socket.on('close', () => joined.destroy());
+  return joined;
+}
 
 /**
  * The gateway in front of a stand-in database, over real sockets. The stand-in
@@ -18,7 +55,7 @@ import { BackendTarget, GatewayAccount, GatewayOptions, GatewayServer, QueryKind
  * notes every command it takes as the start of one, and like MySQL it answers
  * a packet with the wrong number with "Packets out of order".
  */
-class StandInDatabase {
+class StandInDatabase implements StandIn {
   private readonly server = net.createServer();
   private readonly sockets = new Set<net.Socket>();
   private nextThread = 100;
@@ -61,10 +98,11 @@ class StandInDatabase {
               sock.write(encodePacket(2, Buffer.from([0x01, 0x04])));
               continue;
             }
-            const answer = p.payload[0] === 0x02 ? 'asked for the public key'
-              : p.payload.length === 256 ? 'the password RSA-encrypted' : 'the password as it is';
-            this.authReplies.push(answer);
-            if (p.payload[0] === 0x02) {
+            // The request for the key is the single byte 0x02 (an encrypted password may start with 0x02 too)
+            const askedForTheKey = p.payload.length === 1 && p.payload[0] === 0x02;
+            this.authReplies.push(askedForTheKey ? 'asked for the public key'
+              : p.payload.length === 256 ? 'the password RSA-encrypted' : 'the password as it is');
+            if (askedForTheKey) {
               sock.write(encodePacket(p.seq + 1, Buffer.concat([Buffer.from([0x01]), this.publicKey])));
               continue;
             }
@@ -110,6 +148,64 @@ class StandInDatabase {
       sock.write(encodePacket(0, buildGreeting({
         serverVersion: '8.0.40-stand-in', connectionId: this.nextThread++, scramble: newScramble(), caps: GATEWAY_CAPS,
         charset: 45, status: 0x0002, authPlugin: this.fullAuth ? 'caching_sha2_password' : 'mysql_native_password',
+      })));
+    });
+    return new Promise((resolve) => this.server.listen(0, '127.0.0.1', () => {
+      resolve((this.server.address() as net.AddressInfo).port);
+    }));
+  }
+
+  async stop(): Promise<void> {
+    for (const s of this.sockets) s.destroy();
+    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+  }
+}
+
+/**
+ * MySQL 8 as the gateway reaches it over TLS: TLS is offered, and after the
+ * login packet the password itself is asked for. It notes what was answered.
+ */
+class TlsFullAuthDatabase implements StandIn {
+  private readonly server = net.createServer();
+  private readonly sockets = new Set<net.Socket>();
+  readonly commands: { seq: number; cmd: number; sql: string }[] = [];
+  readonly authReplies: string[] = [];
+
+  constructor(private readonly secureContext: tls.SecureContext) {}
+
+  start(): Promise<number> {
+    this.server.on('connection', (sock) => {
+      this.sockets.add(sock);
+      sock.on('error', () => {});
+      const splitter = new PacketSplitter();
+      // 0: waiting for the request for TLS, 1: for the login, 2: for the password itself, 3: done
+      let step = 0;
+      let stream: Duplex = sock;
+      const onData = (d: Buffer) => {
+        for (const p of splitter.push(d)) {
+          if (step === 0 && p.seq === 1 && p.payload.length === 32) {
+            const left = splitter.rest();
+            stream.off('data', onData);
+            const secure = new tls.TLSSocket(left.length ? withLeftover(sock, left) : sock, { isServer: true, secureContext: this.secureContext });
+            this.sockets.add(secure);
+            secure.on('error', () => {});
+            stream = secure;
+            secure.on('data', onData);
+            step = 1;
+          } else if (step === 1) {
+            step = 2;
+            stream.write(encodePacket(p.seq + 1, Buffer.from([0x01, 0x04])));
+          } else if (step === 2) {
+            this.authReplies.push(p.payload.length === 1 && p.payload[0] === 0x02 ? 'asked for the public key' : 'the password as it is');
+            step = 3;
+            stream.write(encodePacket(p.seq + 1, buildOk()));
+          }
+        }
+      };
+      stream.on('data', onData);
+      sock.write(encodePacket(0, buildGreeting({
+        serverVersion: '8.0.40-stand-in', connectionId: 7, scramble: newScramble(), caps: GATEWAY_CAPS | CLIENT.SSL,
+        charset: 45, status: 0x0002, authPlugin: 'caching_sha2_password',
       })));
     });
     return new Promise((resolve) => this.server.listen(0, '127.0.0.1', () => {
@@ -170,8 +266,8 @@ class Client {
     this.socket.write(encodePacket(seq, payload));
   }
 
-  /** Answers the greeting with a login for `user`, with the native login method (so nothing has to be switched) */
-  async login(user: string, password: string): Promise<Packet> {
+  /** Answers the greeting with a login for `user` (the native login method, so nothing has to be switched), `database` and `charset` if given */
+  async login(user: string, password: string, database?: string, charset = 45): Promise<Packet> {
     const greeting = await this.next();
     if (!greeting) throw new Error('the gateway closed the connection before greeting');
     // Refused at the door: an error where the greeting would be
@@ -186,11 +282,13 @@ class Client {
     const scramble = Buffer.concat([first, r.bytes(12)]);
     const head = Buffer.alloc(32);
     head.writeUInt32LE(
-      (CLIENT.LONG_PASSWORD | CLIENT.PROTOCOL_41 | CLIENT.SECURE_CONNECTION | CLIENT.PLUGIN_AUTH | CLIENT.PLUGIN_AUTH_LENENC) >>> 0, 0);
+      (CLIENT.LONG_PASSWORD | CLIENT.PROTOCOL_41 | CLIENT.SECURE_CONNECTION | CLIENT.PLUGIN_AUTH | CLIENT.PLUGIN_AUTH_LENENC
+        | (database ? CLIENT.CONNECT_WITH_DB : 0)) >>> 0, 0);
     head.writeUInt32LE(1 << 24, 4);
-    head[8] = 45;
+    head[8] = charset;
     this.send(greeting.seq + 1, Buffer.concat([
-      head, Buffer.from(`${user}\0`), lenencBytes(nativeToken(password, scramble)), Buffer.from('mysql_native_password\0'),
+      head, Buffer.from(`${user}\0`), lenencBytes(nativeToken(password, scramble)),
+      ...(database ? [Buffer.from(`${database}\0`)] : []), Buffer.from('mysql_native_password\0'),
     ]));
     return (await this.next())!;
   }
@@ -210,6 +308,8 @@ async function until(condition: () => boolean, ms = 5000): Promise<void> {
 
 const PASSWORD = 'gateway-password';
 const query = (sql: string) => Buffer.concat([Buffer.from([COM.QUERY]), Buffer.from(sql)]);
+/** COM.QUERY with text that is already in the session's character set */
+const queryBytes = (text: Buffer) => Buffer.concat([Buffer.from([COM.QUERY]), text]);
 const anAccount = (id: string, maxConnections = 5): GatewayAccount => {
   const { native, sha2 } = passwordHashes(PASSWORD);
   return { id, username: 'ali', hashNative: native, hashSha2: sha2, enabled: true, expiresAt: null, maxConnections, database: 'shop' };
@@ -217,7 +317,7 @@ const anAccount = (id: string, maxConnections = 5): GatewayAccount => {
 
 async function startGateway(over: Partial<GatewayOptions> & {
   account?: GatewayAccount; beforeOpen?: () => Promise<void>; target?: Partial<BackendTarget>;
-  db?: StandInDatabase; onQuery?: (sql: string) => void;
+  db?: StandIn; onQuery?: (sql: string) => void;
 } = {}) {
   const db = over.db ?? new StandInDatabase();
   const dbPort = await db.start();
@@ -226,6 +326,8 @@ async function startGateway(over: Partial<GatewayOptions> & {
   const ended: string[] = [];
   /** What the gateway put in the operator's log */
   const errors: { what: string; error: unknown }[] = [];
+  /** Wrong passwords that were actually checked (a login refused before that does not count) */
+  const guesses: string[] = [];
   let sessions = 0;
   const gw = new GatewayServer({
     port: 0, host: '127.0.0.1', requireTls: false, secureContext: () => null, ...over,
@@ -246,12 +348,13 @@ async function startGateway(over: Partial<GatewayOptions> & {
         log.push({ kind, sql });
       },
       sessionEnded: (id) => { ended.push(id); },
+      loginFailed: (_username, _ip, reason) => { if (reason === 'wrong password') guesses.push(reason); },
       internalError: (what, error) => { errors.push({ what, error }); },
     },
   });
   await gw.start();
   return {
-    gw, db, log, ended, errors, account, port: gw.port,
+    gw, db, log, ended, errors, guesses, account, port: gw.port,
     close: async () => { await gw.stop(); await db.stop(); },
   };
 }
@@ -405,13 +508,7 @@ describe('the gateway in front of a database', () => {
   });
 
   it('gives up on a TLS handshake that never finishes', async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dbbk-gateway-test-'));
-    execFileSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1', '-subj', '/CN=localhost',
-      '-keyout', path.join(dir, 'key.pem'), '-out', path.join(dir, 'cert.pem')], { stdio: 'ignore' });
-    const secureContext = tls.createSecureContext({
-      cert: fs.readFileSync(path.join(dir, 'cert.pem')), key: fs.readFileSync(path.join(dir, 'key.pem')),
-    });
-    fs.rmSync(dir, { recursive: true, force: true });
+    const secureContext = selfSigned();
     const h = await startGateway({ requireTls: true, secureContext: () => secureContext, tlsHandshakeTimeoutMs: 200 });
     const c = await Client.connect(h.port);
     const greeting = await c.next();
@@ -425,7 +522,7 @@ describe('the gateway in front of a database', () => {
     await h.close();
   });
 
-  it('does not ask an unprotected database for its public key, unless the operator allowed it or the way is a tunnel', async () => {
+  it('does not ask an unprotected database for its public key, unless the network is trusted or the way is a tunnel', async () => {
     const loginThrough = async (target: Partial<BackendTarget>) => {
       const h = await startGateway({ db: new StandInDatabase(true), target });
       const c = await Client.connect(h.port);
@@ -442,10 +539,35 @@ describe('the gateway in front of a database', () => {
     expect(refused.reply?.payload.subarray(9).toString()).toMatch(/^The gateway could not log in to the database \(reference [0-9a-f]{6}\)\./);
     expect(String((refused.errors[0]?.error as Error)?.message)).toMatch(/full password check over an unencrypted connection/);
     // On a network the operator called private, or inside an SSH tunnel
-    for (const target of [{ allowServerPublicKey: true }, { tunnelled: true }]) {
+    for (const target of [{ trustNetwork: true }, { protected: true }]) {
       const allowed = await loginThrough(target);
       expect(allowed.reply?.payload[0]).toBe(0x00);
       expect(allowed.answers).toEqual(['asked for the public key', 'the password RSA-encrypted']);
+    }
+  });
+
+  it('gives the password inside TLS only to a database whose certificate was checked, or on a network the operator trusts', async () => {
+    const secureContext = selfSigned();
+    const loginThrough = async (target: Partial<BackendTarget>) => {
+      const h = await startGateway({ db: new TlsFullAuthDatabase(secureContext), target });
+      const c = await Client.connect(h.port);
+      const reply = await c.login('ali', PASSWORD);
+      const out = { reply, answers: [...h.db.authReplies], errors: [...h.errors] };
+      c.destroy();
+      await h.close();
+      return out;
+    };
+    // Encrypted, but nobody checked who is at the other end: a machine on the way ends the TLS and reads it
+    const unverified = { tls: { rejectUnauthorized: false } };
+    const refused = await loginThrough(unverified);
+    expect(refused.answers).toEqual([]);
+    expect(refused.reply?.payload[0]).toBe(0xff);
+    expect(String((refused.errors[0]?.error as Error)?.message)).toMatch(/inside TLS whose certificate is not checked/);
+    // With the certificate checked against a CA, or inside an SSH tunnel; or on a network the operator called private
+    for (const target of [{ ...unverified, protected: true }, { ...unverified, trustNetwork: true }]) {
+      const allowed = await loginThrough(target);
+      expect(allowed.reply?.payload[0]).toBe(0x00);
+      expect(allowed.answers).toEqual(['the password as it is']);
     }
   });
 
@@ -488,18 +610,20 @@ describe('the gateway in front of a database', () => {
     await h.close();
   });
 
-  it('greets every client with the version it was given, not with the database\'s', async () => {
-    const fixed = await startGateway({ advertisedVersion: '8.0.40' });
-    (await loggedIn(fixed.port)).destroy();
-    const greeted = await Client.connect(fixed.port);
-    expect((await greeted.next())?.payload.includes('stand-in')).toBe(false);
+  it('greets every client with a version of its own, never with the database\'s', async () => {
+    // Clients get the greeting before they log in: the database's version is not for them
+    const set = await startGateway({ advertisedVersion: '8.0.40' });
+    (await loggedIn(set.port)).destroy();
+    const greeted = await Client.connect(set.port);
+    expect((await greeted.next())?.payload.includes('8.0.40\0')).toBe(true);
     greeted.destroy();
-    await fixed.close();
-    // Without the setting, as before: the version the last database reported
+    await set.close();
     const own = await startGateway();
     (await loggedIn(own.port)).destroy();
     const again = await Client.connect(own.port);
-    expect((await again.next())?.payload.includes('stand-in')).toBe(true);
+    const greeting = (await again.next())?.payload.toString('latin1') ?? '';
+    expect(greeting.includes('stand-in')).toBe(false);
+    expect(greeting.includes('8.0.40\0')).toBe(true);
     again.destroy();
     await own.close();
   });
@@ -531,9 +655,98 @@ describe('the gateway in front of a database', () => {
     await h.close();
   });
 
+  it('logs what a session sends in the character set it uses, and follows a change of it', async () => {
+    const h = await startGateway();
+    const c = await Client.connect(h.port);
+    // 8 is latin1
+    expect((await c.login('ali', PASSWORD, undefined, 8)).payload[0]).toBe(0x00);
+    // SELECT 'caf<e9>': "café" in latin1
+    c.send(0, queryBytes(Buffer.from("SELECT 'caf\xe9'", 'latin1')));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    c.send(0, query('SET NAMES gbk'));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    // SELECT '<d6 d0>': "中" in gbk
+    c.send(0, queryBytes(Buffer.from("SELECT '\xd6\xd0'", 'latin1')));
+    expect((await c.next())?.payload[0]).toBe(0x00);
+    expect(h.log.map((l) => l.sql)).toEqual(["SELECT 'café'", 'SET NAMES gbk', "SELECT '中'"]);
+    c.destroy();
+    await h.close();
+  });
+
   it('counts failed logins per IPv6 block, and per address for IPv4', () => {
     expect(failureKey('203.0.113.7')).toBe('203.0.113.7');
     expect(failureKey('2001:db8:1:2:3:4:5:6')).toBe('2001:db8:1:2');
     expect(failureKey('2001:DB8:1:2::7')).toBe(failureKey('2001:db8:1:2:ffff::1'));
+  });
+
+  it('does not let parallel attempts get more guesses into a window than the address is allowed', async () => {
+    const h = await startGateway();
+    for (let i = 0; i < 5; i++) {
+      const c = await Client.connect(h.port);
+      await c.login('ali', 'wrong');
+      c.destroy();
+    }
+    expect(h.guesses).toHaveLength(5);
+    // 30 at once. The limit is 10 failures per 15 minutes, and logins in progress count towards it, so at most
+    // 15 more are checked (before: all 20 that the address may have open went through, 25 in all)
+    const clients = await Promise.all(Array.from({ length: 30 }, () => Client.connect(h.port)));
+    await Promise.all(clients.map((c) => c.login('ali', 'wrong')));
+    clients.forEach((c) => c.destroy());
+    expect(h.guesses.length).toBeLessThanOrEqual(20);
+    await h.close();
+  });
+
+  it('logs the database a login picks, and the commands that change a session', async () => {
+    const h = await startGateway();
+    const c = await Client.connect(h.port);
+    expect((await c.login('ali', PASSWORD, 'reports')).payload[0]).toBe(0x00);
+    // The access's own database is "shop": another one is a change of session, like USE
+    expect(h.log).toEqual([{ kind: 'USE', sql: 'USE reports' }]);
+    const commands: { payload: Buffer; text: string; answered?: boolean }[] = [
+      { payload: Buffer.from([COM.RESET_CONNECTION]), text: 'RESET CONNECTION' },
+      { payload: Buffer.from([COM.SET_OPTION, 1, 0]), text: 'SET OPTION multi statements on' },
+      { payload: Buffer.from([COM.PROCESS_KILL, 7, 0, 0, 0]), text: 'KILL CONNECTION 7' },
+      // The database does not answer this one
+      { payload: Buffer.concat([Buffer.from([COM.STMT_SEND_LONG_DATA, 1, 0, 0, 0, 0, 0]), Buffer.from('data')]), text: 'SEND LONG DATA (4 bytes)', answered: false },
+    ];
+    for (const { payload, answered = true } of commands) {
+      c.send(0, payload);
+      if (answered) expect((await c.next())?.payload[0]).toBe(0x00);
+    }
+    await until(() => h.log.length >= 5);
+    expect(h.log.slice(1)).toEqual(commands.map(({ text }) => ({ kind: 'COMMAND', sql: text })));
+    c.destroy();
+    await h.close();
+  });
+
+  it('ends a session that keeps sending what is not allowed', async () => {
+    const h = await startGateway();
+    const a = await loggedIn(h.port);
+    // A hundred at once: the database never sees them, so nothing slows them down but the gateway
+    a.socket.write(Buffer.concat(Array.from({ length: 100 }, (_, i) => encodePacket(0, Buffer.from([COM.CHANGE_USER, i])))));
+    a.socket.end();
+    await a.closed;
+    expect(h.log.filter((l) => l.kind === 'BLOCKED')).toHaveLength(100);
+    expect(h.log.every((l) => l.kind === 'BLOCKED')).toBe(true);
+    expect(h.ended).toEqual(['session-1']);
+    expect(h.db.commands).toEqual([]);
+    await h.close();
+  });
+
+  it('counts the commands the database does not answer past two thousand, instead of logging each', async () => {
+    const h = await startGateway();
+    const a = await loggedIn(h.port);
+    const data = Buffer.concat([Buffer.from([COM.STMT_SEND_LONG_DATA, 1, 0, 0, 0, 0, 0]), Buffer.from('x')]);
+    const packets = Array.from({ length: 2100 }, (_, n) => encodePacket(n % 256, data));
+    for (let i = 0; i < packets.length; i += 100) a.socket.write(Buffer.concat(packets.slice(i, i + 100)));
+    // Every one of them has passed the gateway once the database has them all
+    await until(() => h.db.commands.length >= 2100);
+    expect(h.log).toHaveLength(2000);
+    // What was counted and not logged is said once, when the session ends
+    a.destroy();
+    await until(() => h.ended.length === 1);
+    expect(h.log.slice(0, 2000).every((l) => l.kind === 'COMMAND')).toBe(true);
+    expect(h.log[2000]).toEqual({ kind: 'COMMAND', sql: '(100 more commands of this kind, not logged one by one)' });
+    await h.close();
   });
 });

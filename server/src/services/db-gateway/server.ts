@@ -2,12 +2,14 @@ import net from 'net';
 import tls from 'tls';
 import crypto from 'crypto';
 import type { Duplex } from 'stream';
+import type { TextDecoder } from 'util';
 import type { Packet } from './protocol';
 import { PacketChannel } from './channel';
 import { BackendError, loginBackend } from './backend';
 import {
-  BLOCKED_COMMANDS, CLIENT, COM, GATEWAY_CAPS, MAX_PAYLOAD, PacketSplitter, buildAuthSwitch, buildErr,
-  buildGreeting, checkNative, checkSha2, encodePacket, executeText, newScramble, parseHandshakeResponse,
+  BLOCKED_COMMANDS, CLIENT, COM, GATEWAY_CAPS, LOGGED_COMMANDS, MAX_PAYLOAD, PacketSplitter, buildAuthSwitch, buildErr,
+  buildGreeting, checkNative, checkSha2, commandText, encodePacket, executeText, newScramble, parseHandshakeResponse,
+  readStatement, statementDecoder,
 } from './protocol';
 
 /** A person's access, as the gateway needs it to let them in */
@@ -29,15 +31,15 @@ export interface BackendTarget {
   user: string;
   password: string;
   tls?: tls.ConnectionOptions;
-  /** The socket runs inside an SSH tunnel, which protects the way to the database without TLS */
-  tunnelled?: boolean;
-  /** Ask an unprotected database for its public key (DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY) */
-  allowServerPublicKey?: boolean;
+  /** The database is vouched for: its TLS certificate is checked against a CA, or the socket runs inside an SSH tunnel */
+  protected?: boolean;
+  /** The operator says the network to the database is private (DB_GATEWAY_TRUST_PRIVATE_NETWORK) */
+  trustNetwork?: boolean;
   /** Called once the session ends (e.g. to give back an SSH tunnel) */
   release(): void;
 }
 
-export type QueryKind = 'QUERY' | 'PREPARE' | 'EXECUTE' | 'USE' | 'BLOCKED';
+export type QueryKind = 'QUERY' | 'PREPARE' | 'EXECUTE' | 'COMMAND' | 'USE' | 'BLOCKED';
 
 export interface SessionInfo {
   accountId: string;
@@ -68,7 +70,7 @@ export interface GatewayOptions {
   maxConnections?: number;
   /** How long a client may take over its TLS handshake (default 10 seconds) */
   tlsHandshakeTimeoutMs?: number;
-  /** The version to greet clients with, always (DB_GATEWAY_ADVERTISED_VERSION). Unset: the database's own */
+  /** The version to greet clients with (DB_GATEWAY_ADVERTISED_VERSION). The database's own version is never used: it is told before the login */
   advertisedVersion?: string;
   hooks: GatewayHooks;
 }
@@ -96,10 +98,16 @@ const DEFAULT_MAX_CONNECTIONS = 500;
 const DEFAULT_TLS_HANDSHAKE_MS = 10_000;
 /** Login names are at most 32 characters when made; a longer one is refused without a lookup */
 const MAX_USERNAME = 64;
-/** The most addresses kept track of for failed logins (the oldest go first) */
+  /** The most addresses kept track of for failed logins (the oldest go first) */
 const MAX_TRACKED_ADDRESSES = 10_000;
+/** The version every client is greeted with unless one is set (DB_GATEWAY_ADVERTISED_VERSION) */
+export const DEFAULT_ADVERTISED_VERSION = '8.0.40';
 /** What a database behind the gateway would let a person do to the database user behind their own access */
 const OWN_PASSWORD_RE = /^\s*(SET\s+PASSWORD\b|ALTER\s+USER\s+(USER\s*\(\s*\)|CURRENT_USER\b)|RENAME\s+USER\s+(USER\s*\(\s*\)|CURRENT_USER\b))/i;
+/** Commands the gateway refuses that a session may send before it is ended. A client that means no harm sends none */
+const MAX_REFUSED_PER_SESSION = 100;
+/** How many of a session's commands that are not queries are logged one by one. Past that they are counted */
+const MAX_LOGGED_COMMANDS = 2000;
 
 /**
  * The address failed logins are counted for. For IPv6 that is the /64: one machine can otherwise use
@@ -123,8 +131,8 @@ export class GatewayServer {
   private sessions = new Map<number, Session>();
   private nextId = 1000 + Math.floor(Math.random() * 1000);
   private failures = new Map<string, number[]>();
-  /** The version clients are greeted with: the database's own (the last one reported), or the one set */
-  private serverVersion = '8.0.40';
+  /** The version every client is greeted with. Never the database's own: clients get it before they log in */
+  private readonly serverVersion: string;
   /** Connections not logged in yet: they hold no session, so stop() ends them itself */
   private pending = new Set<net.Socket>();
   /** Logins in progress, per address */
@@ -136,7 +144,7 @@ export class GatewayServer {
   private closeReasons = new Map<string, string>();
 
   constructor(private readonly o: GatewayOptions) {
-    if (o.advertisedVersion) this.serverVersion = o.advertisedVersion;
+    this.serverVersion = o.advertisedVersion ?? DEFAULT_ADVERTISED_VERSION;
   }
 
   /**
@@ -229,7 +237,8 @@ export class GatewayServer {
     const now = Date.now();
     const recent = (this.failures.get(key) ?? []).filter((t) => now - t < FAILURE_WINDOW_MS);
     this.failures.set(key, recent);
-    return recent.length >= MAX_FAILURES;
+    // Logins still in progress count too: 20 parallel attempts would otherwise all get their guess in past the limit of 10
+    return recent.length >= MAX_FAILURES || recent.length + (this.logins.get(key) ?? 0) > MAX_LOGINS_PER_ADDRESS;
   }
 
   private failed(key: string): void {
@@ -403,8 +412,8 @@ export class GatewayServer {
             charset: hello.charset,
             maxPacket: hello.maxPacket,
             tls: target.tls,
-            tunnelled: target.tunnelled,
-            allowServerPublicKey: target.allowServerPublicKey,
+            protected: target.protected,
+            trustNetwork: target.trustNetwork,
             attrs: {
               _client_name: 'DbBackup gateway',
               program_name: `dbbackup-gateway (${account.username})`,
@@ -421,7 +430,6 @@ export class GatewayServer {
             ? be.message
             : `The gateway could not log in to the database (reference ${reference}). Tell whoever gave you this access.`);
         }
-        if (!this.o.advertisedVersion) this.serverVersion = backend.serverVersion.slice(0, 64);
 
         // The access may have been turned off, changed or removed while the database was logging in: then there is no session
         let sessionId = '';
@@ -436,13 +444,16 @@ export class GatewayServer {
           target.release();
           return refuse(ER_ACCESS_DENIED, '28000', `${why}: connect again`);
         }
+        // A database other than the access's own, picked in the login packet, is a change of session like any other
+        const database = hello.database || account.database;
+        if (database !== account.database) this.o.hooks.query(sessionId, account.id, 'USE', `USE ${database}`);
 
         send(backend.ok);
         const clientLeft = ch.detach();
         // From here on the session ends this connection itself
         this.pending.delete(sock);
         this.relay({
-          gatewayId, sessionId, account, client: stream, backend: backend.stream, backendThreadId: backend.threadId,
+          gatewayId, sessionId, account, charset: hello.charset, client: stream, backend: backend.stream, backendThreadId: backend.threadId,
           clientLeft, backendLeft: backend.leftover, release: target.release,
         });
       } finally {
@@ -458,16 +469,22 @@ export class GatewayServer {
   }
 
   private relay(r: {
-    gatewayId: number; sessionId: string; account: GatewayAccount; client: Duplex; backend: Duplex;
+    gatewayId: number; sessionId: string; account: GatewayAccount; charset: number; client: Duplex; backend: Duplex;
     backendThreadId: number; clientLeft: Buffer; backendLeft: Buffer; release(): void;
   }): void {
     const { client, backend, account, sessionId } = r;
     const stats = { bytesIn: 0, bytesOut: 0, queries: 0, error: null as string | null };
     let closed = false;
+    // What the session sent of what the gateway refuses, and of the commands logged one by one
+    let refused = 0;
+    let commands = 0;
     const close = (reason?: string) => {
       if (closed) return;
       closed = true;
       this.sessions.delete(r.gatewayId);
+      if (commands > MAX_LOGGED_COMMANDS) {
+        this.o.hooks.query(sessionId, account.id, 'COMMAND', `(${commands - MAX_LOGGED_COMMANDS} more commands of this kind, not logged one by one)`);
+      }
       if (reason) {
         stats.error = reason;
         // Tell the client why, if it is waiting for an answer
@@ -496,6 +513,8 @@ export class GatewayServer {
 
     // Client → database: packet by packet, so commands can be logged and some refused
     const splitter = new PacketSplitter();
+    // Reads statement text in the character set the session uses
+    let decode = statementDecoder(r.charset);
     // The last packet passed on was a full 16 MiB part: the next packet with the next number continues it
     let continuing = false;
     let lastSeq = 0;
@@ -532,33 +551,47 @@ export class GatewayServer {
       // Every other packet may start a command at the database, whatever its number (after long data the
       // database answers nothing, so the next command does not start at 0): it gets the same checks
       const cmd = p.payload[0];
-      if (BLOCKED_COMMANDS.has(cmd)) {
-        this.o.hooks.query(sessionId, account.id, 'BLOCKED', `(protocol command 0x${cmd.toString(16)})`);
-        client.write(encodePacket(1, buildErr(1227, '42000', 'The DbBackup gateway does not allow this command')));
+      let sql: string | null = null;
+      let decodeNext: TextDecoder | undefined;
+      if (cmd === COM.QUERY) {
+        const read = readStatement(p.payload.subarray(1), decode);
+        sql = read.sql;
+        decodeNext = read.next;
+      }
+      // Never passed on: another login, replication, server control, and a new password for the database user
+      // behind the access (it would lock the person out until it is made again)
+      const ownPassword = sql !== null && OWN_PASSWORD_RE.test(sql);
+      if (BLOCKED_COMMANDS.has(cmd) || ownPassword) {
+        refused++;
+        this.o.hooks.query(sessionId, account.id, 'BLOCKED', ownPassword && sql !== null ? sql : `(protocol command 0x${cmd.toString(16)})`);
+        // A client that keeps sending what is not allowed is not answered a hundred times: its session ends.
+        // (The database never sees these, so its own limits do not slow them down)
+        if (refused >= MAX_REFUSED_PER_SESSION) return close('Too many commands that the gateway does not allow in this session');
+        client.write(encodePacket(1, buildErr(1227, '42000', ownPassword
+          ? 'The DbBackup gateway does not allow changing the password of this access'
+          : 'The DbBackup gateway does not allow this command')));
         return;
       }
+      if (decodeNext) decode = decodeNext;
       let payload = p.payload;
       if (cmd === COM.QUERY) {
-        const sql = payload.subarray(1).toString('utf8');
         stats.queries++;
-        // A new password for the database user behind the access would lock the person out until it is made again
-        if (OWN_PASSWORD_RE.test(sql)) {
-          this.o.hooks.query(sessionId, account.id, 'BLOCKED', sql);
-          client.write(encodePacket(1, buildErr(1227, '42000', 'The DbBackup gateway does not allow changing the password of this access')));
-          return;
-        }
-        const killed = this.rewriteKill(sql, account.id);
+        const killed = this.rewriteKill(sql!, account.id);
         if (killed) payload = Buffer.concat([Buffer.from([COM.QUERY]), Buffer.from(killed, 'utf8')]);
-        this.o.hooks.query(sessionId, account.id, 'QUERY', sql);
+        this.o.hooks.query(sessionId, account.id, 'QUERY', sql!);
       } else if (cmd === COM.STMT_PREPARE) {
         stats.queries++;
-        this.o.hooks.query(sessionId, account.id, 'PREPARE', payload.subarray(1).toString('utf8'));
+        this.o.hooks.query(sessionId, account.id, 'PREPARE', decode.decode(payload.subarray(1)));
       } else if (cmd === COM.STMT_EXECUTE) {
         // With the values sent, so that what was written can be seen as well as what was prepared
         stats.queries++;
         this.o.hooks.query(sessionId, account.id, 'EXECUTE', executeText(payload));
+      } else if (LOGGED_COMMANDS.has(cmd)) {
+        // The database does not always answer these, so they alone could fill the log: past a number they are counted
+        stats.queries++;
+        if (++commands <= MAX_LOGGED_COMMANDS) this.o.hooks.query(sessionId, account.id, 'COMMAND', commandText(cmd, payload));
       } else if (cmd === COM.INIT_DB) {
-        this.o.hooks.query(sessionId, account.id, 'USE', `USE ${payload.subarray(1).toString('utf8')}`);
+        this.o.hooks.query(sessionId, account.id, 'USE', `USE ${decode.decode(payload.subarray(1))}`);
       } else if (cmd === COM.PROCESS_KILL && payload.length >= 5) {
         const target = this.backendThread(payload.readUInt32LE(1), account.id);
         if (target !== null) {

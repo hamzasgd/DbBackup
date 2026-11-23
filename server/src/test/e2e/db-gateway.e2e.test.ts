@@ -63,7 +63,7 @@ describe.skipIf(!MARIADB)('Database gateway (MySQL protocol)', () => {
           const socket = net.connect(Number(MARIADB!.port), MARIADB!.hostname);
           await new Promise((r, j) => { socket.once('connect', r); socket.once('error', j); });
           // As the service does when told the network is private: this database is reached without TLS or a tunnel
-          return { socket, user: backendUser, password: backendPassword, allowServerPublicKey: true, release: () => {} };
+          return { socket, user: backendUser, password: backendPassword, trustNetwork: true, release: () => {} };
         },
         sessionStarted: async () => uniq('s'),
         query: (_s, _a, kind, sql) => { log.push({ kind, sql }); },

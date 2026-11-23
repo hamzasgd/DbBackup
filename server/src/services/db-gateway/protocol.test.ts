@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CLIENT, COM, MAX_LOGGED_SQL, Packet, PacketSplitter, buildGreeting, checkNative, checkSha2, encodePacket, executeText,
-  logText, nativeToken, newScramble, parseHandshakeResponse, passwordHashes, randomPassword, sha2Token, lenencBytes,
+  CLIENT, COM, LOGGED_COMMANDS, MAX_LOGGED_SQL, Packet, PacketSplitter, buildGreeting, checkNative, checkSha2, commandText,
+  encodePacket, executeText, logText, nativeToken, newScramble, parseHandshakeResponse, passwordHashes, randomPassword,
+  readStatement, shellQuote, sha2Token, statementDecoder, lenencBytes,
 } from './protocol';
 import { grantStatements, normalizePrivileges, onlyReads, PRESETS, WRITE_PRIVILEGES } from './provision';
 import { gatewayConfig } from './gateway.service';
@@ -109,16 +110,63 @@ describe('gateway settings', () => {
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '1200.7' }).maxConnections).toBe(1200);
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '0' }).maxConnections).toBe(500);
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '99999999' }).maxConnections).toBe(5000);
-    // The database's public key is not asked for over an unprotected line unless said so; the version is the database's own
-    const off = gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY: 'yes' });
-    expect(off.allowServerPublicKey).toBe(false);
-    expect(off.advertisedVersion).toBeNull();
-    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_ALLOW_SERVER_PUBLIC_KEY: 'true', DB_GATEWAY_ADVERTISED_VERSION: ' 8.0.40 ' }))
-      .toMatchObject({ allowServerPublicKey: true, advertisedVersion: '8.0.40' });
+    // The password does not go to a database that is not vouched for unless the network is called private; the
+    // version is the gateway's own; the log has a size
+    const off = gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_TRUST_PRIVATE_NETWORK: 'yes' });
+    expect(off.trustNetwork).toBe(false);
+    expect(off.advertisedVersion).toBe('8.0.40');
+    expect(off.logMaxBytes).toBe(1000 * 1024 * 1024);
+    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_TRUST_PRIVATE_NETWORK: 'true', DB_GATEWAY_ADVERTISED_VERSION: ' 5.5.5-10.11-MariaDB ' }))
+      .toMatchObject({ trustNetwork: true, advertisedVersion: '5.5.5-10.11-MariaDB' });
+    expect(gatewayConfig({ DB_GATEWAY_LOG_MAX_MB: '0' }).logMaxBytes).toBe(0);
+    expect(gatewayConfig({ DB_GATEWAY_LOG_MAX_MB: '250' }).logMaxBytes).toBe(250 * 1024 * 1024);
+    expect(gatewayConfig({ DB_GATEWAY_LOG_MAX_MB: '-5' }).logMaxBytes).toBe(1000 * 1024 * 1024);
   });
 });
 
 describe('the log and the grants', () => {
+  it('names the commands that change a session', () => {
+    expect(commandText(COM.PROCESS_KILL, Buffer.from([COM.PROCESS_KILL, 7, 0, 0, 0]))).toBe('KILL CONNECTION 7');
+    expect(commandText(COM.SET_OPTION, Buffer.from([COM.SET_OPTION, 0, 0]))).toBe('SET OPTION multi statements off');
+    expect(commandText(COM.RESET_CONNECTION, Buffer.from([COM.RESET_CONNECTION]))).toBe('RESET CONNECTION');
+    expect(commandText(COM.STMT_SEND_LONG_DATA, Buffer.concat([Buffer.from([COM.STMT_SEND_LONG_DATA, 1, 0, 0, 0, 0, 0]), Buffer.from('abcd')])))
+      .toBe('SEND LONG DATA (4 bytes)');
+    expect(commandText(COM.STMT_RESET, Buffer.from([COM.STMT_RESET, 1, 0, 0, 0]))).toBe('RESET STATEMENT');
+    expect(LOGGED_COMMANDS.has(COM.PING)).toBe(false);
+  });
+
+  it('reads a statement in the character set the session uses, and follows a change of it', () => {
+    // 45 is utf8mb4, 8 latin1
+    const utf8 = statementDecoder(45);
+    const latin1 = statementDecoder(8);
+    expect(utf8.encoding).toBe('utf-8');
+    expect(latin1.encoding).toBe('windows-1252');
+    // caf<e9>: "café" in latin1, a broken character in UTF-8
+    const cafe = Buffer.from([0x63, 0x61, 0x66, 0xe9]);
+    expect(readStatement(cafe, utf8).sql).not.toBe('café');
+    expect(readStatement(cafe, latin1)).toEqual({ sql: 'café' });
+
+    // The statement that changes the character set says so for what follows
+    const toLatin1 = readStatement(Buffer.from('SET NAMES latin1'), utf8);
+    expect(toLatin1.sql).toBe('SET NAMES latin1');
+    expect(toLatin1.next?.encoding).toBe('windows-1252');
+    for (const sql of ['set session character_set_client = gbk', 'SET CHARACTER SET big5', "SET NAMES 'sjis'", 'SET @@session.charset = euckr']) {
+      expect(readStatement(Buffer.from(sql), utf8).next?.encoding, sql).toBeTruthy();
+    }
+    // Already in it, or something else (DEFAULT, a name not known here): nothing to change
+    expect(readStatement(Buffer.from('SET NAMES latin1'), latin1).next).toBeUndefined();
+    expect(readStatement(Buffer.from('SET NAMES DEFAULT'), utf8).next).toBeUndefined();
+    expect(readStatement(Buffer.from('SET NAMES klingon'), utf8).next).toBeUndefined();
+    expect(readStatement(Buffer.from("SELECT 'SET NAMES gbk' AS s"), utf8).next).toBeUndefined();
+  });
+
+  it('quotes a value for a shell as it is', () => {
+    expect(shellQuote('shop')).toBe("'shop'");
+    expect(shellQuote("a'b")).toBe("'a'\\''b'");
+    expect(shellQuote('x; rm -rf ~')).toBe("'x; rm -rf ~'");
+    expect(shellQuote('$(whoami)`id`')).toBe("'$(whoami)`id`'");
+  });
+
   it('keeps a statement visible behind long comments, and keeps long statements short', () => {
     expect(logText('-- for ticket 1234\nDELETE FROM t')).toBe('-- for ticket 1234\nDELETE FROM t');
     expect(logText(`-- ${'x'.repeat(5000)}\nDELETE FROM t`)).toMatch(/^\/\* \d+ characters of comments left out \*\/ DELETE FROM t$/);

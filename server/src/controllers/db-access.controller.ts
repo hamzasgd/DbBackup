@@ -6,7 +6,7 @@ import { AuthRequest } from '../middleware/auth.middleware';
 import { logAuditReq } from '../services/audit.service';
 import { encrypt } from '../services/crypto.service';
 import { toEngineConfig } from '../services/engines/connection-config';
-import { passwordHashes, randomPassword } from '../services/db-gateway/protocol';
+import { passwordHashes, randomPassword, shellQuote } from '../services/db-gateway/protocol';
 import {
   PRESETS, ProvisionError, createBackendUser, dropBackendUser, listTables, normalizePrivileges, onlyReads,
   updateBackendUser, DATABASE_PRIVILEGES, TABLE_PRIVILEGES,
@@ -49,7 +49,9 @@ function clientSettings(a: { username: string; database: string }, password?: st
     database: a.database,
     ssl: s.requireTls ? 'REQUIRED' : 'PREFERRED',
     url: `mysql://${encodeURIComponent(a.username)}:${encodeURIComponent(pw)}@${host}:${port}/${encodeURIComponent(a.database)}?ssl-mode=REQUIRED`,
-    command: `mysql -h ${host} -P ${port} -u ${a.username} -p --ssl-mode=REQUIRED ${a.database}`,
+    // The database's name is quoted: it is whatever was typed (or came with an imported connection), and
+    // this line is pasted into a shell
+    command: `mysql -h ${host} -P ${port} -u ${a.username} -p --ssl-mode=REQUIRED ${shellQuote(a.database)}`,
   };
 }
 
@@ -246,10 +248,15 @@ export async function deleteAccess(req: AuthRequest, res: Response, next: NextFu
 export async function listAccessSessions(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   try {
     const a = await ownAccess(req);
-    const sessions = await prisma.dbAccessSession.findMany({ where: { accessId: a.id }, orderBy: { startedAt: 'desc' }, take: 50 });
+    // The newest `limit` sessions (the page can ask for more); `total` says how many there are
+    const limit = Math.min(1000, Math.max(1, parseInt(String(req.query.limit ?? '50'), 10) || 50));
+    const [rows, total] = await prisma.$transaction([
+      prisma.dbAccessSession.findMany({ where: { accessId: a.id }, orderBy: { startedAt: 'desc' }, take: limit }),
+      prisma.dbAccessSession.count({ where: { accessId: a.id } }),
+    ]);
     res.json({
       success: true,
-      data: { sessions: sessions.map((s) => ({ ...s, bytesIn: Number(s.bytesIn), bytesOut: Number(s.bytesOut) })) },
+      data: { sessions: rows.map((s) => ({ ...s, bytesIn: Number(s.bytesIn), bytesOut: Number(s.bytesOut) })), total },
     });
   } catch (err) { next(err); }
 }
