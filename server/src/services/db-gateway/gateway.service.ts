@@ -10,7 +10,7 @@ import { nodeTlsOptions } from '../engines/tls';
 import type { ConnectionConfig } from '../engines/base.engine';
 import { SSHTunnel } from '../ssh.service';
 import { sanitizeForLog } from '../../utils/sanitize';
-import { BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './server';
+import { AccessUnavailable, BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './server';
 
 /**
  * Settings (server/.env):
@@ -21,6 +21,7 @@ import { BackendTarget, GatewayAccount, GatewayServer, QueryKind } from './serve
  *   DB_GATEWAY_TLS_KEY       its private key
  *   DB_GATEWAY_REQUIRE_TLS   "false" allows unencrypted clients (only for a private network)
  *   DB_GATEWAY_LOG_DAYS      days to keep the query log (default 30)
+ *   DB_GATEWAY_MAX_CONNECTIONS  the most connections at once, logged in or not (default 500)
  */
 export interface GatewayConfig {
   port: number | null;
@@ -30,6 +31,7 @@ export interface GatewayConfig {
   keyFile: string | null;
   requireTls: boolean;
   logDays: number;
+  maxConnections: number;
 }
 
 export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConfig {
@@ -46,6 +48,8 @@ export function gatewayConfig(env: NodeJS.ProcessEnv = process.env): GatewayConf
     keyFile: env.DB_GATEWAY_TLS_KEY?.trim() || null,
     requireTls: env.DB_GATEWAY_REQUIRE_TLS !== 'false',
     logDays: Math.max(1, Number(env.DB_GATEWAY_LOG_DAYS) || 30),
+    // The gateway shares its process with the rest of DbBackup, so this stays well below a usual file descriptor limit
+    maxConnections: Math.min(5000, Math.max(1, Math.floor(Number(env.DB_GATEWAY_MAX_CONNECTIONS)) || 500)),
   };
 }
 
@@ -185,9 +189,22 @@ function toAccount(a: {
   };
 }
 
+/** The access behind a login name. There is none for an owner who is suspended: the gateway is no way around that */
+export async function findAccess(username: string): Promise<GatewayAccount | null> {
+  const a = await prisma.dbAccess.findUnique({ where: { username }, include: { user: { select: { isActive: true } } } });
+  return a && a.user.isActive ? toAccount(a) : null;
+}
+
 async function openBackend(account: GatewayAccount): Promise<BackendTarget> {
-  const access = await prisma.dbAccess.findUnique({ where: { id: account.id }, include: { connection: true } });
-  if (!access) throw new Error('this access was removed');
+  const access = await prisma.dbAccess.findUnique({
+    where: { id: account.id }, include: { connection: true, user: { select: { isActive: true } } },
+  });
+  // Read again here: the access, its password or its owner may have changed since the login check a moment ago
+  if (!access) throw new AccessUnavailable('The access was removed');
+  if (!access.user.isActive) throw new AccessUnavailable('The account that gave this access was suspended');
+  if (!access.enabled) throw new AccessUnavailable(`Access for '${access.username}' is turned off`);
+  if (access.expiresAt && access.expiresAt.getTime() <= Date.now()) throw new AccessUnavailable(`Access for '${access.username}' has expired`);
+  if (access.hashNative !== account.hashNative || access.hashSha2 !== account.hashSha2) throw new AccessUnavailable('The password was changed');
   const config = toEngineConfig(access.connection);
   const password = decrypt(access.backendPassword);
   const tlsOptions = config.sslEnabled ? (nodeTlsOptions(config, 'pg') as tls.ConnectionOptions) : undefined;
@@ -236,12 +253,10 @@ export async function startDbGateway(): Promise<void> {
     port: cfg.port,
     host: cfg.bind,
     requireTls: cfg.requireTls,
+    maxConnections: cfg.maxConnections,
     secureContext: () => loadTls(cfg),
     hooks: {
-      findAccount: async (username) => {
-        const a = await prisma.dbAccess.findUnique({ where: { username } });
-        return a ? toAccount(a) : null;
-      },
+      findAccount: findAccess,
       openBackend,
       sessionStarted: async (info) => {
         const s = await prisma.dbAccessSession.create({
@@ -262,7 +277,7 @@ export async function startDbGateway(): Promise<void> {
         })).catch(() => {});
       },
       loginFailed: (username, ip, reason) => {
-        logger.warn(`DB gateway: login refused for ${sanitizeForLog(username)} from ${ip} (${reason})`);
+        logger.warn(`DB gateway: login refused for ${sanitizeForLog(username).slice(0, 64)} from ${ip} (${reason})`);
       },
     },
   });
@@ -277,18 +292,30 @@ export async function startDbGateway(): Promise<void> {
   status.running = true;
   logger.info(`🔌 DB gateway listening on ${cfg.bind}:${cfg.port}${cfg.requireTls ? ' (TLS required)' : ''}`);
 
-  // End sessions once their access expires; keep the log to its length
-  const expiry = setInterval(() => {
-    void (async () => {
-      const expired = await prisma.dbAccess.findMany({ where: { expiresAt: { lte: new Date() } }, select: { id: true } });
-      for (const a of expired) gateway?.closeAccount(a.id, 'Access has expired');
-    })().catch(() => {});
-  }, 30_000);
+  // End sessions whose access ran out; keep the log to its length
+  const sweep = setInterval(() => { void sweepSessions().catch(() => {}); }, 30_000);
   const prune = setInterval(() => void pruneLog(cfg.logDays), 6 * 3600_000);
-  expiry.unref();
+  sweep.unref();
   prune.unref();
-  timers = [expiry, prune];
+  timers = [sweep, prune];
   void pruneLog(cfg.logDays);
+}
+
+/**
+ * Ends the sessions of accesses that can no longer be used: expired, turned off or removed without the page
+ * (for example with their connection), or whose owner was suspended.
+ */
+async function sweepSessions(): Promise<void> {
+  const open = gateway?.openAccounts() ?? [];
+  if (!open.length) return;
+  const usable = new Set((await prisma.dbAccess.findMany({
+    where: {
+      id: { in: open }, enabled: true, user: { isActive: true },
+      OR: [{ expiresAt: null }, { expiresAt: { gt: new Date() } }],
+    },
+    select: { id: true },
+  })).map((a) => a.id));
+  for (const id of open) if (!usable.has(id)) gateway?.closeAccount(id, 'The access was turned off, expired or removed');
 }
 
 async function pruneLog(days: number): Promise<void> {
@@ -322,6 +349,12 @@ export function getGatewayStatus(): GatewayStatus {
 
 export function closeAccessSessions(accessId: string, reason: string): number {
   return gateway?.closeAccount(accessId, reason) ?? 0;
+}
+
+/** End the sessions of everything a user gave access to (the account was suspended) */
+export async function closeUserAccessSessions(userId: string, reason: string): Promise<void> {
+  const accesses = await prisma.dbAccess.findMany({ where: { userId }, select: { id: true } });
+  for (const a of accesses) closeAccessSessions(a.id, reason);
 }
 
 export function closeGatewaySession(sessionId: string, reason: string): boolean {

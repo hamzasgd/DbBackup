@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import {
-  CLIENT, PacketSplitter, buildGreeting, checkNative, checkSha2, encodePacket, nativeToken, newScramble,
+  CLIENT, Packet, PacketSplitter, buildGreeting, checkNative, checkSha2, encodePacket, nativeToken, newScramble,
   parseHandshakeResponse, passwordHashes, randomPassword, sha2Token, lenencBytes,
 } from './protocol';
 import { normalizePrivileges, onlyReads, PRESETS } from './provision';
@@ -33,6 +33,23 @@ describe('gateway protocol', () => {
     const got = [...s.push(all.subarray(3, 20)), ...s.push(all.subarray(20))];
     expect(got.map((p) => [p.seq, p.payload.length])).toEqual([[0, 5], [1, 300]]);
     expect(s.rest().length).toBe(0);
+  });
+
+  it('joins a long packet that comes in many pieces, and refuses one that is too long', () => {
+    const long = Buffer.alloc(70_000, 0x5a);
+    // The first packet is 98 bytes on the wire, so the next one's header straddles the 100-byte pieces
+    const all = Buffer.concat([encodePacket(0, Buffer.alloc(94)), encodePacket(5, long), encodePacket(6, Buffer.from('tail'))]);
+    const s = new PacketSplitter();
+    const got: Packet[] = [];
+    for (let i = 0; i < all.length; i += 100) got.push(...s.push(all.subarray(i, i + 100)));
+    expect(got.map((p) => [p.seq, p.payload.length])).toEqual([[0, 94], [5, 70_000], [6, 4]]);
+    expect(got[1].payload.equals(long)).toBe(true);
+    expect(got[2].payload.toString()).toBe('tail');
+    expect(s.rest().length).toBe(0);
+    // With a limit, as before a login
+    const small = new PacketSplitter(1000);
+    expect(() => small.push(encodePacket(0, Buffer.alloc(1001)))).toThrow(/longer than the 1000 allowed/);
+    expect(small.push(encodePacket(0, Buffer.alloc(1000)))).toHaveLength(1);
   });
 
   it('reads a client login packet', () => {
@@ -85,8 +102,12 @@ describe('gateway settings', () => {
   it('is off without a port, and requires TLS unless told otherwise', () => {
     expect(gatewayConfig({}).port).toBeNull();
     const c = gatewayConfig({ DB_GATEWAY_PORT: '3307', FRONTEND_URL: 'https://dbbackup.example.com' });
-    expect(c).toMatchObject({ port: 3307, bind: '0.0.0.0', publicHost: 'dbbackup.example.com', requireTls: true, logDays: 30 });
+    expect(c).toMatchObject({ port: 3307, bind: '0.0.0.0', publicHost: 'dbbackup.example.com', requireTls: true, logDays: 30, maxConnections: 500 });
     expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_REQUIRE_TLS: 'false' }).requireTls).toBe(false);
     expect(gatewayConfig({ DB_GATEWAY_PORT: '99999' }).port).toBeNull();
+    // The connection limit: set, or the default; never more than 5000
+    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '1200.7' }).maxConnections).toBe(1200);
+    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '0' }).maxConnections).toBe(500);
+    expect(gatewayConfig({ DB_GATEWAY_PORT: '3307', DB_GATEWAY_MAX_CONNECTIONS: '99999999' }).maxConnections).toBe(5000);
   });
 });

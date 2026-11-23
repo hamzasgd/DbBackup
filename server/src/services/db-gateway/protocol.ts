@@ -114,26 +114,59 @@ export function encodePacket(seq: number, payload: Buffer): Buffer {
   return Buffer.concat([head, payload]);
 }
 
-/** Splits a byte stream into packets. */
+/**
+ * Splits a byte stream into packets. The pieces of a packet that arrives in
+ * many small reads are kept aside and joined once, when it is whole: copying
+ * after every piece would cost about 96 GB of copying for one 16 MiB packet
+ * in 1460-byte pieces, all of it on the main thread.
+ */
 export class PacketSplitter {
-  private buf: Buffer = Buffer.alloc(0);
+  /** Pieces of the packet that is not whole yet */
+  private pieces: Buffer[] = [];
+  private size = 0;
+
+  constructor(private readonly maxLength: number = MAX_PAYLOAD) {}
 
   push(data: Buffer): Packet[] {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, data]) : data;
     const out: Packet[] = [];
-    while (this.buf.length >= 4) {
-      const len = this.buf.readUIntLE(0, 3);
-      if (this.buf.length < 4 + len) break;
-      out.push({ seq: this.buf[3], payload: this.buf.subarray(4, 4 + len) });
-      this.buf = this.buf.subarray(4 + len);
+    // Where the next packet starts in data
+    let at = 0;
+    for (;;) {
+      const have = this.size + data.length - at;
+      if (have < 4) break;
+      const len = this.byteAt(0, data, at) | (this.byteAt(1, data, at) << 8) | (this.byteAt(2, data, at) << 16);
+      if (len > this.maxLength) throw new Error(`a packet of ${len} bytes is longer than the ${this.maxLength} allowed`);
+      if (have < 4 + len) break;
+      // The pieces kept aside are already the first `size` bytes of this packet
+      const end = at + 4 + len - this.size;
+      const whole = this.size ? Buffer.concat([...this.pieces, data.subarray(at, end)]) : data.subarray(at, end);
+      this.pieces = [];
+      this.size = 0;
+      out.push({ seq: whole[3], payload: whole.subarray(4) });
+      at = end;
+    }
+    if (at < data.length) {
+      this.pieces.push(data.subarray(at));
+      this.size += data.length - at;
     }
     return out;
   }
 
+  /** Byte i of the packet that starts here: in the pieces kept aside first, then in data */
+  private byteAt(i: number, data: Buffer, at: number): number {
+    let n = i;
+    for (const p of this.pieces) {
+      if (n < p.length) return p[n];
+      n -= p.length;
+    }
+    return data[at + n];
+  }
+
   /** Bytes received after the last whole packet */
   rest(): Buffer {
-    const r = this.buf;
-    this.buf = Buffer.alloc(0);
+    const r = this.pieces.length === 1 ? this.pieces[0] : Buffer.concat(this.pieces);
+    this.pieces = [];
+    this.size = 0;
     return r;
   }
 }

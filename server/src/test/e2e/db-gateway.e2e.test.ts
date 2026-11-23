@@ -122,9 +122,11 @@ describe.skipIf(!MARIADB)('Database gateway (MySQL protocol)', () => {
   });
 
   it('works with the mysql command-line client, with either login method', async () => {
-    // Not execFileSync: the gateway runs in this process and must keep answering
+    // Not execFileSync for the queries: the gateway runs in this process and must keep answering.
+    // MariaDB's client has no --ssl-mode (it uses --ssl), and MySQL's has no --ssl
+    const tlsOption = /mariadb/i.test(execFileSync('mysql', ['--version'], { encoding: 'utf8' })) ? '--ssl' : '--ssl-mode=REQUIRED';
     const run = async (extra: string[]) => (await promisify(execFile)('mysql', [
-      '-h127.0.0.1', `-P${gw.port}`, '-uali', `-p${password}`, '--ssl-mode=REQUIRED', ...extra, db, '-N', '-e', 'SELECT name FROM t WHERE id = 1',
+      '-h127.0.0.1', `-P${gw.port}`, '-uali', `-p${password}`, tlsOption, ...extra, db, '-N', '-e', 'SELECT name FROM t WHERE id = 1',
     ], { encoding: 'utf8' })).stdout.trim();
     expect(await run([])).toBe('one');
     expect(await run(['--default-auth=mysql_native_password'])).toBe('one');
@@ -134,12 +136,16 @@ describe.skipIf(!MARIADB)('Database gateway (MySQL protocol)', () => {
     const a = await connect();
     const b = await connect();
     const id = a.threadId!;
-    const slow = a.query('SELECT SLEEP(20) s');
+    // The failure is caught from the start: on MariaDB the interrupted query fails while the KILL is still on its way
+    const slow = a.query('SELECT SLEEP(20) s').then(
+      ([rows]) => Number((rows as mysql2.RowDataPacket[])[0].s),
+      (e: Error) => e.message,
+    );
     await new Promise((r) => setTimeout(r, 500));
     await b.query(`KILL QUERY ${id}`);
     const started = Date.now();
     // MySQL returns 1 from an interrupted SLEEP, MariaDB reports the interruption as an error
-    const outcome = await slow.then(([rows]) => Number((rows as mysql2.RowDataPacket[])[0].s), (e: Error) => e.message);
+    const outcome = await slow;
     expect(Date.now() - started).toBeLessThan(5000);
     expect([1, 'Query execution was interrupted']).toContain(outcome);
     await a.end();

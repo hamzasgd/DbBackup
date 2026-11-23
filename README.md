@@ -316,6 +316,7 @@ Key variables (full annotated list in [`server/.env.example`](server/.env.exampl
 | `DB_GATEWAY_PORT` | Port of the database access gateway (unset = off) | — |
 | `DB_GATEWAY_TLS_CERT` / `DB_GATEWAY_TLS_KEY` | Certificate (full chain) and key for the gateway | — |
 | `DB_GATEWAY_PUBLIC_HOST` | Host name shown to people for connecting | host of `FRONTEND_URL` |
+| `DB_GATEWAY_MAX_CONNECTIONS` | The most gateway connections at once (logged in or not) | `500` |
 
 > Storage backends (S3 / Google Drive), notification channels, and the **backup encryption passphrase** are configured in the app's Settings UI — not env vars — and are stored encrypted in the database.
 
@@ -420,10 +421,13 @@ database, like a small [Teleport](https://goteleport.com/docs/enroll-resources/d
   only, or only some tables) and logs in as it, through the connection's SSH tunnel when it has one.
   The rights are enforced by the database itself; the gateway also refuses switching users,
   replication and server commands, and does not allow `LOAD DATA LOCAL`.
-- Every query is logged with the session (who, from where, which client) and kept
-  `DB_GATEWAY_LOG_DAYS` days.
+- The text of every query and prepared statement they send is logged with the session (who, from
+  where, which client) and kept `DB_GATEWAY_LOG_DAYS` days. The values bound to a prepared
+  statement are not logged.
 - Turning an access off, changing its rights, a new password or its end date ends its open
-  sessions at once. Removing it also drops its database user.
+  sessions at once, also for a login still in progress. Removing it also drops its database user,
+  so a connection with accesses on it cannot be deleted until they are removed. Suspending an
+  account ends the access it gave.
 - Write rights cannot be given on a write-protected connection, nor on the target of a running live
   sync (anything written there would be overwritten).
 - The connection's database user must be allowed to create users and to give the chosen rights
@@ -439,7 +443,8 @@ DB_GATEWAY_TLS_KEY=/www/server/panel/vhost/cert/dbbackup.example.com/privkey.pem
 
 (the paths above are where aaPanel keeps a site's Let's Encrypt certificate; renewals are picked up
 without a restart). Then allow the port in the server's firewall. Failed logins are limited per
-address (10 in 15 minutes).
+address (10 in 15 minutes), and at most `DB_GATEWAY_MAX_CONNECTIONS` connections (500 by default)
+are open at once, logged in or not.
 
 ### Storage quotas & connection limits
 

@@ -56,6 +56,10 @@ export interface GatewayOptions {
   /** TLS for clients; null while no certificate is set */
   secureContext: () => tls.SecureContext | null;
   requireTls: boolean;
+  /** The most connections at once, logged in or not (default 500). The gateway shares its process with the rest of DbBackup */
+  maxConnections?: number;
+  /** How long a client may take over its TLS handshake (default 10 seconds) */
+  tlsHandshakeTimeoutMs?: number;
   hooks: GatewayHooks;
 }
 
@@ -75,6 +79,19 @@ const ER_UNKNOWN = 1105;
 /** Failed logins allowed per address before it is shut out for a while */
 const MAX_FAILURES = 10;
 const FAILURE_WINDOW_MS = 15 * 60_000;
+/** Logins in progress at once from one address: a client opens a few connections, never dozens */
+const MAX_LOGINS_PER_ADDRESS = 20;
+/** The most connections at once unless set (DB_GATEWAY_MAX_CONNECTIONS) */
+const DEFAULT_MAX_CONNECTIONS = 500;
+const DEFAULT_TLS_HANDSHAKE_MS = 10_000;
+/** Login names are at most 32 characters when made; a longer one is refused without a lookup */
+const MAX_USERNAME = 64;
+
+/**
+ * Thrown by openBackend when the access stopped being usable since the login
+ * check: it gets the "access denied" answer, not "could not reach the database".
+ */
+export class AccessUnavailable extends Error {}
 
 /** "KILL [QUERY|CONNECTION] <id>", with the id the gateway gave the session */
 const KILL_RE = /^\s*KILL\s+(QUERY\s+|CONNECTION\s+)?(\d+)\s*;?\s*$/i;
@@ -86,6 +103,15 @@ export class GatewayServer {
   private failures = new Map<string, number[]>();
   /** The version clients are greeted with: the last one a database reported */
   private serverVersion = '8.0.40';
+  /** Connections not logged in yet: they hold no session, so stop() ends them itself */
+  private pending = new Set<net.Socket>();
+  /** Logins in progress, per address */
+  private logins = new Map<string, number>();
+  /** Logins in progress, per access: they count towards its connection limit */
+  private loggingIn = new Map<string, number>();
+  /** Counts, per access, how often its sessions were closed. A login still in progress compares it */
+  private epochs = new Map<string, number>();
+  private closeReasons = new Map<string, string>();
 
   constructor(private readonly o: GatewayOptions) {}
 
@@ -94,6 +120,8 @@ export class GatewayServer {
       const server = net.createServer((sock) => {
         this.handle(sock).catch(() => sock.destroy());
       });
+      // Beyond this the connection is closed at once: enough are left for the rest of DbBackup
+      server.maxConnections = this.o.maxConnections ?? DEFAULT_MAX_CONNECTIONS;
       server.once('error', reject);
       server.listen(this.o.port, this.o.host, () => {
         server.off('error', reject);
@@ -110,6 +138,8 @@ export class GatewayServer {
 
   async stop(): Promise<void> {
     for (const s of this.sessions.values()) s.close('The gateway is shutting down');
+    // Without this one silent client would keep the server from closing for good
+    for (const sock of this.pending) sock.destroy();
     await new Promise<void>((resolve) => (this.server ? this.server.close(() => resolve()) : resolve()));
     this.server = null;
   }
@@ -120,8 +150,16 @@ export class GatewayServer {
     return n;
   }
 
+  /** The accesses that have open sessions, for a sweep */
+  openAccounts(): string[] {
+    return [...new Set([...this.sessions.values()].map((s) => s.accountId))];
+  }
+
   /** End every session of an account (access turned off, changed or removed) */
   closeAccount(accountId: string, reason: string): number {
+    // A login still in progress must not start a session after this
+    this.epochs.set(accountId, (this.epochs.get(accountId) ?? 0) + 1);
+    this.closeReasons.set(accountId, reason);
     let n = 0;
     for (const s of this.sessions.values()) {
       if (s.accountId === accountId) {
@@ -130,6 +168,11 @@ export class GatewayServer {
       }
     }
     return n;
+  }
+
+  /** Why the access can no longer be used, if its sessions were closed since `epoch` */
+  private closedSince(accountId: string, epoch: number): string | null {
+    return (this.epochs.get(accountId) ?? 0) === epoch ? null : (this.closeReasons.get(accountId) ?? 'The access was changed');
   }
 
   closeSession(sessionId: string, reason: string): boolean {
@@ -160,6 +203,30 @@ export class GatewayServer {
     sock.setNoDelay(true);
     sock.setKeepAlive(true, 60_000);
     const ip = (sock.remoteAddress ?? '').replace(/^::ffff:/, '');
+    if ((this.logins.get(ip) ?? 0) >= MAX_LOGINS_PER_ADDRESS) {
+      // Before any greeting, as a full database answers. Nobody reads this socket, so an error must not go uncaught
+      sock.on('error', () => sock.destroy());
+      sock.write(encodePacket(0, buildErr(ER_CON_COUNT, '08004',
+        'Too many connections from this address are logging in to the DbBackup gateway at once. Try again in a moment.')), () => sock.end());
+      // Whatever it sends now is dropped, not kept
+      sock.resume();
+      setTimeout(() => sock.destroy(), 1000).unref();
+      return;
+    }
+    this.logins.set(ip, (this.logins.get(ip) ?? 0) + 1);
+    this.pending.add(sock);
+    sock.once('close', () => this.pending.delete(sock));
+    try {
+      await this.login(sock, ip);
+    } finally {
+      // Over once login() returns: the connection is a session now, or it is being closed
+      const n = (this.logins.get(ip) ?? 1) - 1;
+      if (n > 0) this.logins.set(ip, n);
+      else this.logins.delete(ip);
+    }
+  }
+
+  private async login(sock: net.Socket, ip: string): Promise<void> {
     const gatewayId = this.nextId++;
     const scramble = newScramble();
     const secureContext = this.o.secureContext();
@@ -170,6 +237,8 @@ export class GatewayServer {
     const refuse = (code: number, state: string, message: string) => {
       send(buildErr(code, state, message));
       ch.detach();
+      // The channel's error listener is gone with detach(): a reset in the second left must not go uncaught
+      stream.on('error', () => stream.destroy());
       stream.end();
       setTimeout(() => stream.destroy(), 1000).unref();
     };
@@ -194,8 +263,23 @@ export class GatewayServer {
         const secure = new tls.TLSSocket(raw as net.Socket, { isServer: true, secureContext });
         stream = secure;
         await new Promise<void>((resolve, reject) => {
-          secure.once('secure', () => resolve());
-          secure.once('error', reject);
+          // A client that starts TLS and then falls silent must not hold its connection open for good
+          const timer = setTimeout(
+            () => reject(new Error('the TLS handshake did not finish in time')),
+            this.o.tlsHandshakeTimeoutMs ?? DEFAULT_TLS_HANDSHAKE_MS,
+          );
+          const up = () => {
+            clearTimeout(timer);
+            secure.off('close', down);
+            resolve();
+          };
+          const down = () => {
+            clearTimeout(timer);
+            reject(new Error('the TLS connection was closed'));
+          };
+          secure.once('secure', up);
+          secure.once('error', down);
+          secure.once('close', down);
         });
         ch.use(secure);
         p = await ch.next();
@@ -210,6 +294,8 @@ export class GatewayServer {
       }
 
       // The password check. Clients that start with another method are asked to switch.
+      // Login names are at most 32 characters: a longer one belongs to nobody, and is neither looked up nor logged in full
+      if (hello.user.length > MAX_USERNAME) hello.user = `${hello.user.slice(0, MAX_USERNAME)}…`;
       const account = await this.o.hooks.findAccount(hello.user);
       let plugin = hello.authPlugin;
       let token = hello.authData;
@@ -241,49 +327,76 @@ export class GatewayServer {
         this.o.hooks.loginFailed?.(hello.user, ip, 'expired');
         return refuse(ER_ACCESS_DENIED, '28000', `Access for '${hello.user}' has expired`);
       }
-      if (this.activeSessions(account.id) >= account.maxConnections) {
+      // Logins still in progress count too, so parallel logins cannot get over the limit
+      if (this.activeSessions(account.id) + (this.loggingIn.get(account.id) ?? 0) >= account.maxConnections) {
         return refuse(ER_CON_COUNT, '08004', `'${hello.user}' already has ${account.maxConnections} open connection(s), the most allowed`);
       }
+      this.loggingIn.set(account.id, (this.loggingIn.get(account.id) ?? 0) + 1);
+      // Changes if the access is turned off, changed or removed while this login is still in progress
+      const epoch = this.epochs.get(account.id) ?? 0;
+      const ended = (): string | null => this.closedSince(account.id, epoch)
+        ?? (account.expiresAt && account.expiresAt.getTime() <= Date.now() ? 'Access has expired' : null);
+      try {
+        // Log in to the database with the same session flags the client chose
+        const clientCaps = hello.caps & (GATEWAY_CAPS | CLIENT.SSL);
+        let target: BackendTarget;
+        try {
+          target = await this.o.hooks.openBackend(account);
+        } catch (e) {
+          if (e instanceof AccessUnavailable) return refuse(ER_ACCESS_DENIED, '28000', `${(e as Error).message}: connect again`);
+          return refuse(2003, 'HY000', `The gateway could not reach the database: ${(e as Error).message}`);
+        }
+        const clientProgram = hello.attrs.program_name ?? hello.attrs._client_name ?? null;
+        let backend;
+        try {
+          backend = await loginBackend(target.socket, {
+            user: target.user,
+            password: target.password,
+            database: hello.database || account.database,
+            clientCaps,
+            charset: hello.charset,
+            maxPacket: hello.maxPacket,
+            tls: target.tls,
+            attrs: {
+              _client_name: 'DbBackup gateway',
+              program_name: `dbbackup-gateway (${account.username})`,
+              ...(clientProgram ? { gateway_client: clientProgram.slice(0, 64) } : {}),
+            },
+          });
+        } catch (e) {
+          target.release();
+          const be = e as BackendError;
+          return refuse(be.code ?? 2013, be.sqlState ?? 'HY000', be.message);
+        }
+        this.serverVersion = backend.serverVersion;
 
-      // Log in to the database with the same session flags the client chose
-      const clientCaps = hello.caps & (GATEWAY_CAPS | CLIENT.SSL);
-      let target: BackendTarget;
-      try {
-        target = await this.o.hooks.openBackend(account);
-      } catch (e) {
-        return refuse(2003, 'HY000', `The gateway could not reach the database: ${(e as Error).message}`);
-      }
-      const clientProgram = hello.attrs.program_name ?? hello.attrs._client_name ?? null;
-      let backend;
-      try {
-        backend = await loginBackend(target.socket, {
-          user: target.user,
-          password: target.password,
-          database: hello.database || account.database,
-          clientCaps,
-          charset: hello.charset,
-          maxPacket: hello.maxPacket,
-          tls: target.tls,
-          attrs: {
-            _client_name: 'DbBackup gateway',
-            program_name: `dbbackup-gateway (${account.username})`,
-            ...(clientProgram ? { gateway_client: clientProgram.slice(0, 64) } : {}),
-          },
+        // The access may have been turned off, changed or removed while the database was logging in: then there is no session
+        let sessionId = '';
+        let why = ended();
+        if (!why) {
+          sessionId = await this.o.hooks.sessionStarted({ accountId: account.id, clientIp: ip, clientProgram, serverVersion: backend.serverVersion });
+          why = ended();
+          if (why) this.o.hooks.sessionEnded(sessionId, { bytesIn: 0, bytesOut: 0, queries: 0, error: why });
+        }
+        if (why) {
+          backend.stream.destroy();
+          target.release();
+          return refuse(ER_ACCESS_DENIED, '28000', `${why}: connect again`);
+        }
+
+        send(backend.ok);
+        const clientLeft = ch.detach();
+        // From here on the session ends this connection itself
+        this.pending.delete(sock);
+        this.relay({
+          gatewayId, sessionId, account, client: stream, backend: backend.stream, backendThreadId: backend.threadId,
+          clientLeft, backendLeft: backend.leftover, release: target.release,
         });
-      } catch (e) {
-        target.release();
-        const be = e as BackendError;
-        return refuse(be.code ?? 2013, be.sqlState ?? 'HY000', be.message);
+      } finally {
+        const n = (this.loggingIn.get(account.id) ?? 1) - 1;
+        if (n > 0) this.loggingIn.set(account.id, n);
+        else this.loggingIn.delete(account.id);
       }
-      this.serverVersion = backend.serverVersion;
-
-      const sessionId = await this.o.hooks.sessionStarted({ accountId: account.id, clientIp: ip, clientProgram, serverVersion: backend.serverVersion });
-      send(backend.ok);
-      const clientLeft = ch.detach();
-      this.relay({
-        gatewayId, sessionId, account, client: stream, backend: backend.stream, backendThreadId: backend.threadId,
-        clientLeft, backendLeft: backend.leftover, release: target.release,
-      });
     } catch (e) {
       ch.detach();
       stream.destroy();
@@ -330,7 +443,9 @@ export class GatewayServer {
 
     // Client → database: packet by packet, so commands can be logged and some refused
     const splitter = new PacketSplitter();
+    // The last packet passed on was a full 16 MiB part: the next packet with the next number continues it
     let continuing = false;
+    let lastSeq = 0;
     const toBackend = (b: Buffer) => {
       if (!backend.write(b)) {
         client.pause();
@@ -340,12 +455,22 @@ export class GatewayServer {
     const fromClient = (d: Buffer) => {
       stats.bytesIn += d.length;
       for (const p of splitter.push(d)) {
-        const wasContinuing = continuing;
-        continuing = p.payload.length === MAX_PAYLOAD;
-        if (wasContinuing || p.seq !== 0 || p.payload.length === 0) {
+        // Only what follows a 16 MiB part that was passed on is "the rest of a packet". A refused command never
+        // reaches the database, so there is nothing of it to continue: the next packet is checked like any other
+        const rest = continuing && p.seq === ((lastSeq + 1) & 0xff);
+        continuing = false;
+        if (rest) {
+          toBackend(encodePacket(p.seq, p.payload));
+          continuing = p.payload.length === MAX_PAYLOAD;
+          lastSeq = p.seq;
+          continue;
+        }
+        if (p.payload.length === 0) {
           toBackend(encodePacket(p.seq, p.payload));
           continue;
         }
+        // Every other packet may start a command at the database, whatever its number (after long data the
+        // database answers nothing, so the next command does not start at 0): it gets the same checks
         const cmd = p.payload[0];
         if (BLOCKED_COMMANDS.has(cmd)) {
           this.o.hooks.query(sessionId, account.id, 'BLOCKED', `(protocol command 0x${cmd.toString(16)})`);
@@ -372,6 +497,8 @@ export class GatewayServer {
           }
         }
         toBackend(encodePacket(p.seq, payload));
+        continuing = p.payload.length === MAX_PAYLOAD;
+        lastSeq = p.seq;
         if (cmd === COM.QUIT) close();
       }
     };

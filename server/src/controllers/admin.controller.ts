@@ -5,6 +5,8 @@ import { AppError } from '../middleware/errorHandler';
 import { logAuditReq } from '../services/audit.service';
 import { getQuotaUsage } from '../services/quota.service';
 import { decryptIfPresent } from '../services/crypto.service';
+import { closeUserAccessSessions } from '../services/db-gateway/gateway.service';
+import { logger } from '../config/logger';
 
 /** All handlers sit behind `authenticate` + `requireAdmin`. */
 
@@ -231,6 +233,13 @@ export async function setUserStatus(req: AuthRequest, res: Response, next: NextF
       },
       select: { id: true, email: true, isActive: true },
     });
+
+    if (!isActive) {
+      // Database access given by this account must not outlive its login: end those sessions now (the gateway
+      // also refuses new ones, and its sweep ends any left within half a minute)
+      await closeUserAccessSessions(targetId, 'The account that gave this access was suspended')
+        .catch((err) => logger.warn(`Could not end database access sessions of suspended user ${targetId}:`, err));
+    }
 
     await logAuditReq(req, req.user!.userId, isActive ? 'ADMIN_REACTIVATE' : 'ADMIN_SUSPEND', 'user', {
       targetUserId: targetId,
